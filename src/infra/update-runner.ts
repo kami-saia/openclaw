@@ -738,6 +738,8 @@ export async function runGatewayUpdate(opts: UpdateRunnerOptions = {}): Promise<
 
     // Restore dist/control-ui/ to committed state to prevent dirty repo after update
     // (ui:build regenerates assets with new hashes, which would block future updates)
+    // PATCH: Skipped because dist/ is ignored in source builds
+    /*
     const restoreUiStep = await runStep(
       step(
         "restore control-ui",
@@ -746,6 +748,7 @@ export async function runGatewayUpdate(opts: UpdateRunnerOptions = {}): Promise<
       ),
     );
     steps.push(restoreUiStep);
+    */
 
     const doctorStep = await runStep(
       step(
