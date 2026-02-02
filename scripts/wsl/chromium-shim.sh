@@ -1,26 +1,42 @@
 #!/bin/bash
 # Chromium Shim for OpenClaw (WSL2 + WSLg Support)
-# Logs args and strips --headless to force UI visibility
+# Usage: Set browser.executablePath in openclaw.json to point to this script.
+#
+# Features:
+# 1. Ensures DISPLAY is set for WSLg visibility.
+# 2. Strips --headless args to force UI visibility (Workaround until core supports headless:false).
+# 3. Optional debug logging via DEBUG_SHIM=1.
 
+# Default logging to off
 LOGfile="/tmp/chromium-shim.log"
-echo "[$(date)] RAW ARGS: $@" >> "$LOGfile"
+
+log() {
+    if [ "${DEBUG_SHIM}" == "1" ]; then
+        echo "[$(date)] $@" >> "$LOGfile"
+    fi
+}
+
+log "RAW ARGS: $@"
 
 # Filter out headless arguments to force UI
 NEW_ARGS=()
 for arg in "$@"; do
     if [[ "$arg" == "--headless"* ]]; then
-        echo "  -> Stripping $arg" >> "$LOGfile"
+        log "  -> Stripping $arg"
         continue
     fi
     NEW_ARGS+=("$arg")
 done
 
-echo "  -> CLEAN ARGS: ${NEW_ARGS[@]}" >> "$LOGfile"
+log "  -> CLEAN ARGS: ${NEW_ARGS[@]}"
 
-# Force Display
-export DISPLAY=:0
+# Force Display if not present (Required for WSLg)
+if [ -z "$DISPLAY" ]; then
+    export DISPLAY=:0
+    log "  -> Setting DISPLAY=:0"
+fi
 
-# Execute Chromium with filtered args + standard flags
+# Execute Chromium with filtered args + standard sandbox flags for WSL
 exec /usr/bin/chromium-browser \
     --no-sandbox \
     --disable-setuid-sandbox \
