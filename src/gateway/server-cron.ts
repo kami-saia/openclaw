@@ -23,6 +23,7 @@ export function buildGatewayCronService(params: {
   cfg: ReturnType<typeof loadConfig>;
   deps: CliDeps;
   broadcast: (event: string, payload: unknown, opts?: { dropIfSlow?: boolean }) => void;
+  onWakeSession?: (sessionKey: string, reason: string) => void;
 }): GatewayCronState {
   const cronLogger = getChildLogger({ module: "cron" });
   const storePath = resolveCronStorePath(params.cfg.cron?.store);
@@ -58,6 +59,9 @@ export function buildGatewayCronService(params: {
         });
       }
       enqueueSystemEvent(text, { sessionKey });
+      if (opts?.wake && params.onWakeSession) {
+        params.onWakeSession(sessionKey, "cron:wake");
+      }
     },
     requestHeartbeatNow,
     runHeartbeatOnce: async (opts) => {
@@ -65,6 +69,7 @@ export function buildGatewayCronService(params: {
       return await runHeartbeatOnce({
         cfg: runtimeConfig,
         reason: opts?.reason,
+        prompt: opts?.prompt,
         deps: { ...params.deps, runtime: defaultRuntime },
       });
     },

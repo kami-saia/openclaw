@@ -168,16 +168,30 @@ export async function executeJob(
         return;
       }
       const targetKey = typeof job.sessionTarget === "object" ? job.sessionTarget.key : undefined;
-      state.deps.enqueueSystemEvent(text, { agentId: job.agentId, sessionKey: targetKey });
-      if (job.wakeMode === "now" && state.deps.runHeartbeatOnce) {
+      const shouldWake = job.wakeMode === "now";
+      state.deps.enqueueSystemEvent(text, {
+        agentId: job.agentId,
+        sessionKey: targetKey,
+        wake: shouldWake,
+      });
+      if (shouldWake && state.deps.runHeartbeatOnce) {
         const reason = `cron:${job.id}`;
+        // If we targeted a specific session and requested wake, enqueueSystemEvent (in impl)
+        // should have triggered the session wake.
+        // We still run the global heartbeat as a fallback or for main-lane jobs.
+
         const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
         const maxWaitMs = 2 * 60_000;
         const waitStartedAt = state.deps.nowMs();
 
         let heartbeatResult: HeartbeatRunResult;
         for (;;) {
-          heartbeatResult = await state.deps.runHeartbeatOnce({ reason });
+          // Pass the system event text as the prompt to force the agent to address it.
+          // This ensures watchdog/alert events aren't ignored as "heartbeat OK".
+          heartbeatResult = await state.deps.runHeartbeatOnce({
+            reason,
+            prompt: `SYSTEM EVENT: ${text}`,
+          });
           if (
             heartbeatResult.status !== "skipped" ||
             heartbeatResult.reason !== "requests-in-flight"

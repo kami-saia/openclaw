@@ -479,6 +479,7 @@ export async function runHeartbeatOnce(opts: {
   agentId?: string;
   heartbeat?: HeartbeatConfig;
   reason?: string;
+  prompt?: string;
   deps?: HeartbeatDeps;
 }): Promise<HeartbeatRunResult> {
   const cfg = opts.cfg ?? loadConfig();
@@ -546,7 +547,8 @@ export async function runHeartbeatOnce(opts: {
   const pendingEvents = isExecEvent ? peekSystemEvents(sessionKey) : [];
   const hasExecCompletion = pendingEvents.some((evt) => evt.includes("Exec finished"));
 
-  const prompt = hasExecCompletion ? EXEC_EVENT_PROMPT : resolveHeartbeatPrompt(cfg, heartbeat);
+  const prompt =
+    opts.prompt ?? (hasExecCompletion ? EXEC_EVENT_PROMPT : resolveHeartbeatPrompt(cfg, heartbeat));
   const ctx = {
     Body: prompt,
     From: sender,

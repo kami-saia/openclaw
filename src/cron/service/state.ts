@@ -24,9 +24,12 @@ export type CronServiceDeps = {
   log: Logger;
   storePath: string;
   cronEnabled: boolean;
-  enqueueSystemEvent: (text: string, opts?: { agentId?: string; sessionKey?: string }) => void;
+  enqueueSystemEvent: (
+    text: string,
+    opts?: { agentId?: string; sessionKey?: string; wake?: boolean },
+  ) => void;
   requestHeartbeatNow: (opts?: { reason?: string }) => void;
-  runHeartbeatOnce?: (opts?: { reason?: string }) => Promise<HeartbeatRunResult>;
+  runHeartbeatOnce?: (opts?: { reason?: string; prompt?: string }) => Promise<HeartbeatRunResult>;
   runIsolatedAgentJob: (params: { job: CronJob; message: string }) => Promise<{
     status: "ok" | "error" | "skipped";
     summary?: string;
