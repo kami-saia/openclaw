@@ -73,6 +73,8 @@ export function registerCronAddCommand(cron: Command) {
       .option("--wake <mode>", "Wake mode (now|next-heartbeat)", "next-heartbeat")
       .option("--at <when>", "Run once at time (ISO) or +duration (e.g. 20m)")
       .option("--every <duration>", "Run every duration (e.g. 10m, 1h)")
+      .option("--idle <timeout>", "Run after idle timeout (e.g. 2m)")
+      .option("--reset-on <sources>", "Reset idle timer on (user,agent)", "user,agent")
       .option("--cron <expr>", "Cron expression (5-field)")
       .option("--tz <iana>", "Timezone for cron expressions (IANA)", "")
       .option("--system-event <text>", "System event payload (main session)")
@@ -104,10 +106,13 @@ export function registerCronAddCommand(cron: Command) {
           const schedule = (() => {
             const at = typeof opts.at === "string" ? opts.at : "";
             const every = typeof opts.every === "string" ? opts.every : "";
+            const idle = typeof opts.idle === "string" ? opts.idle : "";
             const cronExpr = typeof opts.cron === "string" ? opts.cron : "";
-            const chosen = [Boolean(at), Boolean(every), Boolean(cronExpr)].filter(Boolean).length;
+            const chosen = [Boolean(at), Boolean(every), Boolean(idle), Boolean(cronExpr)].filter(
+              Boolean,
+            ).length;
             if (chosen !== 1) {
-              throw new Error("Choose exactly one schedule: --at, --every, or --cron");
+              throw new Error("Choose exactly one schedule: --at, --every, --idle, or --cron");
             }
             if (at) {
               const atMs = parseAtMs(at);
@@ -123,6 +128,21 @@ export function registerCronAddCommand(cron: Command) {
               }
               return { kind: "every" as const, everyMs };
             }
+            if (idle) {
+              const timeoutMs = parseDurationMs(idle);
+              if (!timeoutMs) {
+                throw new Error("Invalid --idle; use e.g. 2m, 1h");
+              }
+              const resetOnRaw = typeof opts.resetOn === "string" ? opts.resetOn : "user,agent";
+              const resetOn = resetOnRaw
+                .split(",")
+                .map((s) => s.trim())
+                .filter((s) => s === "user" || s === "agent") as ("user" | "agent")[];
+              if (resetOn.length === 0) {
+                throw new Error("Invalid --reset-on; must contain 'user' and/or 'agent'");
+              }
+              return { kind: "idle" as const, timeoutMs, resetOn };
+            }
             return {
               kind: "cron" as const,
               expr: cronExpr,
@@ -131,10 +151,18 @@ export function registerCronAddCommand(cron: Command) {
           })();
 
           const sessionTargetRaw = typeof opts.session === "string" ? opts.session : "main";
-          const sessionTarget = sessionTargetRaw.trim() || "main";
-          if (sessionTarget !== "main" && sessionTarget !== "isolated") {
-            throw new Error("--session must be main or isolated");
-          }
+          const sessionTarget = (() => {
+            const trimmed = sessionTargetRaw.trim() || "main";
+            if (trimmed === "main" || trimmed === "isolated") {
+              return trimmed;
+            }
+            // Treat as specific session key
+            return { key: trimmed };
+          })();
+
+          // Strict validation only if we know what kind of target it is
+          // If object (specific key), we can't easily validate payload type (could be main or isolated session).
+          // We'll relax the check for object targets.
 
           const wakeModeRaw = typeof opts.wake === "string" ? opts.wake : "next-heartbeat";
           const wakeMode = wakeModeRaw.trim() || "next-heartbeat";
