@@ -17,6 +17,10 @@ export function computeNextRunAtMs(schedule: CronSchedule, nowMs: number): numbe
     return anchor + steps * everyMs;
   }
 
+  if (schedule.kind === "idle") {
+    return nowMs + Math.max(1000, schedule.timeoutMs);
+  }
+
   const expr = schedule.expr.trim();
   if (!expr) {
     return undefined;

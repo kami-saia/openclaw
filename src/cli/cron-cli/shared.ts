@@ -148,6 +148,9 @@ const formatSchedule = (schedule: CronSchedule) => {
   if (schedule.kind === "every") {
     return `every ${formatDuration(schedule.everyMs)}`;
   }
+  if (schedule.kind === "idle") {
+    return `idle ${formatDuration(schedule.timeoutMs)}`;
+  }
   return schedule.tz ? `cron ${schedule.expr} @ ${schedule.tz}` : `cron ${schedule.expr}`;
 };
 
@@ -196,7 +199,8 @@ export function printCronList(jobs: CronJob[], runtime = defaultRuntime) {
     const lastLabel = pad(formatRelative(job.state.lastRunAtMs, now), CRON_LAST_PAD);
     const statusRaw = formatStatus(job);
     const statusLabel = pad(statusRaw, CRON_STATUS_PAD);
-    const targetLabel = pad(job.sessionTarget, CRON_TARGET_PAD);
+    const targetStr = typeof job.sessionTarget === "object" ? "session" : job.sessionTarget;
+    const targetLabel = pad(targetStr, CRON_TARGET_PAD);
     const agentLabel = pad(truncate(job.agentId ?? "default", CRON_AGENT_PAD), CRON_AGENT_PAD);
 
     const coloredStatus = (() => {
@@ -216,7 +220,7 @@ export function printCronList(jobs: CronJob[], runtime = defaultRuntime) {
     })();
 
     const coloredTarget =
-      job.sessionTarget === "isolated"
+      typeof job.sessionTarget !== "string" || job.sessionTarget === "isolated"
         ? colorize(rich, theme.accentBright, targetLabel)
         : colorize(rich, theme.accent, targetLabel);
     const coloredAgent = job.agentId

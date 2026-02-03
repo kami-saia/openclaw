@@ -1,6 +1,7 @@
 import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { initSubagentRegistry } from "../agents/subagent-registry.js";
 import { registerSkillsChangeListener } from "../agents/skills/refresh.js";
+import { onSessionTranscriptUpdate } from "../sessions/transcript-events.js";
 import type { CanvasHostServer } from "../canvas-host/server.js";
 import { type ChannelId, listChannelPlugins } from "../channels/plugins/index.js";
 import { createDefaultDeps } from "../cli/deps.js";
@@ -415,6 +416,18 @@ export async function startGatewayServer(
 
   void cron.start().catch((err) => logCron.error(`failed to start: ${String(err)}`));
 
+  const transcriptUnsub = onSessionTranscriptUpdate((evt) => {
+    if (evt.source && evt.sessionKey) {
+      logCron.debug("bumping idle jobs from transcript update", {
+        source: evt.source,
+        sessionKey: evt.sessionKey,
+      });
+      cron.bumpIdleJobs(evt.source, evt.sessionKey).catch((err) => {
+        logCron.warn("failed to bump idle jobs", { err });
+      });
+    }
+  });
+
   const execApprovalManager = new ExecApprovalManager();
   const execApprovalForwarder = createExecApprovalForwarder();
   const execApprovalHandlers = createExecApprovalHandlers(execApprovalManager, {
@@ -584,6 +597,7 @@ export async function startGatewayServer(
         skillsRefreshTimer = null;
       }
       skillsChangeUnsub();
+      transcriptUnsub();
       await close(opts);
     },
   };

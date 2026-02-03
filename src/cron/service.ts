@@ -45,4 +45,8 @@ export class CronService {
   wake(opts: { mode: "now" | "next-heartbeat"; text: string }) {
     return ops.wakeNow(this.state, opts);
   }
+
+  async bumpIdleJobs(source: "agent" | "user", sessionKey?: string) {
+    return await ops.bumpIdleJobs(this.state, source, sessionKey);
+  }
 }

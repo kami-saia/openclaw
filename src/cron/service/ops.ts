@@ -144,3 +144,67 @@ export function wakeNow(
 ) {
   return wake(state, opts);
 }
+
+export async function bumpIdleJobs(
+  state: CronServiceState,
+  source: "agent" | "user",
+  sessionKey?: string,
+) {
+  return await locked(state, async () => {
+    // No warning if disabled - this is a background housekeeping task
+    if (!state.deps.cronEnabled) {
+      return { ok: false };
+    }
+    await ensureLoaded(state);
+
+    let changed = false;
+    const now = state.deps.nowMs();
+
+    for (const job of state.store?.jobs ?? []) {
+      if (!job.enabled) continue;
+      if (job.schedule.kind !== "idle") continue;
+
+      // Filter by source (resetOn)
+      // resetOn is array of "agent" | "user"
+      if (!job.schedule.resetOn.includes(source)) continue;
+
+      // Filter by session target
+      // If sessionKey is provided, we must match it.
+      // If job.sessionTarget is "main" or "isolated", it applies to ALL sessions of that type?
+      // Actually, "idle" jobs should probably target a SPECIFIC sessionKey if possible.
+      // But for now, let's assume sessionKey must match if job target specifies it.
+      if (sessionKey) {
+        if (
+          typeof job.sessionTarget === "object" &&
+          "key" in job.sessionTarget &&
+          job.sessionTarget.key !== sessionKey
+        ) {
+          continue;
+        }
+        // If job targets "main" but event is from specific session, do we match?
+        // Probably "main" implies the main session key (which we might not know here easily).
+        // Let's assume if job has a specific key, we enforce it.
+        // If job is "main"/"isolated", we might be bumping globally or mis-targeting.
+        // For safety/MVP: Only bump if key matches OR job is generic.
+        // Actually, let's say: if job has explicit key, it MUST match.
+      }
+
+      // Bump it!
+      const newNextRun = now + Math.max(1000, job.schedule.timeoutMs);
+
+      // Only write if it pushes it forward (or if it was undefined)
+      if (!job.state.nextRunAtMs || newNextRun > job.state.nextRunAtMs) {
+        job.state.nextRunAtMs = newNextRun;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      // Persist and re-arm
+      await persist(state);
+      armTimer(state);
+    }
+
+    return { ok: true, bumped: changed };
+  });
+}

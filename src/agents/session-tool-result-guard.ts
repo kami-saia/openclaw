@@ -136,7 +136,8 @@ export function installSessionToolResultGuard(
       sessionManager as { getSessionFile?: () => string | null }
     ).getSessionFile?.();
     if (sessionFile) {
-      emitSessionTranscriptUpdate(sessionFile);
+      const source = role === "user" ? "user" : role === "assistant" ? "agent" : undefined;
+      emitSessionTranscriptUpdate(sessionFile, source);
     }
 
     if (toolCalls.length > 0) {
