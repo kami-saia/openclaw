@@ -24,7 +24,7 @@ export type CronServiceDeps = {
   log: Logger;
   storePath: string;
   cronEnabled: boolean;
-  enqueueSystemEvent: (text: string, opts?: { agentId?: string }) => void;
+  enqueueSystemEvent: (text: string, opts?: { agentId?: string; sessionKey?: string }) => void;
   requestHeartbeatNow: (opts?: { reason?: string }) => void;
   runHeartbeatOnce?: (opts?: { reason?: string }) => Promise<HeartbeatRunResult>;
   runIsolatedAgentJob: (params: { job: CronJob; message: string }) => Promise<{

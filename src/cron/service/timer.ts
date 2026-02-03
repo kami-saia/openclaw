@@ -151,19 +151,24 @@ export async function executeJob(
   };
 
   try {
-    if (job.sessionTarget === "main") {
+    const isSystemEventTarget =
+      job.sessionTarget === "main" ||
+      (typeof job.sessionTarget === "object" && job.sessionTarget !== null);
+
+    if (isSystemEventTarget) {
       const text = resolveJobPayloadTextForMain(job);
       if (!text) {
         const kind = job.payload.kind;
         await finish(
           "skipped",
           kind === "systemEvent"
-            ? "main job requires non-empty systemEvent text"
-            : 'main job requires payload.kind="systemEvent"',
+            ? "job requires non-empty systemEvent text"
+            : 'job requires payload.kind="systemEvent"',
         );
         return;
       }
-      state.deps.enqueueSystemEvent(text, { agentId: job.agentId });
+      const targetKey = typeof job.sessionTarget === "object" ? job.sessionTarget.key : undefined;
+      state.deps.enqueueSystemEvent(text, { agentId: job.agentId, sessionKey: targetKey });
       if (job.wakeMode === "now" && state.deps.runHeartbeatOnce) {
         const reason = `cron:${job.id}`;
         const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));

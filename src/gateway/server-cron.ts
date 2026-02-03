@@ -47,11 +47,16 @@ export function buildGatewayCronService(params: {
     storePath,
     cronEnabled,
     enqueueSystemEvent: (text, opts) => {
-      const { agentId, cfg: runtimeConfig } = resolveCronAgent(opts?.agentId);
-      const sessionKey = resolveAgentMainSessionKey({
-        cfg: runtimeConfig,
-        agentId,
-      });
+      let sessionKey: string;
+      if (opts?.sessionKey) {
+        sessionKey = opts.sessionKey;
+      } else {
+        const { agentId, cfg: runtimeConfig } = resolveCronAgent(opts?.agentId);
+        sessionKey = resolveAgentMainSessionKey({
+          cfg: runtimeConfig,
+          agentId,
+        });
+      }
       enqueueSystemEvent(text, { sessionKey });
     },
     requestHeartbeatNow,
