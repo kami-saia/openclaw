@@ -11,13 +11,12 @@ import {
   formatDocsLink,
   promptChannelAccessConfig,
 } from "openclaw/plugin-sdk";
-
-import { resolveMSTeamsCredentials } from "./token.js";
 import {
   parseMSTeamsTeamEntry,
   resolveMSTeamsChannelAllowlist,
   resolveMSTeamsUserAllowlist,
 } from "./resolve-allowlist.js";
+import { resolveMSTeamsCredentials } from "./token.js";
 
 const channel = "msteams" as const;
 
@@ -166,10 +165,12 @@ function setMSTeamsTeamsAllowlist(
   const teams: Record<string, { channels?: Record<string, unknown> }> = { ...baseTeams };
   for (const entry of entries) {
     const teamKey = entry.teamKey;
-    if (!teamKey) continue;
+    if (!teamKey) {
+      continue;
+    }
     const existing = teams[teamKey] ?? {};
     if (entry.channelKey) {
-      const channels = { ...(existing.channels ?? {}) };
+      const channels = { ...existing.channels };
       channels[entry.channelKey] = channels[entry.channelKey] ?? {};
       teams[teamKey] = { ...existing, channels };
     } else {
@@ -334,7 +335,9 @@ export const msteamsOnboardingAdapter: ChannelOnboardingAdapter = {
       ([teamKey, value]) => {
         const channels = value?.channels ?? {};
         const channelKeys = Object.keys(channels);
-        if (channelKeys.length === 0) return [teamKey];
+        if (channelKeys.length === 0) {
+          return [teamKey];
+        }
         return channelKeys.map((channelKey) => `${teamKey}/${channelKey}`);
       },
     );

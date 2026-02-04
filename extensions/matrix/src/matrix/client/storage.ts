@@ -2,9 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-
-import { getMatrixRuntime } from "../../runtime.js";
 import type { MatrixStoragePaths } from "./types.js";
+import { getMatrixRuntime } from "../../runtime.js";
 
 export const DEFAULT_ACCOUNT_KEY = "default";
 const STORAGE_META_FILENAME = "storage-meta.json";
@@ -21,7 +20,9 @@ function sanitizePathSegment(value: string): string {
 function resolveHomeserverKey(homeserver: string): string {
   try {
     const url = new URL(homeserver);
-    if (url.host) return sanitizePathSegment(url.host);
+    if (url.host) {
+      return sanitizePathSegment(url.host);
+    }
   } catch {
     // fall through
   }
@@ -84,8 +85,12 @@ export function maybeMigrateLegacyStorage(params: {
   const hasNewStorage =
     fs.existsSync(params.storagePaths.storagePath) || fs.existsSync(params.storagePaths.cryptoPath);
 
-  if (!hasLegacyStorage && !hasLegacyCrypto) return;
-  if (hasNewStorage) return;
+  if (!hasLegacyStorage && !hasLegacyCrypto) {
+    return;
+  }
+  if (hasNewStorage) {
+    return;
+  }
 
   fs.mkdirSync(params.storagePaths.rootDir, { recursive: true });
   if (hasLegacyStorage) {

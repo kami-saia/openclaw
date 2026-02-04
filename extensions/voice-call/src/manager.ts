@@ -3,8 +3,6 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-
-import { resolveUserPath } from "./utils.js";
 import type { CallMode, VoiceCallConfig } from "./config.js";
 import type { VoiceCallProvider } from "./providers/base.js";
 import {
@@ -17,11 +15,14 @@ import {
   TerminalStates,
   type TranscriptEntry,
 } from "./types.js";
+import { resolveUserPath } from "./utils.js";
 import { escapeXml, mapVoiceToPolly } from "./voice-mapping.js";
 
 function resolveDefaultStoreBase(config: VoiceCallConfig, storePath?: string): string {
   const rawOverride = storePath?.trim() || config.store?.trim();
-  if (rawOverride) return resolveUserPath(rawOverride);
+  if (rawOverride) {
+    return resolveUserPath(rawOverride);
+  }
   const preferred = path.join(os.homedir(), ".openclaw", "voice-calls");
   const candidates = [preferred].map((dir) => resolveUserPath(dir));
   const existing =
@@ -322,21 +323,27 @@ export class CallManager {
 
   private clearTranscriptWaiter(callId: CallId): void {
     const waiter = this.transcriptWaiters.get(callId);
-    if (!waiter) return;
+    if (!waiter) {
+      return;
+    }
     clearTimeout(waiter.timeout);
     this.transcriptWaiters.delete(callId);
   }
 
   private rejectTranscriptWaiter(callId: CallId, reason: string): void {
     const waiter = this.transcriptWaiters.get(callId);
-    if (!waiter) return;
+    if (!waiter) {
+      return;
+    }
     this.clearTranscriptWaiter(callId);
     waiter.reject(new Error(reason));
   }
 
   private resolveTranscriptWaiter(callId: CallId, transcript: string): void {
     const waiter = this.transcriptWaiters.get(callId);
-    if (!waiter) return;
+    if (!waiter) {
+      return;
+    }
     this.clearTranscriptWaiter(callId);
     waiter.resolve(transcript);
   }
@@ -520,7 +527,9 @@ export class CallManager {
   private findCall(callIdOrProviderCallId: string): CallRecord | undefined {
     // Try direct lookup by internal callId
     const directCall = this.activeCalls.get(callIdOrProviderCallId);
-    if (directCall) return directCall;
+    if (directCall) {
+      return directCall;
+    }
 
     // Try lookup by providerCallId
     return this.getCallByProviderCallId(callIdOrProviderCallId);
@@ -648,13 +657,19 @@ export class CallManager {
     const initialMessage =
       typeof call.metadata?.initialMessage === "string" ? call.metadata.initialMessage.trim() : "";
 
-    if (!initialMessage) return;
+    if (!initialMessage) {
+      return;
+    }
 
-    if (!this.provider || !call.providerCallId) return;
+    if (!this.provider || !call.providerCallId) {
+      return;
+    }
 
     // Twilio has provider-specific state for speaking (<Say> fallback) and can
     // fail for inbound calls; keep existing Twilio behavior unchanged.
-    if (this.provider.name === "twilio") return;
+    if (this.provider.name === "twilio") {
+      return;
+    }
 
     void this.speakInitialMessage(call.providerCallId);
   }
@@ -740,7 +755,9 @@ export class CallManager {
    */
   private transitionState(call: CallRecord, newState: CallState): void {
     // No-op for same state or already terminal
-    if (call.state === newState || TerminalStates.has(call.state)) return;
+    if (call.state === newState || TerminalStates.has(call.state)) {
+      return;
+    }
 
     // Terminal states can always be reached from non-terminal
     if (TerminalStates.has(newState)) {
@@ -797,7 +814,9 @@ export class CallManager {
    */
   private loadActiveCalls(): void {
     const logPath = path.join(this.storePath, "calls.jsonl");
-    if (!fs.existsSync(logPath)) return;
+    if (!fs.existsSync(logPath)) {
+      return;
+    }
 
     // Read file synchronously and parse lines
     const content = fs.readFileSync(logPath, "utf-8");
@@ -807,7 +826,9 @@ export class CallManager {
     const callMap = new Map<CallId, CallRecord>();
 
     for (const line of lines) {
-      if (!line.trim()) continue;
+      if (!line.trim()) {
+        continue;
+      }
       try {
         const call = CallRecordSchema.parse(JSON.parse(line));
         callMap.set(call.callId, call);

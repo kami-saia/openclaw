@@ -9,14 +9,15 @@ import {
   formatAllowlistMatchMeta,
   type HistoryEntry,
 } from "openclaw/plugin-sdk";
-
+import type { StoredConversationReference } from "../conversation-store.js";
+import type { MSTeamsMessageHandlerDeps } from "../monitor-handler.js";
+import type { MSTeamsTurnContext } from "../sdk-types.js";
 import {
   buildMSTeamsAttachmentPlaceholder,
   buildMSTeamsMediaPayload,
   type MSTeamsAttachmentLike,
   summarizeMSTeamsHtmlAttachments,
 } from "../attachments.js";
-import type { StoredConversationReference } from "../conversation-store.js";
 import { formatUnknownError } from "../errors.js";
 import {
   extractMSTeamsConversationMessageId,
@@ -25,7 +26,6 @@ import {
   stripMSTeamsMentionTags,
   wasMSTeamsBotMentioned,
 } from "../inbound.js";
-import type { MSTeamsMessageHandlerDeps } from "../monitor-handler.js";
 import {
   isMSTeamsGroupAllowed,
   resolveMSTeamsAllowlistMatch,
@@ -34,10 +34,9 @@ import {
 } from "../policy.js";
 import { extractMSTeamsPollVote } from "../polls.js";
 import { createMSTeamsReplyDispatcher } from "../reply-dispatcher.js";
-import { recordMSTeamsSentMessage, wasMSTeamsMessageSent } from "../sent-message-cache.js";
-import type { MSTeamsTurnContext } from "../sdk-types.js";
-import { resolveMSTeamsInboundMedia } from "./inbound-media.js";
 import { getMSTeamsRuntime } from "../runtime.js";
+import { recordMSTeamsSentMessage, wasMSTeamsMessageSent } from "../sent-message-cache.js";
+import { resolveMSTeamsInboundMedia } from "./inbound-media.js";
 
 export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
   const {
@@ -105,7 +104,9 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
       from: from?.id,
       conversation: conversation?.id,
     });
-    if (htmlSummary) log.debug("html attachment summary", htmlSummary);
+    if (htmlSummary) {
+      log.debug("html attachment summary", htmlSummary);
+    }
 
     if (!from?.id) {
       log.debug("skipping message without from.id");
@@ -402,6 +403,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
       maxBytes: mediaMaxBytes,
       tokenProvider,
       allowHosts: msteamsCfg?.mediaAllowHosts,
+      authAllowHosts: msteamsCfg?.mediaAuthAllowHosts,
       conversationType,
       conversationId,
       conversationMessageId: conversationMessageId ?? undefined,
@@ -520,7 +522,6 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
       markDispatchIdle();
       log.info("dispatch complete", { queuedFinal, counts });
 
-      const didSendReply = counts.final + counts.tool + counts.block > 0;
       if (!queuedFinal) {
         if (isRoomish && historyKey) {
           clearHistoryEntriesIfEnabled({
@@ -563,17 +564,25 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
       );
       const senderId =
         entry.context.activity.from?.aadObjectId ?? entry.context.activity.from?.id ?? "";
-      if (!senderId || !conversationId) return null;
+      if (!senderId || !conversationId) {
+        return null;
+      }
       return `msteams:${appId}:${conversationId}:${senderId}`;
     },
     shouldDebounce: (entry) => {
-      if (!entry.text.trim()) return false;
-      if (entry.attachments.length > 0) return false;
+      if (!entry.text.trim()) {
+        return false;
+      }
+      if (entry.attachments.length > 0) {
+        return false;
+      }
       return !core.channel.text.hasControlCommand(entry.text, cfg);
     },
     onFlush: async (entries) => {
       const last = entries.at(-1);
-      if (!last) return;
+      if (!last) {
+        return;
+      }
       if (entries.length === 1) {
         await handleTeamsMessageNow(last);
         return;
@@ -582,7 +591,9 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
         .map((entry) => entry.text)
         .filter(Boolean)
         .join("\n");
-      if (!combinedText.trim()) return;
+      if (!combinedText.trim()) {
+        return;
+      }
       const combinedRawText = entries
         .map((entry) => entry.rawText)
         .filter(Boolean)

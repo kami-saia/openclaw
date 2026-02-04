@@ -1,7 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-
 import type { OpenClawConfig, MarkdownTableMode } from "openclaw/plugin-sdk";
-
 import type { ResolvedZaloAccount } from "./accounts.js";
 import {
   ZaloApiError,
@@ -52,7 +50,9 @@ function logVerbose(core: ZaloCoreRuntime, runtime: ZaloRuntimeEnv, message: str
 }
 
 function isSenderAllowed(senderId: string, allowFrom: string[]): boolean {
-  if (allowFrom.includes("*")) return true;
+  if (allowFrom.includes("*")) {
+    return true;
+  }
   const normalizedSenderId = senderId.toLowerCase();
   return allowFrom.some((entry) => {
     const normalized = entry.toLowerCase().replace(/^(zalo|zl):/i, "");
@@ -108,7 +108,9 @@ const webhookTargets = new Map<string, WebhookTarget[]>();
 
 function normalizeWebhookPath(raw: string): string {
   const trimmed = raw.trim();
-  if (!trimmed) return "/";
+  if (!trimmed) {
+    return "/";
+  }
   const withSlash = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
   if (withSlash.length > 1 && withSlash.endsWith("/")) {
     return withSlash.slice(0, -1);
@@ -118,7 +120,9 @@ function normalizeWebhookPath(raw: string): string {
 
 function resolveWebhookPath(webhookPath?: string, webhookUrl?: string): string | null {
   const trimmedPath = webhookPath?.trim();
-  if (trimmedPath) return normalizeWebhookPath(trimmedPath);
+  if (trimmedPath) {
+    return normalizeWebhookPath(trimmedPath);
+  }
   if (webhookUrl?.trim()) {
     try {
       const parsed = new URL(webhookUrl);
@@ -153,7 +157,9 @@ export async function handleZaloWebhookRequest(
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = normalizeWebhookPath(url.pathname);
   const targets = webhookTargets.get(path);
-  if (!targets || targets.length === 0) return false;
+  if (!targets || targets.length === 0) {
+    return false;
+  }
 
   if (req.method !== "POST") {
     res.statusCode = 405;
@@ -238,7 +244,9 @@ function startPollingLoop(params: {
   const pollTimeout = 30;
 
   const poll = async () => {
-    if (isStopped() || abortSignal.aborted) return;
+    if (isStopped() || abortSignal.aborted) {
+      return;
+    }
 
     try {
       const response = await getUpdates(token, { timeout: pollTimeout }, fetcher);
@@ -285,7 +293,9 @@ async function processUpdate(
   fetcher?: ZaloFetch,
 ): Promise<void> {
   const { event_name, message } = update;
-  if (!message) return;
+  if (!message) {
+    return;
+  }
 
   switch (event_name) {
     case "message.text.received":
@@ -326,7 +336,9 @@ async function handleTextMessage(
   fetcher?: ZaloFetch,
 ): Promise<void> {
   const { text } = message;
-  if (!text?.trim()) return;
+  if (!text?.trim()) {
+    return;
+  }
 
   await processMessageWithPipeline({
     message,

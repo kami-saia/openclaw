@@ -1,5 +1,4 @@
 import { Type } from "@sinclair/typebox";
-
 import { runZca, parseJsonOutput } from "./zca.js";
 
 const ACTIONS = ["send", "image", "link", "friends", "groups", "me", "status"] as const;
@@ -62,7 +61,9 @@ export async function executeZalouserTool(
           throw new Error("threadId and message required for send action");
         }
         const args = ["msg", "send", params.threadId, params.message];
-        if (params.isGroup) args.push("-g");
+        if (params.isGroup) {
+          args.push("-g");
+        }
         const result = await runZca(args, { profile: params.profile });
         if (!result.ok) {
           throw new Error(result.stderr || "Failed to send message");
@@ -78,8 +79,12 @@ export async function executeZalouserTool(
           throw new Error("url required for image action");
         }
         const args = ["msg", "image", params.threadId, "-u", params.url];
-        if (params.message) args.push("-m", params.message);
-        if (params.isGroup) args.push("-g");
+        if (params.message) {
+          args.push("-m", params.message);
+        }
+        if (params.isGroup) {
+          args.push("-g");
+        }
         const result = await runZca(args, { profile: params.profile });
         if (!result.ok) {
           throw new Error(result.stderr || "Failed to send image");
@@ -92,7 +97,9 @@ export async function executeZalouserTool(
           throw new Error("threadId and url required for link action");
         }
         const args = ["msg", "link", params.threadId, params.url];
-        if (params.isGroup) args.push("-g");
+        if (params.isGroup) {
+          args.push("-g");
+        }
         const result = await runZca(args, { profile: params.profile });
         if (!result.ok) {
           throw new Error(result.stderr || "Failed to send link");
@@ -142,10 +149,12 @@ export async function executeZalouserTool(
         });
       }
 
-      default:
+      default: {
+        params.action satisfies never;
         throw new Error(
-          `Unknown action: ${params.action}. Valid actions: send, image, link, friends, groups, me, status`,
+          `Unknown action: ${String(params.action)}. Valid actions: send, image, link, friends, groups, me, status`,
         );
+      }
     }
   } catch (err) {
     return json({

@@ -2,10 +2,9 @@
  * Tests for Nostr Profile HTTP Handler
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
-
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   createNostrProfileHttpHandler,
   type NostrProfileHttpContext,
@@ -56,7 +55,6 @@ function createMockResponse(): ServerResponse & {
   _getData: () => string;
   _getStatusCode: () => number;
 } {
-  const socket = new Socket();
   const res = new ServerResponse({} as IncomingMessage);
 
   let data = "";
@@ -68,7 +66,10 @@ function createMockResponse(): ServerResponse & {
   };
 
   res.end = function (chunk?: unknown) {
-    if (chunk) data += String(chunk);
+    if (chunk) {
+      // eslint-disable-next-line @typescript-eslint/no-base-to-string
+      data += String(chunk);
+    }
     return this;
   };
 

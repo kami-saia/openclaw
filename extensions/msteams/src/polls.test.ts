@@ -1,10 +1,8 @@
+import type { PluginRuntime } from "openclaw/plugin-sdk";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-
 import { beforeEach, describe, expect, it } from "vitest";
-
-import type { PluginRuntime } from "openclaw/plugin-sdk";
 import { buildMSTeamsPollCard, createMSTeamsPollStoreFs, extractMSTeamsPollVote } from "./polls.js";
 import { setMSTeamsRuntime } from "./runtime.js";
 
@@ -12,7 +10,9 @@ const runtimeStub = {
   state: {
     resolveStateDir: (env: NodeJS.ProcessEnv = process.env, homedir?: () => string) => {
       const override = env.OPENCLAW_STATE_DIR?.trim() || env.OPENCLAW_STATE_DIR?.trim();
-      if (override) return override;
+      if (override) {
+        return override;
+      }
       const resolvedHome = homedir ? homedir() : os.homedir();
       return path.join(resolvedHome, ".openclaw");
     },

@@ -26,7 +26,6 @@ import {
   type ChannelPlugin,
   type ResolvedDiscordAccount,
 } from "openclaw/plugin-sdk";
-
 import { getDiscordRuntime } from "./runtime.js";
 
 const meta = getChatChannelMeta("discord");
@@ -331,7 +330,9 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
         cfg,
         accountId: account.accountId,
       });
-      if (!channelIds.length && unresolvedChannels === 0) return undefined;
+      if (!channelIds.length && unresolvedChannels === 0) {
+        return undefined;
+      }
       const botToken = account.token?.trim();
       if (!botToken) {
         return {
@@ -383,7 +384,9 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
           includeApplication: true,
         });
         const username = probe.ok ? probe.bot?.username?.trim() : null;
-        if (username) discordBotLabel = ` (@${username})`;
+        if (username) {
+          discordBotLabel = ` (@${username})`;
+        }
         ctx.setStatus({
           accountId: account.accountId,
           bot: probe.bot,
