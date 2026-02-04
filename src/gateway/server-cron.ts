@@ -48,10 +48,12 @@ export function buildGatewayCronService(params: {
     cronEnabled,
     enqueueSystemEvent: (text, opts) => {
       const { agentId, cfg: runtimeConfig } = resolveCronAgent(opts?.agentId);
-      const sessionKey = resolveAgentMainSessionKey({
-        cfg: runtimeConfig,
-        agentId,
-      });
+      const sessionKey =
+        opts?.sessionKey ??
+        resolveAgentMainSessionKey({
+          cfg: runtimeConfig,
+          agentId,
+        });
       enqueueSystemEvent(text, { sessionKey });
     },
     requestHeartbeatNow,
@@ -60,6 +62,8 @@ export function buildGatewayCronService(params: {
       return await runHeartbeatOnce({
         cfg: runtimeConfig,
         reason: opts?.reason,
+        prompt: opts?.prompt,
+        sessionKey: opts?.sessionKey,
         deps: { ...params.deps, runtime: defaultRuntime },
       });
     },

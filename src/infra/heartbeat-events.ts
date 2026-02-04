@@ -8,6 +8,8 @@ export type HeartbeatEventPayload = {
   durationMs?: number;
   hasMedia?: boolean;
   reason?: string;
+  /** The sessionKey associated with this heartbeat, if targeted. */
+  sessionKey?: string;
   /** The channel this heartbeat was sent to. */
   channel?: string;
   /** Whether the message was silently suppressed (showOk: false). */

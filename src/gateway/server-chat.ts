@@ -272,6 +272,9 @@ export function createAgentEventHandler({
       if (!isAborted && evt.stream === "assistant" && typeof evt.data?.text === "string") {
         emitChatDelta(sessionKey, clientRunId, evt.seq, evt.data.text);
       } else if (!isAborted && (lifecyclePhase === "end" || lifecyclePhase === "error")) {
+        // HACK: Ensure final NO_REPLY doesn't trigger "Idle Fox" by re-arming immediately
+        // Actually this is handled by server.impl.ts hooking into the event bus separately.
+        // We just need to make sure the event IS emitted.
         if (chatLink) {
           const finished = chatRunState.registry.shift(evt.runId);
           if (!finished) {

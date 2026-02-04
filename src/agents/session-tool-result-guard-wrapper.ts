@@ -48,6 +48,7 @@ export function guardSessionManager(
   const guard = installSessionToolResultGuard(sessionManager, {
     transformToolResultForPersistence: transform,
     allowSyntheticToolResults: opts?.allowSyntheticToolResults,
+    sessionKey: opts?.sessionKey,
   });
   (sessionManager as GuardedSessionManager).flushPendingToolResults = guard.flushPendingToolResults;
   return sessionManager as GuardedSessionManager;

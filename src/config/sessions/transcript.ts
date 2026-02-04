@@ -144,6 +144,6 @@ export async function appendAssistantMessageToSessionTranscript(params: {
     });
   }
 
-  emitSessionTranscriptUpdate(sessionFile);
+  emitSessionTranscriptUpdate(sessionFile, { source: "agent", sessionKey, text: mirrorText });
   return { ok: true, sessionFile };
 }

@@ -479,6 +479,8 @@ export async function runHeartbeatOnce(opts: {
   agentId?: string;
   heartbeat?: HeartbeatConfig;
   reason?: string;
+  prompt?: string;
+  sessionKey?: string;
   deps?: HeartbeatDeps;
 }): Promise<HeartbeatRunResult> {
   const cfg = opts.cfg ?? loadConfig();
@@ -508,7 +510,8 @@ export async function runHeartbeatOnce(opts: {
   // This saves API calls/costs when the file is effectively empty (only comments/headers).
   // EXCEPTION: Don't skip for exec events or custom prompts (watchdogs).
   const isExecEventReason = opts.reason === "exec-event";
-  const hasCustomPrompt = Boolean(opts.prompt);
+  const customPrompt = opts.prompt;
+  const hasCustomPrompt = Boolean(customPrompt);
   const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
   const heartbeatFilePath = path.join(workspaceDir, DEFAULT_HEARTBEAT_FILENAME);
   try {
@@ -530,7 +533,19 @@ export async function runHeartbeatOnce(opts: {
     // The LLM prompt says "if it exists" so this is expected behavior.
   }
 
-  const { entry, sessionKey, storePath } = resolveHeartbeatSession(cfg, agentId, heartbeat);
+  let entry, sessionKey, storePath;
+  if (opts.sessionKey) {
+    sessionKey = opts.sessionKey;
+    storePath = resolveStorePath(cfg.session?.store, { agentId });
+    const store = loadSessionStore(storePath);
+    entry = store[sessionKey];
+  } else {
+    const res = resolveHeartbeatSession(cfg, agentId, heartbeat);
+    entry = res.entry;
+    sessionKey = res.sessionKey;
+    storePath = res.storePath;
+  }
+
   const previousUpdatedAt = entry?.updatedAt;
   const delivery = resolveHeartbeatDeliveryTarget({ cfg, entry, heartbeat });
   const visibility =
@@ -551,7 +566,9 @@ export async function runHeartbeatOnce(opts: {
   const pendingEvents = isExecEvent ? peekSystemEvents(sessionKey) : [];
   const hasExecCompletion = pendingEvents.some((evt) => evt.includes("Exec finished"));
 
-  const prompt = hasExecCompletion ? EXEC_EVENT_PROMPT : resolveHeartbeatPrompt(cfg, heartbeat);
+  const prompt =
+    customPrompt ??
+    (hasExecCompletion ? EXEC_EVENT_PROMPT : resolveHeartbeatPrompt(cfg, heartbeat));
   const ctx = {
     Body: prompt,
     From: sender,

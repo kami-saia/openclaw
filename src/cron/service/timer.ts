@@ -151,7 +151,11 @@ export async function executeJob(
   };
 
   try {
-    if (job.sessionTarget === "main") {
+    const isMainOrTargeted =
+      job.sessionTarget === "main" ||
+      (typeof job.sessionTarget === "object" && Boolean(job.sessionTarget.key));
+
+    if (isMainOrTargeted) {
       const text = resolveJobPayloadTextForMain(job);
       if (!text) {
         const kind = job.payload.kind;
@@ -163,7 +167,11 @@ export async function executeJob(
         );
         return;
       }
-      state.deps.enqueueSystemEvent(text, { agentId: job.agentId });
+
+      const sessionKey = typeof job.sessionTarget === "object" ? job.sessionTarget.key : undefined;
+
+      state.deps.enqueueSystemEvent(text, { agentId: job.agentId, sessionKey });
+
       if (job.wakeMode === "now" && state.deps.runHeartbeatOnce) {
         const reason = `cron:${job.id}`;
         const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -172,7 +180,8 @@ export async function executeJob(
 
         let heartbeatResult: HeartbeatRunResult;
         for (;;) {
-          heartbeatResult = await state.deps.runHeartbeatOnce({ reason });
+          // Pass sessionKey to targeting specific session wake
+          heartbeatResult = await state.deps.runHeartbeatOnce({ reason, prompt: text, sessionKey });
           if (
             heartbeatResult.status !== "skipped" ||
             heartbeatResult.reason !== "requests-in-flight"

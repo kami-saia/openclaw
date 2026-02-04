@@ -18,7 +18,7 @@ import { logAcceptedEnvOption } from "../infra/env.js";
 import { applyPluginAutoEnable } from "../config/plugin-auto-enable.js";
 import { clearAgentRunContext, onAgentEvent } from "../infra/agent-events.js";
 import { onHeartbeatEvent } from "../infra/heartbeat-events.js";
-import { startHeartbeatRunner } from "../infra/heartbeat-runner.js";
+import { startHeartbeatRunner, runHeartbeatOnce } from "../infra/heartbeat-runner.js";
 import { getMachineDisplayName } from "../infra/machine-name.js";
 import { ensureOpenClawCliOnPath } from "../infra/path-env.js";
 import {
@@ -48,6 +48,8 @@ import { createExecApprovalForwarder } from "../infra/exec-approval-forwarder.js
 import type { startBrowserControlServerIfEnabled } from "./server-browser.js";
 import { createChannelManager } from "./server-channels.js";
 import { createAgentEventHandler } from "./server-chat.js";
+import { onSessionTranscriptUpdate } from "../sessions/transcript-events.js";
+import { ReplyChainEnforcer } from "../infra/reply-chain-enforcer.js";
 import { createGatewayCloseHandler } from "./server-close.js";
 import { buildGatewayCronService } from "./server-cron.js";
 import { applyGatewayLaneConcurrency } from "./server-lanes.js";
@@ -94,49 +96,14 @@ export type GatewayServer = {
 };
 
 export type GatewayServerOptions = {
-  /**
-   * Bind address policy for the Gateway WebSocket/HTTP server.
-   * - loopback: 127.0.0.1
-   * - lan: 0.0.0.0
-   * - tailnet: bind only to the Tailscale IPv4 address (100.64.0.0/10)
-   * - auto: prefer loopback, else LAN
-   */
   bind?: import("../config/config.js").GatewayBindMode;
-  /**
-   * Advanced override for the bind host, bypassing bind resolution.
-   * Prefer `bind` unless you really need a specific address.
-   */
   host?: string;
-  /**
-   * If false, do not serve the browser Control UI.
-   * Default: config `gateway.controlUi.enabled` (or true when absent).
-   */
   controlUiEnabled?: boolean;
-  /**
-   * If false, do not serve `POST /v1/chat/completions`.
-   * Default: config `gateway.http.endpoints.chatCompletions.enabled` (or false when absent).
-   */
   openAiChatCompletionsEnabled?: boolean;
-  /**
-   * If false, do not serve `POST /v1/responses` (OpenResponses API).
-   * Default: config `gateway.http.endpoints.responses.enabled` (or false when absent).
-   */
   openResponsesEnabled?: boolean;
-  /**
-   * Override gateway auth configuration (merges with config).
-   */
   auth?: import("../config/config.js").GatewayAuthConfig;
-  /**
-   * Override gateway Tailscale exposure configuration (merges with config).
-   */
   tailscale?: import("../config/config.js").GatewayTailscaleConfig;
-  /**
-   * Test-only: allow canvas host startup even when NODE_ENV/VITEST would disable it.
-   */
   allowCanvasHostInTests?: boolean;
-  /**
-   * Test-only: override the onboarding wizard runner.
-   */
   wizardRunner?: (
     opts: import("../commands/onboard-types.js").OnboardOptions,
     runtime: import("../runtime.js").RuntimeEnv,
@@ -148,7 +115,6 @@ export async function startGatewayServer(
   port = 18789,
   opts: GatewayServerOptions = {},
 ): Promise<GatewayServer> {
-  // Ensure all default port derivations (browser/canvas) see the actual runtime port.
   process.env.OPENCLAW_GATEWAY_PORT = String(port);
   logAcceptedEnvOption({
     key: "OPENCLAW_RAW_STREAM",
@@ -360,9 +326,6 @@ export async function startGatewayServer(
 
   setSkillsRemoteRegistry(nodeRegistry);
   void primeRemoteSkillsCache();
-  // Debounce skills-triggered node probes to avoid feedback loops and rapid-fire invokes.
-  // Skills changes can happen in bursts (e.g., file watcher events), and each probe
-  // takes time to complete. A 30-second delay ensures we batch changes together.
   let skillsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   const skillsRefreshDelayMs = 30_000;
   const skillsChangeUnsub = registerSkillsChangeListener((event) => {
@@ -396,6 +359,61 @@ export async function startGatewayServer(
     nodeSendToSession,
   });
 
+  // Initialize Reply Chain Enforcer
+  const replyEnforcer = new ReplyChainEnforcer(
+    {
+      enabled: cfgAtStart.cron?.enabled !== false,
+      timeoutMs: 30000,
+      prompt: "Reply Chain broken. Respond with NO_REPLY if done.",
+    },
+    {
+      nowMs: () => Date.now(),
+      runHeartbeatOnce: async (opts) => {
+        const runtimeConfig = loadConfig();
+        return await runHeartbeatOnce({
+          cfg: runtimeConfig,
+          reason: opts.reason,
+          prompt: opts.prompt,
+          sessionKey: opts.sessionKey,
+        });
+      },
+    },
+  );
+  replyEnforcer.start();
+
+  const transcriptUnsub = onSessionTranscriptUpdate((evt) => {
+    void cron.bumpIdleJobs(evt);
+    replyEnforcer.onTranscriptUpdate(evt);
+  });
+
+  const stallAgentEndUnsub = onAgentEvent((evt) => {
+    if (evt.stream === "lifecycle" && (evt.data?.phase === "end" || evt.data?.phase === "error")) {
+      const sessionKey = resolveSessionKeyForRun(evt.runId);
+      if (sessionKey) {
+        const chatLink = chatRunState.registry.peek(evt.runId);
+        const clientRunId = chatLink?.clientRunId ?? evt.runId;
+        const text = chatRunState.buffers.get(clientRunId)?.trim();
+
+        // UNCONDITIONAL DEBUG LOG
+        if (text) {
+          log.debug(
+            `[ReplyChainEnforcer] End Check. RunId: ${evt.runId}, ClientRunId: ${clientRunId}. EndsWithNR: ${text.endsWith("NO_REPLY")}`,
+          );
+        } else {
+          log.debug(
+            `[ReplyChainEnforcer] End Check. RunId: ${evt.runId}, ClientRunId: ${clientRunId}. Buffer EMPTY or Missing. Treating as Sign-off.`,
+          );
+        }
+
+        // Treat empty text (silent turn) or explicit NO_REPLY as sign-off
+        if (!text || text === "NO_REPLY" || text === "HEARTBEAT_OK" || text.endsWith("NO_REPLY")) {
+          replyEnforcer.onTranscriptUpdate({ sessionKey, source: "agent", text: "NO_REPLY" });
+        }
+        replyEnforcer.onAgentLifecycle({ sessionKey, phase: evt.data.phase as "end" | "error" });
+      }
+    }
+  });
+
   const agentUnsub = onAgentEvent(
     createAgentEventHandler({
       broadcast,
@@ -406,6 +424,15 @@ export async function startGatewayServer(
       clearAgentRunContext,
     }),
   );
+
+  const stallAgentStartUnsub = onAgentEvent((evt) => {
+    if (evt.stream === "lifecycle" && evt.data?.phase === "start") {
+      const sessionKey = resolveSessionKeyForRun(evt.runId);
+      if (sessionKey) {
+        replyEnforcer.onAgentLifecycle({ sessionKey, phase: "start" });
+      }
+    }
+  });
 
   const heartbeatUnsub = onHeartbeatEvent((evt) => {
     broadcast("heartbeat", evt, { dropIfSlow: true });
@@ -584,6 +611,10 @@ export async function startGatewayServer(
         skillsRefreshTimer = null;
       }
       skillsChangeUnsub();
+      transcriptUnsub();
+      stallAgentEndUnsub();
+      stallAgentStartUnsub();
+      replyEnforcer.stop();
       await close(opts);
     },
   };

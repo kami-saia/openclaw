@@ -59,6 +59,7 @@ export function installSessionToolResultGuard(
      * Defaults to true.
      */
     allowSyntheticToolResults?: boolean;
+    sessionKey?: string;
   },
 ): {
   flushPendingToolResults: () => void;
@@ -136,7 +137,7 @@ export function installSessionToolResultGuard(
       sessionManager as { getSessionFile?: () => string | null }
     ).getSessionFile?.();
     if (sessionFile) {
-      emitSessionTranscriptUpdate(sessionFile);
+      emitSessionTranscriptUpdate(sessionFile, { source: "user", sessionKey: opts?.sessionKey });
     }
 
     if (toolCalls.length > 0) {

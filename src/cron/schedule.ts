@@ -17,14 +17,19 @@ export function computeNextRunAtMs(schedule: CronSchedule, nowMs: number): numbe
     return anchor + steps * everyMs;
   }
 
-  const expr = schedule.expr.trim();
-  if (!expr) {
-    return undefined;
+  if (schedule.kind === "cron") {
+    const expr = schedule.expr.trim();
+    if (!expr) {
+      return undefined;
+    }
+    const cron = new Cron(expr, {
+      timezone: schedule.tz?.trim() || undefined,
+      catch: false,
+    });
+    const next = cron.nextRun(new Date(nowMs));
+    return next ? next.getTime() : undefined;
   }
-  const cron = new Cron(expr, {
-    timezone: schedule.tz?.trim() || undefined,
-    catch: false,
-  });
-  const next = cron.nextRun(new Date(nowMs));
-  return next ? next.getTime() : undefined;
+
+  // schedule.kind === "idle"
+  return nowMs + Math.max(0, schedule.timeoutMs);
 }

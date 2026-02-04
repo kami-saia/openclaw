@@ -3,9 +3,15 @@ import type { ChannelId } from "../channels/plugins/types.js";
 export type CronSchedule =
   | { kind: "at"; atMs: number }
   | { kind: "every"; everyMs: number; anchorMs?: number }
-  | { kind: "cron"; expr: string; tz?: string };
+  | { kind: "cron"; expr: string; tz?: string }
+  | {
+      kind: "idle";
+      timeoutMs: number;
+      resetOn?: ("user" | "agent")[];
+      stopOn?: ("user" | "agent")[];
+    };
 
-export type CronSessionTarget = "main" | "isolated";
+export type CronSessionTarget = "main" | "isolated" | { key: string };
 export type CronWakeMode = "next-heartbeat" | "now";
 
 export type CronMessageChannel = ChannelId | "last";

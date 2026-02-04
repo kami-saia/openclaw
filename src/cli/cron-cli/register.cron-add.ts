@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import type { CronJob } from "../../cron/types.js";
+import type { CronJob, CronSessionTarget } from "../../cron/types.js";
 import { danger } from "../../globals.js";
 import { defaultRuntime } from "../../runtime.js";
 import { sanitizeAgentId } from "../../routing/session-key.js";
@@ -73,6 +73,9 @@ export function registerCronAddCommand(cron: Command) {
       .option("--wake <mode>", "Wake mode (now|next-heartbeat)", "next-heartbeat")
       .option("--at <when>", "Run once at time (ISO) or +duration (e.g. 20m)")
       .option("--every <duration>", "Run every duration (e.g. 10m, 1h)")
+      .option("--idle <duration>", "Run when idle for duration (e.g. 2m)")
+      .option("--reset-on <sources>", "Reset idle timer on (user,agent) - comma sep", "user,agent")
+      .option("--stop-on <sources>", "Stop idle watchdog on (user,agent) - comma sep")
       .option("--cron <expr>", "Cron expression (5-field)")
       .option("--tz <iana>", "Timezone for cron expressions (IANA)", "")
       .option("--system-event <text>", "System event payload (main session)")
@@ -104,10 +107,13 @@ export function registerCronAddCommand(cron: Command) {
           const schedule = (() => {
             const at = typeof opts.at === "string" ? opts.at : "";
             const every = typeof opts.every === "string" ? opts.every : "";
+            const idle = typeof opts.idle === "string" ? opts.idle : "";
             const cronExpr = typeof opts.cron === "string" ? opts.cron : "";
-            const chosen = [Boolean(at), Boolean(every), Boolean(cronExpr)].filter(Boolean).length;
+            const chosen = [Boolean(at), Boolean(every), Boolean(idle), Boolean(cronExpr)].filter(
+              Boolean,
+            ).length;
             if (chosen !== 1) {
-              throw new Error("Choose exactly one schedule: --at, --every, or --cron");
+              throw new Error("Choose exactly one schedule: --at, --every, --idle, or --cron");
             }
             if (at) {
               const atMs = parseAtMs(at);
@@ -123,6 +129,27 @@ export function registerCronAddCommand(cron: Command) {
               }
               return { kind: "every" as const, everyMs };
             }
+            if (idle) {
+              const timeoutMs = parseDurationMs(idle);
+              if (!timeoutMs) {
+                throw new Error("Invalid --idle; use e.g. 2m, 30s");
+              }
+              const resetOnRaw = typeof opts.resetOn === "string" ? opts.resetOn : "user,agent";
+              const resetOn = resetOnRaw
+                .split(",")
+                .map((s) => s.trim())
+                .filter((s) => s === "user" || s === "agent") as ("user" | "agent")[];
+
+              const stopOnRaw = typeof opts.stopOn === "string" ? opts.stopOn : "";
+              const stopOn = stopOnRaw
+                ? (stopOnRaw
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter((s) => s === "user" || s === "agent") as ("user" | "agent")[])
+                : undefined;
+
+              return { kind: "idle" as const, timeoutMs, resetOn, stopOn };
+            }
             return {
               kind: "cron" as const,
               expr: cronExpr,
@@ -131,9 +158,13 @@ export function registerCronAddCommand(cron: Command) {
           })();
 
           const sessionTargetRaw = typeof opts.session === "string" ? opts.session : "main";
-          const sessionTarget = sessionTargetRaw.trim() || "main";
-          if (sessionTarget !== "main" && sessionTarget !== "isolated") {
-            throw new Error("--session must be main or isolated");
+          let sessionTarget: CronSessionTarget = "main";
+          if (sessionTargetRaw === "isolated") {
+            sessionTarget = "isolated";
+          } else if (sessionTargetRaw.startsWith("session:")) {
+            sessionTarget = { key: sessionTargetRaw.slice("session:".length) };
+          } else if (sessionTargetRaw !== "main") {
+            throw new Error("--session must be main, isolated, or session:<key>");
           }
 
           const wakeModeRaw = typeof opts.wake === "string" ? opts.wake : "next-heartbeat";
@@ -178,6 +209,13 @@ export function registerCronAddCommand(cron: Command) {
 
           if (sessionTarget === "main" && payload.kind !== "systemEvent") {
             throw new Error("Main jobs require --system-event (systemEvent).");
+          }
+          if (
+            typeof sessionTarget === "object" &&
+            sessionTarget.key &&
+            payload.kind !== "systemEvent"
+          ) {
+            throw new Error("Targeted session jobs require --system-event.");
           }
           if (sessionTarget === "isolated" && payload.kind !== "agentTurn") {
             throw new Error("Isolated jobs require --message (agentTurn).");

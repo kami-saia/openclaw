@@ -85,7 +85,7 @@ const CRON_STATUS_PAD = 9;
 const CRON_TARGET_PAD = 9;
 const CRON_AGENT_PAD = 10;
 
-const pad = (value: string, width: number) => value.padEnd(width);
+const pad = (value: unknown, width: number) => String(value ?? "").padEnd(width);
 
 const truncate = (value: string, width: number) => {
   if (value.length <= width) {
@@ -148,7 +148,13 @@ const formatSchedule = (schedule: CronSchedule) => {
   if (schedule.kind === "every") {
     return `every ${formatDuration(schedule.everyMs)}`;
   }
-  return schedule.tz ? `cron ${schedule.expr} @ ${schedule.tz}` : `cron ${schedule.expr}`;
+  if (schedule.kind === "idle") {
+    return `idle ${formatDuration(schedule.timeoutMs)}`;
+  }
+  if (schedule.kind === "cron") {
+    return schedule.tz ? `cron ${schedule.expr} @ ${schedule.tz}` : `cron ${schedule.expr}`;
+  }
+  return "unknown";
 };
 
 const formatStatus = (job: CronJob) => {
