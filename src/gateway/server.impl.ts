@@ -395,19 +395,27 @@ export async function startGatewayServer(
         const text = chatRunState.buffers.get(clientRunId)?.trim();
 
         // UNCONDITIONAL DEBUG LOG
+        /*
         if (text) {
           log.debug(
-            `[ReplyChainEnforcer] End Check. RunId: ${evt.runId}, ClientRunId: ${clientRunId}. EndsWithNR: ${text.endsWith("NO_REPLY")}`,
+            `[ReplyChainEnforcer] End Check. RunId: ${evt.runId}, ClientRunId: ${clientRunId}. Content: "${text.substring(0, 200)}". EndsWithNR: ${text.endsWith("NO_REPLY")}`,
           );
         } else {
           log.debug(
-            `[ReplyChainEnforcer] End Check. RunId: ${evt.runId}, ClientRunId: ${clientRunId}. Buffer EMPTY or Missing. Treating as Sign-off.`,
+            `[ReplyChainEnforcer] End Check. RunId: ${evt.runId}, ClientRunId: ${clientRunId}. Buffer EMPTY or Missing.`,
           );
         }
+        */
 
-        // Treat empty text (silent turn) or explicit NO_REPLY as sign-off
+        // Treat empty text (silent turn) or explicit NO_REPLY as sign-off.
+        // NOTE: NO_REPLY is often stripped by the runtime, resulting in an empty buffer.
+        // We must accept empty text as sign-off to support NO_REPLY, even though it risks masking silent failures.
         if (!text || text === "NO_REPLY" || text === "HEARTBEAT_OK" || text.endsWith("NO_REPLY")) {
           replyEnforcer.onTranscriptUpdate({ sessionKey, source: "agent", text: "NO_REPLY" });
+        } else {
+          log.warn(
+            `[ReplyChainEnforcer] Sign-off Check FAILED. Text content found: "${text?.substring(0, 100)}" (Len: ${text?.length}). Chain remains ARMED.`,
+          );
         }
         replyEnforcer.onAgentLifecycle({ sessionKey, phase: evt.data.phase as "end" | "error" });
       }
