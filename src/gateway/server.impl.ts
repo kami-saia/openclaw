@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import type { CanvasHostServer } from "../canvas-host/server.js";
 import type { PluginServicesHandle } from "../plugins/services.js";
@@ -20,6 +21,7 @@ import {
   writeConfigFile,
 } from "../config/config.js";
 import { applyPluginAutoEnable } from "../config/plugin-auto-enable.js";
+import { loadSessionStore, resolveStorePath } from "../config/sessions.js";
 import { clearAgentRunContext, onAgentEvent } from "../infra/agent-events.js";
 import {
   ensureControlUiAssetsBuilt,
@@ -429,8 +431,79 @@ export async function startGatewayServer(
   );
   replyEnforcer.start();
 
+  const sessionIdToKey = new Map<string, string>();
+  const resolveKeyFromId = (id: string) => {
+    if (sessionIdToKey.has(id)) return sessionIdToKey.get(id)!;
+
+    // Resolve directly from store to get the FULL key (with agent: prefix)
+    const cfg = loadConfig();
+    const storePath = resolveStorePath(cfg.session?.store);
+    const store = loadSessionStore(storePath);
+    const found = Object.entries(store).find(([, entry]) => entry?.sessionId === id);
+    const fullKey = found?.[0];
+
+    if (fullKey) {
+      sessionIdToKey.set(id, fullKey);
+      return fullKey;
+    }
+
+    // Fallback to run-based resolution (might be stripped, but better than nothing)
+    const resolved = resolveSessionKeyForRun(id);
+    if (resolved) {
+      // If resolveSessionKeyForRun returned a stripped key, we might be in trouble,
+      // but it's a fallback.
+      sessionIdToKey.set(id, resolved);
+      return resolved;
+    }
+    return undefined;
+  };
+
   const transcriptUnsub = onSessionTranscriptUpdate((evt) => {
-    replyEnforcer.onTranscriptUpdate(evt);
+    try {
+      if (!fs.existsSync(evt.sessionFile)) return;
+
+      const content = fs.readFileSync(evt.sessionFile, "utf-8");
+      const lines = content.trim().split("\n");
+      if (lines.length === 0) return;
+
+      const lastLine = lines[lines.length - 1];
+      const entry = JSON.parse(lastLine);
+
+      // Extract sessionId from filename
+      const filename = path.basename(evt.sessionFile);
+      const sessionId = filename.replace(/\.jsonl$/, "").replace(/\.json$/, "");
+
+      // Resolve proper SessionKey
+      const sessionKey = resolveKeyFromId(sessionId) ?? sessionId;
+
+      const msg = entry.message || {};
+      const role = msg.role;
+      let text = "";
+
+      if (Array.isArray(msg.content)) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        text = msg.content
+          .filter((c: any) => c.type === "text")
+          .map((c: any) => c.text)
+          .join("\n");
+      } else if (typeof msg.content === "string") {
+        text = msg.content;
+      }
+
+      let source: "user" | "agent" | undefined;
+      if (role === "user") source = "user";
+      else if (role === "assistant") source = "agent";
+
+      if (source && sessionKey) {
+        replyEnforcer.onTranscriptUpdate({
+          sessionKey,
+          source,
+          text,
+        });
+      }
+    } catch (err) {
+      log.warn("Failed to process transcript update", { file: evt.sessionFile, err });
+    }
   });
 
   const stallAgentEndUnsub = onAgentEvent((evt) => {
