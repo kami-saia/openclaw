@@ -4,12 +4,11 @@ export type HeartbeatEventPayload = {
   ts: number;
   status: "sent" | "ok-empty" | "ok-token" | "skipped" | "failed";
   to?: string;
+  accountId?: string;
   preview?: string;
   durationMs?: number;
   hasMedia?: boolean;
   reason?: string;
-  /** The sessionKey associated with this heartbeat, if targeted. */
-  sessionKey?: string;
   /** The channel this heartbeat was sent to. */
   channel?: string;
   /** Whether the message was silently suppressed (showOk: false). */

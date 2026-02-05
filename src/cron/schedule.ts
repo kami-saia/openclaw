@@ -1,9 +1,14 @@
 import { Cron } from "croner";
 import type { CronSchedule } from "./types.js";
+import { parseAbsoluteTimeMs } from "./parse.js";
 
 export function computeNextRunAtMs(schedule: CronSchedule, nowMs: number): number | undefined {
   if (schedule.kind === "at") {
-    return schedule.atMs > nowMs ? schedule.atMs : undefined;
+    const atMs = parseAbsoluteTimeMs(schedule.at);
+    if (atMs === null) {
+      return undefined;
+    }
+    return atMs > nowMs ? atMs : undefined;
   }
 
   if (schedule.kind === "every") {
@@ -17,19 +22,14 @@ export function computeNextRunAtMs(schedule: CronSchedule, nowMs: number): numbe
     return anchor + steps * everyMs;
   }
 
-  if (schedule.kind === "cron") {
-    const expr = schedule.expr.trim();
-    if (!expr) {
-      return undefined;
-    }
-    const cron = new Cron(expr, {
-      timezone: schedule.tz?.trim() || undefined,
-      catch: false,
-    });
-    const next = cron.nextRun(new Date(nowMs));
-    return next ? next.getTime() : undefined;
+  const expr = schedule.expr.trim();
+  if (!expr) {
+    return undefined;
   }
-
-  // schedule.kind === "idle"
-  return nowMs + Math.max(0, schedule.timeoutMs);
+  const cron = new Cron(expr, {
+    timezone: schedule.tz?.trim() || undefined,
+    catch: false,
+  });
+  const next = cron.nextRun(new Date(nowMs));
+  return next ? next.getTime() : undefined;
 }

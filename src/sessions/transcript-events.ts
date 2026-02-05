@@ -1,8 +1,5 @@
-export type SessionTranscriptUpdate = {
+type SessionTranscriptUpdate = {
   sessionFile: string;
-  source?: "agent" | "user";
-  sessionKey?: string;
-  text?: string;
 };
 
 type SessionTranscriptListener = (update: SessionTranscriptUpdate) => void;
@@ -16,20 +13,12 @@ export function onSessionTranscriptUpdate(listener: SessionTranscriptListener): 
   };
 }
 
-export function emitSessionTranscriptUpdate(
-  sessionFile: string,
-  opts?: { source?: "agent" | "user"; sessionKey?: string; text?: string },
-): void {
+export function emitSessionTranscriptUpdate(sessionFile: string): void {
   const trimmed = sessionFile.trim();
   if (!trimmed) {
     return;
   }
-  const update: SessionTranscriptUpdate = {
-    sessionFile: trimmed,
-    source: opts?.source,
-    sessionKey: opts?.sessionKey,
-    text: opts?.text,
-  };
+  const update = { sessionFile: trimmed };
   for (const listener of SESSION_TRANSCRIPT_LISTENERS) {
     listener(update);
   }

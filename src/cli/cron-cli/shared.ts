@@ -1,9 +1,9 @@
+import type { CronJob, CronSchedule } from "../../cron/types.js";
+import type { GatewayRpcOpts } from "../gateway-rpc.js";
 import { listChannelPlugins } from "../../channels/plugins/index.js";
 import { parseAbsoluteTimeMs } from "../../cron/parse.js";
-import type { CronJob, CronSchedule } from "../../cron/types.js";
 import { defaultRuntime } from "../../runtime.js";
 import { colorize, isRich, theme } from "../../terminal/theme.js";
-import type { GatewayRpcOpts } from "../gateway-rpc.js";
 import { callGatewayFromCli } from "../gateway-rpc.js";
 
 export const getCronChannelOptions = () =>
@@ -60,18 +60,18 @@ export function parseDurationMs(input: string): number | null {
   return Math.floor(n * factor);
 }
 
-export function parseAtMs(input: string): number | null {
+export function parseAt(input: string): string | null {
   const raw = input.trim();
   if (!raw) {
     return null;
   }
   const absolute = parseAbsoluteTimeMs(raw);
-  if (absolute) {
-    return absolute;
+  if (absolute !== null) {
+    return new Date(absolute).toISOString();
   }
   const dur = parseDurationMs(raw);
-  if (dur) {
-    return Date.now() + dur;
+  if (dur !== null) {
+    return new Date(Date.now() + dur).toISOString();
   }
   return null;
 }
@@ -85,7 +85,7 @@ const CRON_STATUS_PAD = 9;
 const CRON_TARGET_PAD = 9;
 const CRON_AGENT_PAD = 10;
 
-const pad = (value: unknown, width: number) => String(value ?? "").padEnd(width);
+const pad = (value: string, width: number) => value.padEnd(width);
 
 const truncate = (value: string, width: number) => {
   if (value.length <= width) {
@@ -97,13 +97,14 @@ const truncate = (value: string, width: number) => {
   return `${value.slice(0, width - 3)}...`;
 };
 
-const formatIsoMinute = (ms: number) => {
-  const d = new Date(ms);
+const formatIsoMinute = (iso: string) => {
+  const parsed = parseAbsoluteTimeMs(iso);
+  const d = new Date(parsed ?? NaN);
   if (Number.isNaN(d.getTime())) {
     return "-";
   }
-  const iso = d.toISOString();
-  return `${iso.slice(0, 10)} ${iso.slice(11, 16)}Z`;
+  const isoStr = d.toISOString();
+  return `${isoStr.slice(0, 10)} ${isoStr.slice(11, 16)}Z`;
 };
 
 const formatDuration = (ms: number) => {
@@ -143,18 +144,12 @@ const formatRelative = (ms: number | null | undefined, nowMs: number) => {
 
 const formatSchedule = (schedule: CronSchedule) => {
   if (schedule.kind === "at") {
-    return `at ${formatIsoMinute(schedule.atMs)}`;
+    return `at ${formatIsoMinute(schedule.at)}`;
   }
   if (schedule.kind === "every") {
     return `every ${formatDuration(schedule.everyMs)}`;
   }
-  if (schedule.kind === "idle") {
-    return `idle ${formatDuration(schedule.timeoutMs)}`;
-  }
-  if (schedule.kind === "cron") {
-    return schedule.tz ? `cron ${schedule.expr} @ ${schedule.tz}` : `cron ${schedule.expr}`;
-  }
-  return "unknown";
+  return schedule.tz ? `cron ${schedule.expr} @ ${schedule.tz}` : `cron ${schedule.expr}`;
 };
 
 const formatStatus = (job: CronJob) => {

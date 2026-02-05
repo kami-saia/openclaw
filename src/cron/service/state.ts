@@ -24,16 +24,9 @@ export type CronServiceDeps = {
   log: Logger;
   storePath: string;
   cronEnabled: boolean;
-  enqueueSystemEvent: (
-    text: string,
-    opts?: { agentId?: string; wake?: boolean; sessionKey?: string },
-  ) => void;
+  enqueueSystemEvent: (text: string, opts?: { agentId?: string }) => void;
   requestHeartbeatNow: (opts?: { reason?: string }) => void;
-  runHeartbeatOnce?: (opts?: {
-    reason?: string;
-    prompt?: string;
-    sessionKey?: string;
-  }) => Promise<HeartbeatRunResult>;
+  runHeartbeatOnce?: (opts?: { reason?: string }) => Promise<HeartbeatRunResult>;
   runIsolatedAgentJob: (params: { job: CronJob; message: string }) => Promise<{
     status: "ok" | "error" | "skipped";
     summary?: string;
@@ -55,6 +48,8 @@ export type CronServiceState = {
   running: boolean;
   op: Promise<unknown>;
   warnedDisabled: boolean;
+  storeLoadedAtMs: number | null;
+  storeFileMtimeMs: number | null;
 };
 
 export function createCronServiceState(deps: CronServiceDeps): CronServiceState {
@@ -65,6 +60,8 @@ export function createCronServiceState(deps: CronServiceDeps): CronServiceState 
     running: false,
     op: Promise.resolve(),
     warnedDisabled: false,
+    storeLoadedAtMs: null,
+    storeFileMtimeMs: null,
   };
 }
 

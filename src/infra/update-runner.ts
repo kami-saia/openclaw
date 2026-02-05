@@ -1,12 +1,22 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-
 import { type CommandOptions, runCommandWithTimeout } from "../process/exec.js";
-import { compareSemverStrings } from "./update-check.js";
-import { DEV_BRANCH, isBetaTag, isStableTag, type UpdateChannel } from "./update-channels.js";
-import { detectGlobalInstallManagerForRoot, globalInstallArgs } from "./update-global.js";
 import { trimLogTail } from "./restart-sentinel.js";
+import {
+  channelToNpmTag,
+  DEFAULT_PACKAGE_CHANNEL,
+  DEV_BRANCH,
+  isBetaTag,
+  isStableTag,
+  type UpdateChannel,
+} from "./update-channels.js";
+import { compareSemverStrings } from "./update-check.js";
+import {
+  cleanupGlobalRenameDirs,
+  detectGlobalInstallManagerForRoot,
+  globalInstallArgs,
+} from "./update-global.js";
 
 export type UpdateStepResult = {
   name: string;
@@ -738,8 +748,6 @@ export async function runGatewayUpdate(opts: UpdateRunnerOptions = {}): Promise<
 
     // Restore dist/control-ui/ to committed state to prevent dirty repo after update
     // (ui:build regenerates assets with new hashes, which would block future updates)
-    // PATCH: Skipped because dist/ is ignored in source builds
-    /*
     const restoreUiStep = await runStep(
       step(
         "restore control-ui",
@@ -748,7 +756,6 @@ export async function runGatewayUpdate(opts: UpdateRunnerOptions = {}): Promise<
       ),
     );
     steps.push(restoreUiStep);
-    */
 
     const doctorStep = await runStep(
       step(
@@ -796,7 +803,13 @@ export async function runGatewayUpdate(opts: UpdateRunnerOptions = {}): Promise<
   const globalManager = await detectGlobalInstallManagerForRoot(runCommand, pkgRoot, timeoutMs);
   if (globalManager) {
     const packageName = (await readPackageName(pkgRoot)) ?? DEFAULT_PACKAGE_NAME;
-    const spec = `${packageName}@${normalizeTag(opts.tag)}`;
+    await cleanupGlobalRenameDirs({
+      globalRoot: path.dirname(pkgRoot),
+      packageName,
+    });
+    const channel = opts.channel ?? DEFAULT_PACKAGE_CHANNEL;
+    const tag = normalizeTag(opts.tag ?? channelToNpmTag(channel));
+    const spec = `${packageName}@${tag}`;
     const updateStep = await runStep({
       runCommand,
       name: "global update",

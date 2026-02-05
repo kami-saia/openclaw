@@ -1,15 +1,12 @@
+import { Type } from "@sinclair/typebox";
+import Ajv from "ajv";
+import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import fs from "node:fs/promises";
-
-import Ajv from "ajv";
-import { Type } from "@sinclair/typebox";
-
 // NOTE: This extension is intended to be bundled with OpenClaw.
 // When running from source (tests/dev), OpenClaw internals live under src/.
 // When running from a built install, internals live under dist/ (no src/ tree).
 // So we resolve internal imports dynamically with src-first, dist-fallback.
-
 import type { OpenClawPluginApi } from "../../../src/plugins/types.js";
 
 type RunEmbeddedPiAgentFn = (params: Record<string, unknown>) => Promise<unknown>;
@@ -18,24 +15,29 @@ async function loadRunEmbeddedPiAgent(): Promise<RunEmbeddedPiAgentFn> {
   // Source checkout (tests/dev)
   try {
     const mod = await import("../../../src/agents/pi-embedded-runner.js");
-    if (typeof (mod as any).runEmbeddedPiAgent === "function")
+    // oxlint-disable-next-line typescript/no-explicit-any
+    if (typeof (mod as any).runEmbeddedPiAgent === "function") {
+      // oxlint-disable-next-line typescript/no-explicit-any
       return (mod as any).runEmbeddedPiAgent;
+    }
   } catch {
     // ignore
   }
 
   // Bundled install (built)
   const mod = await import("../../../agents/pi-embedded-runner.js");
-  if (typeof (mod as any).runEmbeddedPiAgent !== "function") {
+  if (typeof mod.runEmbeddedPiAgent !== "function") {
     throw new Error("Internal error: runEmbeddedPiAgent not available");
   }
-  return (mod as any).runEmbeddedPiAgent;
+  return mod.runEmbeddedPiAgent;
 }
 
 function stripCodeFences(s: string): string {
   const trimmed = s.trim();
   const m = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  if (m) return (m[1] ?? "").trim();
+  if (m) {
+    return (m[1] ?? "").trim();
+  }
   return trimmed;
 }
 
@@ -49,7 +51,9 @@ function collectText(payloads: Array<{ text?: string; isError?: boolean }> | und
 function toModelKey(provider?: string, model?: string): string | undefined {
   const p = provider?.trim();
   const m = model?.trim();
-  if (!p || !m) return undefined;
+  if (!p || !m) {
+    return undefined;
+  }
   return `${p}/${m}`;
 }
 
@@ -84,8 +88,10 @@ export function createLlmTaskTool(api: OpenClawPluginApi) {
     }),
 
     async execute(_id: string, params: Record<string, unknown>) {
-      const prompt = String(params.prompt ?? "");
-      if (!prompt.trim()) throw new Error("prompt required");
+      const prompt = typeof params.prompt === "string" ? params.prompt : "";
+      if (!prompt.trim()) {
+        throw new Error("prompt required");
+      }
 
       const pluginCfg = (api.pluginConfig ?? {}) as PluginCfg;
 
@@ -107,7 +113,9 @@ export function createLlmTaskTool(api: OpenClawPluginApi) {
         undefined;
 
       const authProfileId =
+        // oxlint-disable-next-line typescript/no-explicit-any
         (typeof (params as any).authProfileId === "string" &&
+          // oxlint-disable-next-line typescript/no-explicit-any
           (params as any).authProfileId.trim()) ||
         (typeof pluginCfg.defaultAuthProfileId === "string" &&
           pluginCfg.defaultAuthProfileId.trim()) ||
@@ -146,6 +154,7 @@ export function createLlmTaskTool(api: OpenClawPluginApi) {
               : undefined,
       };
 
+      // oxlint-disable-next-line typescript/no-explicit-any
       const input = (params as any).input as unknown;
       let inputJson: string;
       try {
@@ -188,8 +197,11 @@ export function createLlmTaskTool(api: OpenClawPluginApi) {
           disableTools: true,
         });
 
+        // oxlint-disable-next-line typescript/no-explicit-any
         const text = collectText((result as any).payloads);
-        if (!text) throw new Error("LLM returned empty output");
+        if (!text) {
+          throw new Error("LLM returned empty output");
+        }
 
         const raw = stripCodeFences(text);
         let parsed: unknown;
@@ -199,9 +211,11 @@ export function createLlmTaskTool(api: OpenClawPluginApi) {
           throw new Error("LLM returned invalid JSON");
         }
 
+        // oxlint-disable-next-line typescript/no-explicit-any
         const schema = (params as any).schema as unknown;
         if (schema && typeof schema === "object" && !Array.isArray(schema)) {
           const ajv = new Ajv({ allErrors: true, strict: false });
+          // oxlint-disable-next-line typescript/no-explicit-any
           const validate = ajv.compile(schema as any);
           const ok = validate(parsed);
           if (!ok) {

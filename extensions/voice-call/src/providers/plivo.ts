@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
-
-import type { PlivoConfig } from "../config.js";
+import type { PlivoConfig, WebhookSecurityConfig } from "../config.js";
 import type {
   HangupCallInput,
   InitiateCallInput,
@@ -13,9 +12,9 @@ import type {
   WebhookContext,
   WebhookVerificationResult,
 } from "../types.js";
+import type { VoiceCallProvider } from "./base.js";
 import { escapeXml } from "../voice-mapping.js";
 import { reconstructWebhookUrl, verifyPlivoWebhook } from "../webhook-security.js";
-import type { VoiceCallProvider } from "./base.js";
 
 export interface PlivoProviderOptions {
   /** Override public URL origin for signature verification */
@@ -24,6 +23,8 @@ export interface PlivoProviderOptions {
   skipVerification?: boolean;
   /** Outbound ring timeout in seconds */
   ringTimeoutSec?: number;
+  /** Webhook security options (forwarded headers/allowlist) */
+  webhookSecurity?: WebhookSecurityConfig;
 }
 
 type PendingSpeak = { text: string; locale?: string };
@@ -93,6 +94,10 @@ export class PlivoProvider implements VoiceCallProvider {
     const result = verifyPlivoWebhook(ctx, this.authToken, {
       publicUrl: this.options.publicUrl,
       skipVerification: this.options.skipVerification,
+      allowedHosts: this.options.webhookSecurity?.allowedHosts,
+      trustForwardingHeaders: this.options.webhookSecurity?.trustForwardingHeaders,
+      trustedProxyIPs: this.options.webhookSecurity?.trustedProxyIPs,
+      remoteIP: ctx.remoteAddress,
     });
 
     if (!result.ok) {
@@ -113,7 +118,7 @@ export class PlivoProvider implements VoiceCallProvider {
     // Keep providerCallId mapping for later call control.
     const callUuid = parsed.get("CallUUID") || undefined;
     if (callUuid) {
-      const webhookBase = PlivoProvider.baseWebhookUrlFromCtx(ctx);
+      const webhookBase = this.baseWebhookUrlFromCtx(ctx);
       if (webhookBase) {
         this.callUuidToWebhookUrl.set(callUuid, webhookBase);
       }
@@ -123,7 +128,9 @@ export class PlivoProvider implements VoiceCallProvider {
     if (flow === "xml-speak") {
       const callId = this.getCallIdFromQuery(ctx);
       const pending = callId ? this.pendingSpeakByCallId.get(callId) : undefined;
-      if (callId) this.pendingSpeakByCallId.delete(callId);
+      if (callId) {
+        this.pendingSpeakByCallId.delete(callId);
+      }
 
       const xml = pending
         ? PlivoProvider.xmlSpeak(pending.text, pending.locale)
@@ -139,7 +146,9 @@ export class PlivoProvider implements VoiceCallProvider {
     if (flow === "xml-listen") {
       const callId = this.getCallIdFromQuery(ctx);
       const pending = callId ? this.pendingListenByCallId.get(callId) : undefined;
-      if (callId) this.pendingListenByCallId.delete(callId);
+      if (callId) {
+        this.pendingListenByCallId.delete(callId);
+      }
 
       const actionUrl = this.buildActionUrl(ctx, {
         flow: "getinput",
@@ -393,7 +402,9 @@ export class PlivoProvider implements VoiceCallProvider {
 
   private static normalizeNumber(numberOrSip: string): string {
     const trimmed = numberOrSip.trim();
-    if (trimmed.toLowerCase().startsWith("sip:")) return trimmed;
+    if (trimmed.toLowerCase().startsWith("sip:")) {
+      return trimmed;
+    }
     return trimmed.replace(/[^\d+]/g, "");
   }
 
@@ -439,19 +450,30 @@ export class PlivoProvider implements VoiceCallProvider {
     ctx: WebhookContext,
     opts: { flow: string; callId?: string },
   ): string | null {
-    const base = PlivoProvider.baseWebhookUrlFromCtx(ctx);
-    if (!base) return null;
+    const base = this.baseWebhookUrlFromCtx(ctx);
+    if (!base) {
+      return null;
+    }
 
     const u = new URL(base);
     u.searchParams.set("provider", "plivo");
     u.searchParams.set("flow", opts.flow);
-    if (opts.callId) u.searchParams.set("callId", opts.callId);
+    if (opts.callId) {
+      u.searchParams.set("callId", opts.callId);
+    }
     return u.toString();
   }
 
-  private static baseWebhookUrlFromCtx(ctx: WebhookContext): string | null {
+  private baseWebhookUrlFromCtx(ctx: WebhookContext): string | null {
     try {
-      const u = new URL(reconstructWebhookUrl(ctx));
+      const u = new URL(
+        reconstructWebhookUrl(ctx, {
+          allowedHosts: this.options.webhookSecurity?.allowedHosts,
+          trustForwardingHeaders: this.options.webhookSecurity?.trustForwardingHeaders,
+          trustedProxyIPs: this.options.webhookSecurity?.trustedProxyIPs,
+          remoteIP: ctx.remoteAddress,
+        }),
+      );
       return `${u.origin}${u.pathname}`;
     } catch {
       return null;
@@ -478,7 +500,9 @@ export class PlivoProvider implements VoiceCallProvider {
 
     for (const key of candidates) {
       const value = params.get(key);
-      if (value && value.trim()) return value.trim();
+      if (value && value.trim()) {
+        return value.trim();
+      }
     }
     return null;
   }

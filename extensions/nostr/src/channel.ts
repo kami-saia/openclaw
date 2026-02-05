@@ -4,8 +4,11 @@ import {
   formatPairingApproveHint,
   type ChannelPlugin,
 } from "openclaw/plugin-sdk";
-
+import type { NostrProfile } from "./config-schema.js";
+import type { MetricEvent, MetricsSnapshot } from "./metrics.js";
+import type { ProfilePublishResult } from "./nostr-profile.js";
 import { NostrConfigSchema } from "./config-schema.js";
+import { normalizePubkey, startNostrBus, type NostrBusHandle } from "./nostr-bus.js";
 import { getNostrRuntime } from "./runtime.js";
 import {
   listNostrAccountIds,
@@ -13,10 +16,6 @@ import {
   resolveNostrAccount,
   type ResolvedNostrAccount,
 } from "./types.js";
-import { normalizePubkey, startNostrBus, type NostrBusHandle } from "./nostr-bus.js";
-import type { MetricEvent, MetricsSnapshot } from "./metrics.js";
-import type { NostrProfile } from "./config-schema.js";
-import type { ProfilePublishResult } from "./nostr-profile.js";
 
 // Store active bus handles per account
 const activeBuses = new Map<string, NostrBusHandle>();
@@ -63,7 +62,9 @@ export const nostrPlugin: ChannelPlugin<ResolvedNostrAccount> = {
         .map((entry) => String(entry).trim())
         .filter(Boolean)
         .map((entry) => {
-          if (entry === "*") return "*";
+          if (entry === "*") {
+            return "*";
+          }
           try {
             return normalizePubkey(entry);
           } catch {
@@ -162,7 +163,9 @@ export const nostrPlugin: ChannelPlugin<ResolvedNostrAccount> = {
     collectStatusIssues: (accounts) =>
       accounts.flatMap((account) => {
         const lastError = typeof account.lastError === "string" ? account.lastError.trim() : "";
-        if (!lastError) return [];
+        if (!lastError) {
+          return [];
+        }
         return [
           {
             channel: "nostr",

@@ -1,4 +1,5 @@
 import type { CronJobCreate, CronJobPatch } from "../types.js";
+import type { CronServiceState } from "./state.js";
 import {
   applyJobPatch,
   computeJobNextRunAtMs,
@@ -9,7 +10,6 @@ import {
   recomputeNextRuns,
 } from "./jobs.js";
 import { locked } from "./locked.js";
-import type { CronServiceState } from "./state.js";
 import { ensureLoaded, persist, warnIfDisabled } from "./store.js";
 import { armTimer, emit, executeJob, stopTimer, wake } from "./timer.js";
 
@@ -143,60 +143,4 @@ export function wakeNow(
   opts: { mode: "now" | "next-heartbeat"; text: string },
 ) {
   return wake(state, opts);
-}
-
-export async function bumpIdleJobs(
-  state: CronServiceState,
-  evt: { sessionKey?: string; source?: "agent" | "user" },
-) {
-  return await locked(state, async () => {
-    if (!state.deps.cronEnabled) {
-      return;
-    }
-    const { sessionKey, source } = evt;
-    if (!sessionKey || !source) {
-      return;
-    }
-    await ensureLoaded(state);
-    const now = state.deps.nowMs();
-    let changed = false;
-
-    for (const job of state.store?.jobs ?? []) {
-      if (!job.enabled) continue;
-      if (job.schedule.kind !== "idle") continue;
-
-      let matches = false;
-      if (typeof job.sessionTarget === "object" && job.sessionTarget.key === sessionKey) {
-        matches = true;
-      }
-
-      if (!matches) continue;
-
-      // Handle stopOn logic: clear next run if stop signal received
-      if (job.schedule.stopOn?.includes(source)) {
-        // Do not disable the job (job.enabled = false), just disarm the timer.
-        job.state.nextRunAtMs = undefined;
-        job.state.runningAtMs = undefined;
-        changed = true;
-        continue;
-      }
-
-      if (!job.schedule.resetOn?.includes(source)) continue;
-
-      const next = now + (job.schedule.timeoutMs ?? 0);
-      // Only update if significantly different (e.g. > 1s) to avoid thrashing on every token?
-      // Actually, evt is transcript update (message level), so it's fine.
-      if (job.state.nextRunAtMs !== next) {
-        job.state.nextRunAtMs = next;
-        // Also clear running status if it was stuck?
-        job.state.runningAtMs = undefined;
-        changed = true;
-      }
-    }
-
-    if (changed) {
-      await persist(state);
-      armTimer(state);
-    }
-  });
 }

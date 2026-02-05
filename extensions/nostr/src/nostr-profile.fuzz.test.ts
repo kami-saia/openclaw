@@ -1,12 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { getPublicKey } from "nostr-tools";
+import type { NostrProfile } from "./config-schema.js";
 import {
   createProfileEvent,
   profileToContent,
   validateProfile,
   sanitizeProfileForDisplay,
 } from "./nostr-profile.js";
-import type { NostrProfile } from "./config-schema.js";
 
 // Test private key
 const TEST_HEX_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -422,7 +421,7 @@ describe("profile type confusion", () => {
 
   it("handles prototype pollution attempt", () => {
     const malicious = JSON.parse('{"__proto__": {"polluted": true}}') as unknown;
-    const result = validateProfile(malicious);
+    validateProfile(malicious);
     // Should not pollute Object.prototype
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });

@@ -1,13 +1,11 @@
-import fs from "node:fs";
-
+import type { IStorageProvider, ICryptoStorageProvider } from "@vector-im/matrix-bot-sdk";
 import {
   LogService,
   MatrixClient,
   SimpleFsStorageProvider,
   RustSdkCryptoStorageProvider,
 } from "@vector-im/matrix-bot-sdk";
-import type { IStorageProvider, ICryptoStorageProvider } from "@vector-im/matrix-bot-sdk";
-
+import fs from "node:fs";
 import { ensureMatrixSdkLoggingConfigured } from "./logging.js";
 import {
   maybeMigrateLegacyStorage,
@@ -16,7 +14,9 @@ import {
 } from "./storage.js";
 
 function sanitizeUserIdList(input: unknown, label: string): string[] {
-  if (input == null) return [];
+  if (input == null) {
+    return [];
+  }
   if (!Array.isArray(input)) {
     LogService.warn(
       "MatrixClientLite",
