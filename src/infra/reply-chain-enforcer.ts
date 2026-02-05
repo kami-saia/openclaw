@@ -59,20 +59,22 @@ export class ReplyChainEnforcer {
     if (!this.config.enabled) return;
 
     if (evt.source === "user") {
-      this.setState(evt.sessionKey, "armed", "User message");
+      // User spoke -> Disarm immediately (It's the user's turn now)
+      if (this.states.has(evt.sessionKey)) {
+        this.setState(evt.sessionKey, "disarmed", "User message");
+        this.logger.debug("Chain DISARMED by user message", { key: evt.sessionKey });
+      }
     } else if (evt.source === "agent") {
       const text = evt.text?.trim();
       if (text === SILENT_REPLY_TOKEN || text === "NO_REPLY" || text === "HEARTBEAT_OK") {
         this.setState(evt.sessionKey, "disarmed", "Agent sign-off");
         this.logger.debug("Chain DISARMED by explicit sign-off", { key: evt.sessionKey });
       } else {
-        // Normal agent reply extends the timeout but keeps it armed until explicit sign-off
-        // actually, we should disarm if the agent spoke, but re-arm if they are waiting?
-        // Current logic: If agent speaks, we reset timer.
-        // BUT: If agent is DONE, they should say NO_REPLY to disarm.
-        // If they just say "Thinking...", it remains armed?
-        // For now: Any agent output RESETS the timer (still armed) unless it's a sign-off.
-        this.touchActivity(evt.sessionKey);
+        // Agent replied -> Reset timer AND ensure it is ARMED.
+        // We want to track "time since last agent token".
+        // If agent sends "Hello", timer starts.
+        // If 30s pass without user reply or agent NO_REPLY -> Trigger.
+        this.setState(evt.sessionKey, "armed", "Agent activity");
       }
     }
   }
@@ -81,7 +83,7 @@ export class ReplyChainEnforcer {
     if (!this.config.enabled) return;
 
     if (evt.phase === "start") {
-      this.setState(evt.sessionKey, "armed", "Lifecycle Start");
+      // Do nothing on start. Wait for first token.
     } else if (evt.phase === "error") {
       // Only disarm on error. Normal "end" keeps it armed until explicit NO_REPLY token.
       this.setState(evt.sessionKey, "disarmed", `Lifecycle ${evt.phase}`);

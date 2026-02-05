@@ -566,6 +566,7 @@ export async function runHeartbeatOnce(opts: {
     heartbeat,
     opts.sessionKey,
   );
+
   const previousUpdatedAt = entry?.updatedAt;
   const delivery = resolveHeartbeatDeliveryTarget({ cfg, entry, heartbeat });
   const heartbeatAccountId = heartbeat?.accountId?.trim();
