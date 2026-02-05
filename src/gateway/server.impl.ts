@@ -414,7 +414,7 @@ export async function startGatewayServer(
       enabled:
         cfgAtStart.gateway?.watchdog?.enabled !== false && cfgAtStart.cron?.enabled !== false,
       timeoutMs: cfgAtStart.gateway?.watchdog?.timeoutMs ?? 30000,
-      prompt: `Reply Chain broken. Respond with ${SILENT_REPLY_TOKEN} if done.`,
+      prompt: `[System] Reply chain broken (stall detected). Resume any promised assignments, or respond with ${SILENT_REPLY_TOKEN} if you need a reply from the user.`,
     },
     {
       nowMs: () => Date.now(),
@@ -688,7 +688,7 @@ export async function startGatewayServer(
         enabled:
           latestCfg.gateway?.watchdog?.enabled !== false && latestCfg.cron?.enabled !== false,
         timeoutMs: latestCfg.gateway?.watchdog?.timeoutMs ?? 30000,
-        prompt: `Reply Chain broken. Respond with ${SILENT_REPLY_TOKEN} if done.`,
+        prompt: `[System] Reply chain broken (stall detected). Resume any promised assignments, or respond with ${SILENT_REPLY_TOKEN} if you need a reply from the user.`,
       });
     },
     startChannel,
