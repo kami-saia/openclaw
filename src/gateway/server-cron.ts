@@ -63,6 +63,26 @@ export function buildGatewayCronService(params: {
         deps: { ...params.deps, runtime: defaultRuntime },
       });
     },
+    runSessionJob: async ({ sessionKey, text, wakeMode }) => {
+      // 1. Enqueue the event to the specific session
+      enqueueSystemEvent(text, { sessionKey });
+
+      // 2. Wake logic
+      // If "now", we force a run immediately.
+      // If "next-heartbeat", we also force a run because global wake doesn't support session targeting yet.
+      // (Better to run immediately than never).
+      const runtimeConfig = loadConfig();
+      const res = await runHeartbeatOnce({
+        cfg: runtimeConfig,
+        reason: "cron:session-job",
+        sessionKey,
+        deps: { ...params.deps, runtime: defaultRuntime },
+      });
+
+      if (res.status === "ran") return { status: "ok" };
+      if (res.status === "skipped") return { status: "skipped", error: res.reason };
+      return { status: "error", error: res.reason };
+    },
     runIsolatedAgentJob: async ({ job, message }) => {
       const { agentId, cfg: runtimeConfig } = resolveCronAgent(job.agentId);
       return await runCronIsolatedAgentTurn({

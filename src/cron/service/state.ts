@@ -34,6 +34,11 @@ export type CronServiceDeps = {
     outputText?: string;
     error?: string;
   }>;
+  runSessionJob?: (params: {
+    sessionKey: string;
+    text: string;
+    wakeMode: "now" | "next-heartbeat";
+  }) => Promise<{ status: "ok" | "error" | "skipped"; error?: string }>;
   onEvent?: (evt: CronEvent) => void;
 };
 

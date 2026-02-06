@@ -122,6 +122,38 @@ export async function executeJob(
   };
 
   try {
+    if (typeof job.sessionTarget === "object" && job.sessionTarget.kind === "session") {
+      // Per-Session Targeting
+      const sessionKey = job.sessionTarget.key;
+      const text =
+        job.payload.kind === "systemEvent" ? job.payload.text : (job.payload.message ?? "");
+
+      if (!text) {
+        await finish("skipped", "session job requires non-empty text/message");
+        return;
+      }
+
+      if (!state.deps.runSessionJob) {
+        await finish("error", "runSessionJob dependency not provided");
+        return;
+      }
+
+      const res = await state.deps.runSessionJob({
+        sessionKey,
+        text,
+        wakeMode: job.wakeMode,
+      });
+
+      if (res.status === "ok") {
+        await finish("ok", undefined, text);
+      } else if (res.status === "skipped") {
+        await finish("skipped", res.error, text);
+      } else {
+        await finish("error", res.error, text);
+      }
+      return;
+    }
+
     if (job.sessionTarget === "main") {
       const text = resolveJobPayloadTextForMain(job);
       if (!text) {
