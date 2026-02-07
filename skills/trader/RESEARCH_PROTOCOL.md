@@ -4,6 +4,21 @@
 
 To synthesize "Hard Data" (Price/News) with "Soft Data" (Sentiment/Vibes) and "Deep Theory" (Gemini Advanced) to form high-conviction trading signals.
 
+## Active Strategy Parameters (Updated 2026-02-06)
+
+### $MSTR (Short)
+
+- **Thesis:** Bitcoin proxy decoupling; premium collapse.
+- **Entry:** ~$115.17
+- **Hard Stop:** $128.50 (-11.6%) [Adjusted 2026-02-06 17:43]
+- **Target:** $100.00 (-13%)
+
+### $AMZN (Long)
+
+- **Thesis:** Mean reversion; analyst support.
+- **Entry:** ~$201.05
+- **Target:** $215.00+
+
 ## Phase 1: The Scan (Hard Data)
 
 **Tools:** `browser`

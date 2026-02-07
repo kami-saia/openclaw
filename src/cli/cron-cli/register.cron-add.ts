@@ -172,19 +172,44 @@ export function registerCronAddCommand(cron: Command) {
           const sessionSource = optionSource("session");
           const sessionTargetRaw = typeof opts.session === "string" ? opts.session.trim() : "";
           const inferredSessionTarget = payload.kind === "agentTurn" ? "isolated" : "main";
-          const sessionTarget =
-            sessionSource === "cli" ? sessionTargetRaw || "" : inferredSessionTarget;
-          if (sessionTarget !== "main" && sessionTarget !== "isolated") {
-            throw new Error("--session must be main or isolated");
+          let sessionTarget: "main" | "isolated" | { kind: "session"; key: string } =
+            sessionSource === "cli" ? (sessionTargetRaw as any) || "" : inferredSessionTarget;
+
+          // Attempt to parse JSON session target
+          if (typeof sessionTarget === "string" && sessionTarget.startsWith("{")) {
+            try {
+              sessionTarget = JSON.parse(sessionTarget);
+            } catch (e) {
+              // Ignore, treat as string
+            }
+          }
+
+          if (
+            sessionTarget !== "main" &&
+            sessionTarget !== "isolated" &&
+            !(typeof sessionTarget === "object" && sessionTarget.kind === "session")
+          ) {
+            throw new Error(
+              "--session must be 'main', 'isolated', or a JSON object { kind: 'session', key: '...' }",
+            );
           }
 
           if (opts.deleteAfterRun && opts.keepAfterRun) {
             throw new Error("Choose --delete-after-run or --keep-after-run, not both");
           }
 
+          const isSessionKind =
+            typeof sessionTarget === "object" && sessionTarget.kind === "session";
+
           if (sessionTarget === "main" && payload.kind !== "systemEvent") {
             throw new Error("Main jobs require --system-event (systemEvent).");
           }
+          if (isSessionKind && payload.kind !== "systemEvent") {
+            // For now, force systemEvent for session targets to be safe, or allow agentTurn if supported later?
+            // Schema allows both, but let's stick to systemEvent for notifications.
+            // Actually, schema validation in Gateway will handle it.
+          }
+
           if (sessionTarget === "isolated" && payload.kind !== "agentTurn") {
             throw new Error("Isolated jobs require --message (agentTurn).");
           }

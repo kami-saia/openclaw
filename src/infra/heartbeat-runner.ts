@@ -526,38 +526,12 @@ export async function runHeartbeatOnce(opts: {
 
   const queueSize = (opts.deps?.getQueueSize ?? getQueueSize)(CommandLane.Main);
   if (queueSize > 0) {
+    log.info("heartbeat: skipped due to requests-in-flight", {
+      queueSize,
+      lane: CommandLane.Main,
+      reason: opts.reason,
+    });
     return { status: "skipped", reason: "requests-in-flight" };
-  }
-
-  // Skip heartbeat if HEARTBEAT.md exists but has no actionable content.
-  // This saves API calls/costs when the file is effectively empty (only comments/headers).
-  // EXCEPTION: Don't skip for exec events - they have pending system events to process.
-  // EXCEPTION: Don't skip for watchdog stalls - they are critical alerts.
-  // EXCEPTION: Don't skip if a custom prompt is provided (e.g. from Watchdog).
-  const isExecEventReason = opts.reason === "exec-event";
-  const isWatchdogReason = opts.reason === "watchdog-stall";
-  const workspaceDir = resolveAgentWorkspaceDir(cfg, resolvedAgentId);
-  const heartbeatFilePath = path.join(workspaceDir, DEFAULT_HEARTBEAT_FILENAME);
-
-  if (!opts.prompt) {
-    try {
-      const heartbeatFileContent = await fs.readFile(heartbeatFilePath, "utf-8");
-      if (
-        isHeartbeatContentEffectivelyEmpty(heartbeatFileContent) &&
-        !isExecEventReason &&
-        !isWatchdogReason
-      ) {
-        emitHeartbeatEvent({
-          status: "skipped",
-          reason: "empty-heartbeat-file",
-          durationMs: Date.now() - startedAt,
-        });
-        return { status: "skipped", reason: "empty-heartbeat-file" };
-      }
-    } catch {
-      // File doesn't exist or can't be read - proceed with heartbeat.
-      // The LLM prompt says "if it exists" so this is expected behavior.
-    }
   }
 
   const { entry, sessionKey, storePath } = resolveHeartbeatSession(
@@ -566,6 +540,46 @@ export async function runHeartbeatOnce(opts: {
     heartbeat,
     opts.sessionKey,
   );
+
+  const isExecEventReason = opts.reason === "exec-event";
+  const isWatchdogReason = opts.reason === "watchdog-stall";
+  const isCronSessionJob = opts.reason === "cron:session-job";
+  const pendingSystemEvents = peekSystemEvents(sessionKey);
+  const hasPendingSystemEvents = pendingSystemEvents.length > 0;
+  const workspaceDir = resolveAgentWorkspaceDir(cfg, resolvedAgentId);
+  const heartbeatFilePath = path.join(workspaceDir, DEFAULT_HEARTBEAT_FILENAME);
+
+  if (!opts.prompt) {
+    try {
+      const heartbeatFileContent = await fs.readFile(heartbeatFilePath, "utf-8");
+      if (isHeartbeatContentEffectivelyEmpty(heartbeatFileContent)) {
+        log.info("heartbeat: checking empty file skip", {
+          sessionKey,
+          hasPendingSystemEvents,
+          pendingCount: pendingSystemEvents.length,
+          reason: opts.reason,
+          isCronSessionJob,
+        });
+      }
+      if (
+        isHeartbeatContentEffectivelyEmpty(heartbeatFileContent) &&
+        !isExecEventReason &&
+        !isWatchdogReason &&
+        !isCronSessionJob &&
+        !hasPendingSystemEvents
+      ) {
+        emitHeartbeatEvent({
+          status: "skipped",
+          reason: "empty-file",
+          durationMs: Date.now() - startedAt,
+        });
+        return { status: "skipped", reason: "empty-file" };
+      }
+    } catch {
+      // File doesn't exist or can't be read - proceed with heartbeat.
+      // The LLM prompt says "if it exists" so this is expected behavior.
+    }
+  }
 
   const previousUpdatedAt = entry?.updatedAt;
   const delivery = resolveHeartbeatDeliveryTarget({ cfg, entry, heartbeat });

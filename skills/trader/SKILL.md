@@ -14,6 +14,14 @@ Autonomous trading skill using Alpaca Markets API. Capable of market data analys
 - Venv: `/home/damon/qwen-venv`
 - SDK: `alpaca-py` (Note: `alpaca-trade-api` is legacy)
 
+## Protocol: Trade Execution
+
+Before executing a new trade:
+
+1.  **Check `TRADE_JOURNAL.md`:** Review past lessons to avoid repeat mistakes.
+2.  **Verify Status:** Run `status.py` to see current exposure.
+3.  **Execute:** Use `execute_v1.py` or custom script.
+
 ## Architecture: The Sentinel
 
 The trading system runs as a hybrid of manual execution and automated monitoring.

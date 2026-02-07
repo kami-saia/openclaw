@@ -59,7 +59,7 @@ def get_market_movers(creds):
         "APCA-API-KEY-ID": creds["APCA_API_KEY_ID"],
         "APCA-API-SECRET-KEY": creds["APCA_API_SECRET_KEY"]
     }
-    params = {"top": 10} 
+    params = {"top": 25} 
     
     try:
         r = requests.get(url, headers=headers, params=params, timeout=10)
@@ -85,7 +85,7 @@ def format_section(title, movers, is_gainers=True):
             icon = "🟢" if is_gainers else "🔴"
             lines.append(f"{icon} **${sym}**: {pct:+.2f}% (${price:.2f})")
             count += 1
-            if count >= 5: break # Top 5 relevant
+            if count >= 10: break # Top 10 relevant
             
     if count == 0:
         lines.append("_No significant movers >$2 found._")

@@ -11,7 +11,7 @@ from alpaca.trading.client import TradingClient
 # --- Configuration ---
 CRED_PATH = os.path.expanduser("~/.openclaw/credentials/alpaca_credentials.json")
 TARGET_CHANNEL_ID = "1469273412357718048"  # #saiabets
-SYMBOLS = ["AMZN", "APLD"]
+SYMBOLS = ["AMZN", "APLD", "POET", "COIN", "MSTR"]
 THRESHOLDS = 0.05  # +/- 5%
 
 # Setup Logging
@@ -115,13 +115,19 @@ async def run_sentinel():
             initial_prices = {}
             last_alert_bucket = {}
             
-            # Fetch positions
+            # Fetch positions & Initialize Watchlist
             try:
                 positions = trade_client.get_all_positions()
-                for p in positions:
-                    if p.symbol in SYMBOLS:
-                        initial_prices[p.symbol] = float(p.avg_entry_price)
-                        logging.info(f"Tracking {p.symbol} from entry: ${initial_prices[p.symbol]}")
+                pos_map = {p.symbol: float(p.avg_entry_price) for p in positions}
+                
+                for s in SYMBOLS:
+                    if s in pos_map:
+                        initial_prices[s] = pos_map[s]
+                        logging.info(f"Tracking POSITION {s} from entry: ${initial_prices[s]}")
+                    else:
+                        initial_prices[s] = None # Will set baseline on first tick
+                        logging.info(f"Tracking WATCHLIST {s} (Waiting for quote...)")
+                        
             except Exception as e:
                 logging.error(f"Failed to fetch positions: {e}. Retrying in 10s...")
                 await asyncio.sleep(10)
@@ -132,6 +138,12 @@ async def run_sentinel():
                 price = data.price
                 
                 if symbol not in initial_prices:
+                    return
+
+                # Initialize Watchlist Baseline
+                if initial_prices[symbol] is None:
+                    initial_prices[symbol] = price
+                    logging.info(f"WATCHLIST {symbol} baseline set to ${price}")
                     return
 
                 entry = initial_prices[symbol]

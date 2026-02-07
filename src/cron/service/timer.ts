@@ -245,6 +245,16 @@ export async function executeJob(
     if (!opts.forced && job.enabled && !deleted) {
       // Keep nextRunAtMs in sync in case the schedule advanced during a long run.
       job.state.nextRunAtMs = computeJobNextRunAtMs(job, state.deps.nowMs());
+      // If an "at" job was skipped (e.g. busy session), it remains due immediately
+      // because computeJobNextRunAtMs returns the original schedule time.
+      // We must apply a backoff to prevent tight retry loops.
+      if (
+        job.schedule.kind === "at" &&
+        typeof job.state.nextRunAtMs === "number" &&
+        job.state.nextRunAtMs <= state.deps.nowMs()
+      ) {
+        job.state.nextRunAtMs = state.deps.nowMs() + 5000;
+      }
     }
   }
 }
