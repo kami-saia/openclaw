@@ -3,6 +3,7 @@ import {
   isRenderablePayload,
   shouldSuppressReasoningPayload,
 } from "../../auto-reply/reply/reply-payloads.js";
+import { SILENT_REPLY_TOKEN, stripSilentToken } from "../../auto-reply/tokens.js";
 import type { ReplyPayload } from "../../auto-reply/types.js";
 
 export type NormalizedOutboundPayload = {
@@ -56,9 +57,15 @@ export function normalizeReplyPayloadsForDelivery(
     );
     const hasMultipleMedia = (explicitMediaUrls?.length ?? 0) > 1;
     const resolvedMediaUrl = hasMultipleMedia ? undefined : explicitMediaUrl;
+    // Strip trailing NO_REPLY from mixed-content messages so the token never
+    // leaks to end users via announce/cron delivery.  (#30916)
+    let text = parsed.text ?? "";
+    if (text.includes(SILENT_REPLY_TOKEN)) {
+      text = stripSilentToken(text);
+    }
     const next: ReplyPayload = {
       ...payload,
-      text: parsed.text ?? "",
+      text,
       mediaUrls: mergedMedia.length ? mergedMedia : undefined,
       mediaUrl: resolvedMediaUrl,
       replyToId: payload.replyToId ?? parsed.replyToId,
@@ -66,7 +73,7 @@ export function normalizeReplyPayloadsForDelivery(
       replyToCurrent: payload.replyToCurrent || parsed.replyToCurrent,
       audioAsVoice: Boolean(payload.audioAsVoice || parsed.audioAsVoice),
     };
-    if (parsed.isSilent && mergedMedia.length === 0) {
+    if ((parsed.isSilent || !text) && mergedMedia.length === 0) {
       return [];
     }
     if (!isRenderablePayload(next)) {
