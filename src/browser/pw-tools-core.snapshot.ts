@@ -1,5 +1,5 @@
 import type { SsrFPolicy } from "../infra/net/ssrf.js";
-import { type AriaSnapshotNode, formatAriaSnapshot, type RawAXNode } from "./cdp.js";
+import { type AriaSnapshotNode } from "./cdp.js";
 import {
   assertBrowserNavigationAllowed,
   assertBrowserNavigationResultAllowed,
@@ -31,17 +31,28 @@ export async function snapshotAriaViaPlaywright(opts: {
     targetId: opts.targetId,
   });
   ensurePageState(page);
-  const session = await page.context().newCDPSession(page);
-  try {
-    await session.send("Accessibility.enable").catch(() => {});
-    const res = (await session.send("Accessibility.getFullAXTree")) as {
-      nodes?: RawAXNode[];
-    };
-    const nodes = Array.isArray(res?.nodes) ? res.nodes : [];
-    return { nodes: formatAriaSnapshot(nodes, limit) };
-  } finally {
-    await session.detach().catch(() => {});
+
+  // Use Playwright locator.ariaSnapshot() instead of CDP Accessibility.getFullAXTree.
+  // CDP misses React portals and content rendered outside the main a11y tree;
+  // Playwright queries the live DOM through its locator engine.
+  const ariaSnapshot = await page.locator(":root").ariaSnapshot();
+  const text = String(ariaSnapshot ?? "");
+  const rawLines = text.split("\n").filter((l: string) => l.trim().length > 0);
+  const nodes: AriaSnapshotNode[] = [];
+  for (let i = 0; i < rawLines.length && nodes.length < limit; i++) {
+    const line = rawLines[i];
+    const stripped = line.replace(/^[\s-]+/, "");
+    const indent = line.search(/\S/);
+    const depth = Math.max(0, Math.floor(indent / 2));
+    const roleMatch = stripped.match(/^(\w+)(?:\s+"(.*)")?/);
+    nodes.push({
+      ref: String(i + 1),
+      role: roleMatch?.[1] ?? "text",
+      name: roleMatch?.[2] ?? stripped,
+      depth,
+    });
   }
+  return { nodes };
 }
 
 export async function snapshotAiViaPlaywright(opts: {

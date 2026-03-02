@@ -337,23 +337,20 @@ export function registerBrowserAgentSnapshotRoutes(
         });
       }
 
-      const snap =
-        profileCtx.profile.driver === "extension" || !tab.wsUrl
-          ? (() => {
-              // Extension relay doesn't expose per-page WS URLs; run AX snapshot via Playwright CDP session.
-              // Also covers cases where wsUrl is missing/unusable.
-              return requirePwAi(res, "aria snapshot").then(async (pw) => {
-                if (!pw) {
-                  return null;
-                }
-                return await pw.snapshotAriaViaPlaywright({
-                  cdpUrl: profileCtx.profile.cdpUrl,
-                  targetId: tab.targetId,
-                  limit,
-                });
-              });
-            })()
-          : snapshotAria({ wsUrl: tab.wsUrl ?? "", limit });
+      // Always prefer Playwright path — it queries live DOM and catches React portals.
+      // CDP Accessibility.getFullAXTree misses portal-rendered content.
+      const snap = await (async () => {
+        const pw = await requirePwAi(res, "aria snapshot");
+        if (!pw) {
+          // Fallback to CDP if Playwright unavailable
+          return tab.wsUrl ? snapshotAria({ wsUrl: tab.wsUrl, limit }) : null;
+        }
+        return await pw.snapshotAriaViaPlaywright({
+          cdpUrl: profileCtx.profile.cdpUrl,
+          targetId: tab.targetId,
+          limit,
+        });
+      })();
 
       const resolved = await Promise.resolve(snap);
       if (!resolved) {
