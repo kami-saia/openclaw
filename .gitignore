@@ -120,3 +120,8 @@ dist/protocol.schema.json
 
 # Synthing
 **/.stfolder/
+
+# Work-specific skills (corporate, not for public repo)
+skills/crp/
+skills/m365/
+skills/outlook/
