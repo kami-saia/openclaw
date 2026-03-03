@@ -1076,14 +1076,14 @@ export function attachGatewayWsMessageHandler(params: {
               connId,
               existingConnId: registerResult.existingConnId,
             });
-            ws.send(
+            socket.send(
               JSON.stringify({
                 type: "error",
                 code: "already_connected",
                 message: "Node already connected from another instance",
               }),
             );
-            ws.close(4409, "already_connected");
+            socket.close(4409, "already_connected");
             return;
           }
           const nodeSession = registerResult;
