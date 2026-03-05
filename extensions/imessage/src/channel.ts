@@ -26,7 +26,7 @@ import {
   setAccountEnabledInConfigSection,
   type ChannelPlugin,
   type ResolvedIMessageAccount,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/imessage";
 import { getIMessageRuntime } from "./runtime.js";
 
 const meta = getChatChannelMeta("imessage");
@@ -54,6 +54,7 @@ async function sendIMessageOutbound(params: {
   to: string;
   text: string;
   mediaUrl?: string;
+  mediaLocalRoots?: readonly string[];
   accountId?: string;
   deps?: { sendIMessage?: IMessageSendFn };
   replyToId?: string;
@@ -68,7 +69,9 @@ async function sendIMessageOutbound(params: {
     accountId: params.accountId,
   });
   return await send(params.to, params.text, {
+    config: params.cfg,
     ...(params.mediaUrl ? { mediaUrl: params.mediaUrl } : {}),
+    ...(params.mediaLocalRoots?.length ? { mediaLocalRoots: params.mediaLocalRoots } : {}),
     maxBytes,
     accountId: params.accountId ?? undefined,
     replyToId: params.replyToId ?? undefined,
@@ -182,13 +185,14 @@ export const imessagePlugin: ChannelPlugin<ResolvedIMessageAccount> = {
         accountId,
         name: input.name,
       });
-      const next =
+      const next = (
         accountId !== DEFAULT_ACCOUNT_ID
           ? migrateBaseNameToDefaultAccount({
               cfg: namedConfig,
               channelKey: "imessage",
             })
-          : namedConfig;
+          : namedConfig
+      ) as typeof cfg;
       if (accountId === DEFAULT_ACCOUNT_ID) {
         return {
           ...next,
@@ -200,7 +204,7 @@ export const imessagePlugin: ChannelPlugin<ResolvedIMessageAccount> = {
               ...buildIMessageSetupPatch(input),
             },
           },
-        };
+        } as typeof cfg;
       }
       return {
         ...next,
@@ -219,7 +223,7 @@ export const imessagePlugin: ChannelPlugin<ResolvedIMessageAccount> = {
             },
           },
         },
-      };
+      } as typeof cfg;
     },
   },
   outbound: {
@@ -232,21 +236,22 @@ export const imessagePlugin: ChannelPlugin<ResolvedIMessageAccount> = {
         cfg,
         to,
         text,
-        accountId,
+        accountId: accountId ?? undefined,
         deps,
-        replyToId,
+        replyToId: replyToId ?? undefined,
       });
       return { channel: "imessage", ...result };
     },
-    sendMedia: async ({ cfg, to, text, mediaUrl, accountId, deps, replyToId }) => {
+    sendMedia: async ({ cfg, to, text, mediaUrl, mediaLocalRoots, accountId, deps, replyToId }) => {
       const result = await sendIMessageOutbound({
         cfg,
         to,
         text,
         mediaUrl,
-        accountId,
+        mediaLocalRoots,
+        accountId: accountId ?? undefined,
         deps,
-        replyToId,
+        replyToId: replyToId ?? undefined,
       });
       return { channel: "imessage", ...result };
     },

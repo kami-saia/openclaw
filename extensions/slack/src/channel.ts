@@ -29,7 +29,7 @@ import {
   SlackConfigSchema,
   type ChannelPlugin,
   type ResolvedSlackAccount,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/slack";
 import { getSlackRuntime } from "./runtime.js";
 
 const meta = getChatChannelMeta("slack");
@@ -69,8 +69,8 @@ function resolveSlackSendContext(params: {
   cfg: Parameters<typeof resolveSlackAccount>[0]["cfg"];
   accountId?: string;
   deps?: { sendSlack?: SlackSendFn };
-  replyToId?: string | null;
-  threadId?: string | null;
+  replyToId?: string | number | null;
+  threadId?: string | number | null;
 }) {
   const send = params.deps?.sendSlack ?? getSlackRuntime().channel.slack.sendMessageSlack;
   const account = resolveSlackAccount({ cfg: params.cfg, accountId: params.accountId });
@@ -359,28 +359,41 @@ export const slackPlugin: ChannelPlugin<ResolvedSlackAccount> = {
     sendText: async ({ to, text, accountId, deps, replyToId, threadId, cfg }) => {
       const { send, threadTsValue, tokenOverride } = resolveSlackSendContext({
         cfg,
-        accountId,
+        accountId: accountId ?? undefined,
         deps,
         replyToId,
         threadId,
       });
       const result = await send(to, text, {
+        cfg,
         threadTs: threadTsValue != null ? String(threadTsValue) : undefined,
         accountId: accountId ?? undefined,
         ...(tokenOverride ? { token: tokenOverride } : {}),
       });
       return { channel: "slack", ...result };
     },
-    sendMedia: async ({ to, text, mediaUrl, accountId, deps, replyToId, threadId, cfg }) => {
+    sendMedia: async ({
+      to,
+      text,
+      mediaUrl,
+      mediaLocalRoots,
+      accountId,
+      deps,
+      replyToId,
+      threadId,
+      cfg,
+    }) => {
       const { send, threadTsValue, tokenOverride } = resolveSlackSendContext({
         cfg,
-        accountId,
+        accountId: accountId ?? undefined,
         deps,
         replyToId,
         threadId,
       });
       const result = await send(to, text, {
+        cfg,
         mediaUrl,
+        mediaLocalRoots,
         threadTs: threadTsValue != null ? String(threadTsValue) : undefined,
         accountId: accountId ?? undefined,
         ...(tokenOverride ? { token: tokenOverride } : {}),

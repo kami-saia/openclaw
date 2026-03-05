@@ -27,7 +27,7 @@ import {
   type ChannelMessageActionAdapter,
   type ChannelPlugin,
   type ResolvedSignalAccount,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/signal";
 import { getSignalRuntime } from "./runtime.js";
 
 const signalMessageActions: ChannelMessageActionAdapter = {
@@ -68,6 +68,7 @@ async function sendSignalOutbound(params: {
   to: string;
   text: string;
   mediaUrl?: string;
+  mediaLocalRoots?: readonly string[];
   accountId?: string;
   deps?: { sendSignal?: SignalSendFn };
 }) {
@@ -79,7 +80,9 @@ async function sendSignalOutbound(params: {
     accountId: params.accountId,
   });
   return await send(params.to, params.text, {
+    cfg: params.cfg,
     ...(params.mediaUrl ? { mediaUrl: params.mediaUrl } : {}),
+    ...(params.mediaLocalRoots?.length ? { mediaLocalRoots: params.mediaLocalRoots } : {}),
     maxBytes,
     accountId: params.accountId ?? undefined,
   });
@@ -265,18 +268,19 @@ export const signalPlugin: ChannelPlugin<ResolvedSignalAccount> = {
         cfg,
         to,
         text,
-        accountId,
+        accountId: accountId ?? undefined,
         deps,
       });
       return { channel: "signal", ...result };
     },
-    sendMedia: async ({ cfg, to, text, mediaUrl, accountId, deps }) => {
+    sendMedia: async ({ cfg, to, text, mediaUrl, mediaLocalRoots, accountId, deps }) => {
       const result = await sendSignalOutbound({
         cfg,
         to,
         text,
         mediaUrl,
-        accountId,
+        mediaLocalRoots,
+        accountId: accountId ?? undefined,
         deps,
       });
       return { channel: "signal", ...result };
