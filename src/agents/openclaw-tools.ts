@@ -8,6 +8,7 @@ import { createAgentsListTool } from "./tools/agents-list-tool.js";
 import { createBrowserTool } from "./tools/browser-tool.js";
 import { createCanvasTool } from "./tools/canvas-tool.js";
 import type { AnyAgentTool } from "./tools/common.js";
+import { createCompactTool } from "./tools/compact-tool.js";
 import { createCronTool } from "./tools/cron-tool.js";
 import { createGatewayTool } from "./tools/gateway-tool.js";
 import { createImageTool } from "./tools/image-tool.js";
@@ -194,6 +195,16 @@ export function createOpenClawTools(options?: {
     ...(imageTool ? [imageTool] : []),
     ...(pdfTool ? [pdfTool] : []),
   ];
+
+  // Agent-controlled compaction tool (gated by compaction.mode: "agent")
+  const compactTool = createCompactTool({
+    sessionKey: options?.agentSessionKey,
+    config: options?.config,
+    workspaceDir,
+  });
+  if (compactTool) {
+    tools.push(compactTool);
+  }
 
   const pluginTools = resolvePluginTools({
     context: {

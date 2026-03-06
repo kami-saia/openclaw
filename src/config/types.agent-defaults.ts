@@ -286,7 +286,7 @@ export type AgentDefaultsConfig = {
   sandbox?: AgentSandboxConfig;
 };
 
-export type AgentCompactionMode = "default" | "safeguard";
+export type AgentCompactionMode = "default" | "safeguard" | "agent";
 export type AgentCompactionIdentifierPolicy = "strict" | "off" | "custom";
 
 export type AgentCompactionConfig = {

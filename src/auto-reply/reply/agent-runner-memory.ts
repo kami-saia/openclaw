@@ -3,6 +3,10 @@ import fs from "node:fs";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { resolveBootstrapWarningSignaturesSeen } from "../../agents/bootstrap-budget.js";
 import { estimateMessagesTokens } from "../../agents/compaction.js";
+import {
+  computeContextPressure,
+  formatContextPressureMessage,
+} from "../../agents/context-pressure.js";
 import { runWithModelFallback } from "../../agents/model-fallback.js";
 import { isCliProvider } from "../../agents/model-selection.js";
 import { runEmbeddedPiAgent } from "../../agents/pi-embedded.js";
@@ -16,6 +20,7 @@ import {
 import type { OpenClawConfig } from "../../config/config.js";
 import {
   resolveAgentIdFromSessionKey,
+  resolveFreshSessionTotalTokens,
   resolveSessionFilePath,
   resolveSessionFilePathOptions,
   type SessionEntry,
@@ -23,6 +28,7 @@ import {
 } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
 import { registerAgentRunContext } from "../../infra/agent-events.js";
+import { enqueueSystemEvent } from "../../infra/system-events.js";
 import type { TemplateContext } from "../templating.js";
 import type { VerboseLevel } from "../thinking.js";
 import type { GetReplyOptions } from "../types.js";
@@ -262,6 +268,12 @@ export async function runMemoryFlushIfNeeded(params: {
   storePath?: string;
   isHeartbeat: boolean;
 }): Promise<SessionEntry | undefined> {
+  // Agent-controlled compaction: skip memory flush, inject pressure signal instead
+  const compactionMode = params.cfg?.agents?.defaults?.compaction?.mode;
+  if (compactionMode === "agent") {
+    return runAgentCompactionPressureCheck(params);
+  }
+
   const memoryFlushSettings = resolveMemoryFlushSettings(params.cfg);
   if (!memoryFlushSettings) {
     return params.sessionEntry;
@@ -553,4 +565,44 @@ export async function runMemoryFlushIfNeeded(params: {
   }
 
   return activeSessionEntry;
+}
+
+/**
+ * Agent-controlled compaction: check context pressure and inject a system event
+ * signal instead of running a memory flush turn.
+ */
+async function runAgentCompactionPressureCheck(params: {
+  cfg: OpenClawConfig;
+  sessionEntry?: SessionEntry;
+  sessionKey?: string;
+  defaultModel: string;
+  agentCfgContextTokens?: number;
+}): Promise<SessionEntry | undefined> {
+  const entry = params.sessionEntry;
+  if (!entry) {
+    return entry;
+  }
+
+  const contextWindowTokens = resolveMemoryFlushContextWindowTokens({
+    modelId: params.defaultModel,
+    agentCfgContextTokens: params.agentCfgContextTokens,
+  });
+
+  const totalTokens = resolveFreshSessionTotalTokens(entry);
+
+  const signal = computeContextPressure({
+    totalTokens: totalTokens ?? undefined,
+    contextWindowTokens,
+  });
+
+  if (signal && params.sessionKey) {
+    const message = formatContextPressureMessage(signal);
+    enqueueSystemEvent(message, { sessionKey: params.sessionKey });
+    logVerbose(
+      `agent-compaction pressure signal: sessionKey=${params.sessionKey} ` +
+        `pressure=${signal.pressure} recommended=${signal.compactionRecommended}`,
+    );
+  }
+
+  return entry;
 }
