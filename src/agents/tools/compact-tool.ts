@@ -22,19 +22,19 @@ let prepareCompaction: ((pathEntries: any[], settings: any) => any) | undefined;
 
 async function loadPrepareCompaction(): Promise<void> {
   try {
-    // SDK internal — not in package.json exports map.
-    const specifier = "@mariozechner/pi-coding-agent/dist/core/compaction/compaction.js";
-    // eslint-disable-next-line @typescript-eslint/no-implied-eval, @typescript-eslint/no-explicit-any
-    const mod = await (Function("s", "return import(s)") as (s: string) => Promise<unknown>)(
-      specifier,
+    // SDK internal - not in package.json exports map. Use createRequire to resolve
+    // the absolute path, then dynamic import to bypass exports resolution.
+    const { createRequire } = await import("node:module");
+    const esmRequire = createRequire(import.meta.url);
+    const resolved = esmRequire.resolve(
+      "@mariozechner/pi-coding-agent/dist/core/compaction/compaction.js",
     );
-    prepareCompaction = (mod as Record<string, unknown>)
-      .prepareCompaction as typeof prepareCompaction;
+    const mod = await import(resolved);
+    prepareCompaction = mod.prepareCompaction as typeof prepareCompaction;
   } catch (err) {
     log.warn(`Failed to load SDK prepareCompaction: ${String(err)}`);
   }
 }
-
 // Eager init
 const _initPromise = loadPrepareCompaction();
 
