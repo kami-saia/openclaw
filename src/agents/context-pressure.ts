@@ -1,6 +1,9 @@
 /** Pressure thresholds for context pressure signaling. */
-const PRESSURE_SILENT = 0.7;
+const PRESSURE_SILENT = 0.75;
 const PRESSURE_RECOMMEND = 0.85;
+
+/** Track last emitted pressure to avoid redundant signals below RECOMMEND threshold. */
+let lastEmittedPressure: number | null = null;
 
 export interface ContextPressureSignal {
   pressure: number;
@@ -28,8 +31,25 @@ export function computeContextPressure(params: {
   }
 
   const compactionRecommended = pressure >= PRESSURE_RECOMMEND;
+  const roundedPressure = Math.round(pressure * 100) / 100;
 
-  return { pressure: Math.round(pressure * 100) / 100, compactionRecommended };
+  // Below RECOMMEND: notify once, then stay silent until crossing RECOMMEND.
+  if (!compactionRecommended) {
+    if (lastEmittedPressure !== null) {
+      return null;
+    }
+    lastEmittedPressure = roundedPressure;
+    return { pressure: roundedPressure, compactionRecommended };
+  }
+
+  // At or above RECOMMEND: always emit (every turn).
+  lastEmittedPressure = roundedPressure;
+  return { pressure: roundedPressure, compactionRecommended };
+}
+
+/** Reset pressure tracking (call after compaction). */
+export function resetPressureTracking(): void {
+  lastEmittedPressure = null;
 }
 
 /**
