@@ -22,13 +22,14 @@ let prepareCompaction: ((pathEntries: any[], settings: any) => any) | undefined;
 
 async function loadPrepareCompaction(): Promise<void> {
   try {
-    // SDK internal - not in package.json exports map. Use process.cwd() to find
-    // node_modules, resolve absolute path, convert to file:// URL to bypass exports.
-    const { resolve } = await import("node:path");
-    const { pathToFileURL } = await import("node:url");
+    // SDK internal - not in package.json exports map. Use import.meta to find
+    // our own dist dir, walk up to node_modules. Convert to file:// URL to bypass exports.
+    const { resolve, dirname } = await import("node:path");
+    const { pathToFileURL, fileURLToPath } = await import("node:url");
+    const thisDir = dirname(fileURLToPath(import.meta.url));
     const abs = resolve(
-      process.cwd(),
-      "node_modules/@mariozechner/pi-coding-agent/dist/core/compaction/compaction.js",
+      thisDir,
+      "../node_modules/@mariozechner/pi-coding-agent/dist/core/compaction/compaction.js",
     );
     const mod = await import(pathToFileURL(abs).href);
     prepareCompaction = mod.prepareCompaction as typeof prepareCompaction;
