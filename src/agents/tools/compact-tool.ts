@@ -22,14 +22,15 @@ let prepareCompaction: ((pathEntries: any[], settings: any) => any) | undefined;
 
 async function loadPrepareCompaction(): Promise<void> {
   try {
-    // SDK internal - not in package.json exports map. Use createRequire to resolve
-    // the absolute path, then dynamic import to bypass exports resolution.
-    const { createRequire } = await import("node:module");
-    const esmRequire = createRequire(import.meta.url);
-    const resolved = esmRequire.resolve(
-      "@mariozechner/pi-coding-agent/dist/core/compaction/compaction.js",
+    // SDK internal - not in package.json exports map. Use process.cwd() to find
+    // node_modules, resolve absolute path, convert to file:// URL to bypass exports.
+    const { resolve } = await import("node:path");
+    const { pathToFileURL } = await import("node:url");
+    const abs = resolve(
+      process.cwd(),
+      "node_modules/@mariozechner/pi-coding-agent/dist/core/compaction/compaction.js",
     );
-    const mod = await import(resolved);
+    const mod = await import(pathToFileURL(abs).href);
     prepareCompaction = mod.prepareCompaction as typeof prepareCompaction;
   } catch (err) {
     log.warn(`Failed to load SDK prepareCompaction: ${String(err)}`);
