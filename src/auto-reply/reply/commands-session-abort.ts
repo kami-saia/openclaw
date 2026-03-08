@@ -2,6 +2,7 @@ import { abortEmbeddedPiRun } from "../../agents/pi-embedded.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
 import { createInternalHookEvent, triggerInternalHook } from "../../hooks/internal-hooks.js";
+import { drainSystemEvents } from "../../infra/system-events.js";
 import {
   resolveAbortCutoffFromContext,
   shouldPersistAbortCutoff,
@@ -104,6 +105,11 @@ export const handleStopCommand: CommandHandler = async (params, allowTextCommand
     sessionStore: params.sessionStore,
   });
   const cleared = clearSessionQueues([abortTarget.key, abortTarget.sessionId]);
+  // Also drain pending system events (e.g. queued heartbeat) to prevent
+  // them from immediately triggering a new run after the abort.
+  if (abortTarget.key) {
+    drainSystemEvents(abortTarget.key);
+  }
   if (cleared.followupCleared > 0 || cleared.laneCleared > 0) {
     logVerbose(
       `stop: cleared followups=${cleared.followupCleared} lane=${cleared.laneCleared} keys=${cleared.keys.join(",")}`,
