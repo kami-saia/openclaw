@@ -3,12 +3,15 @@
 import { spawnSync } from "node:child_process";
 
 const logLevel = process.env.OPENCLAW_BUILD_VERBOSE ? "info" : "warn";
+const packageManager = process.env.npm_execpath ?? "pnpm";
+const packageManagerArgs = ["exec", "tsdown", "--config-loader", "unrun", "--logLevel", logLevel];
+const shouldRunViaNode = process.platform === "win32" && /\.(?:c?m?js)$/i.test(packageManager);
 const result = spawnSync(
-  "pnpm",
-  ["exec", "tsdown", "--config-loader", "unrun", "--logLevel", logLevel],
+  shouldRunViaNode ? process.execPath : packageManager,
+  shouldRunViaNode ? [packageManager, ...packageManagerArgs] : packageManagerArgs,
   {
     stdio: "inherit",
-    shell: process.platform === "win32",
+    shell: !shouldRunViaNode && process.platform === "win32",
   },
 );
 
