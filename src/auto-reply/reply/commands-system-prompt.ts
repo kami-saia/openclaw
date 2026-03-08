@@ -124,7 +124,6 @@ export async function resolveCommandsSystemPromptBundle(
     userTimeFormat,
     contextFiles: injectedFiles,
     skillsPrompt,
-    heartbeatPrompt: undefined,
     ttsHint,
     acpEnabled: params.cfg?.acp?.enabled !== false,
     runtimeInfo,

@@ -1,5 +1,4 @@
 import type { ImageContent } from "@mariozechner/pi-ai";
-import { resolveHeartbeatPrompt } from "../auto-reply/heartbeat.js";
 import type { ThinkLevel } from "../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { shouldLogVerbose } from "../globals.js";
@@ -129,15 +128,11 @@ export async function runCliAgent(params: {
     seenSignatures: params.bootstrapPromptWarningSignaturesSeen,
     previousSignature: params.bootstrapPromptWarningSignature,
   });
-  const { defaultAgentId, sessionAgentId } = resolveSessionAgentIds({
+  const { sessionAgentId } = resolveSessionAgentIds({
     sessionKey: params.sessionKey,
     config: params.config,
     agentId: params.agentId,
   });
-  const heartbeatPrompt =
-    sessionAgentId === defaultAgentId
-      ? resolveHeartbeatPrompt(params.config?.agents?.defaults?.heartbeat?.prompt)
-      : undefined;
   const docsPath = await resolveOpenClawDocsPath({
     workspaceDir,
     argv1: process.argv[1],
@@ -150,7 +145,6 @@ export async function runCliAgent(params: {
     defaultThinkLevel: params.thinkLevel,
     extraSystemPrompt,
     ownerNumbers: params.ownerNumbers,
-    heartbeatPrompt,
     docsPath: docsPath ?? undefined,
     tools: [],
     contextFiles,

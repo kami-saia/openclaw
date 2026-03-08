@@ -17,7 +17,6 @@ export function buildEmbeddedSystemPrompt(params: {
   ownerDisplay?: "raw" | "hash";
   ownerDisplaySecret?: string;
   reasoningTagHint: boolean;
-  heartbeatPrompt?: string;
   skillsPrompt?: string;
   docsPath?: string;
   ttsHint?: string;
@@ -63,7 +62,6 @@ export function buildEmbeddedSystemPrompt(params: {
     ownerDisplay: params.ownerDisplay,
     ownerDisplaySecret: params.ownerDisplaySecret,
     reasoningTagHint: params.reasoningTagHint,
-    heartbeatPrompt: params.heartbeatPrompt,
     skillsPrompt: params.skillsPrompt,
     docsPath: params.docsPath,
     ttsHint: params.ttsHint,
