@@ -442,8 +442,6 @@
       "protobufjs",
       "sharp"
     ],
-    "patchedDependencies": {
-      "@mariozechner/pi-agent-core@0.55.3": "patches/@mariozechner__pi-agent-core@0.55.3.patch"
-    }
+    "patchedDependencies": {}
   }
 }

@@ -1165,6 +1165,33 @@ export async function runEmbeddedAttempt(
 
       const allCustomTools = [...customTools, ...clientToolDefs];
 
+      // Wrap tool execute methods to check abort signal before each execution.
+      // This ensures /stop actually halts multi-tool turns even if pi-agent-core
+      // doesn't check the signal between tool calls. See openclaw/openclaw#29034.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const wrapToolsWithAbortCheck = <T extends { execute: (...args: any[]) => any }>(
+        tools: T[],
+        signal: AbortSignal,
+      ): T[] =>
+        tools.map((tool) => ({
+          ...tool,
+          execute: (...args: Parameters<T["execute"]>) => {
+            if (signal.aborted) {
+              return Promise.reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+            }
+            return tool.execute(...args);
+          },
+        }));
+
+      const abortGuardedBuiltInTools = wrapToolsWithAbortCheck(
+        builtInTools,
+        runAbortController.signal,
+      );
+      const abortGuardedCustomTools = wrapToolsWithAbortCheck(
+        allCustomTools,
+        runAbortController.signal,
+      );
+
       ({ session } = await createAgentSession({
         cwd: resolvedWorkspace,
         agentDir,
@@ -1172,8 +1199,8 @@ export async function runEmbeddedAttempt(
         modelRegistry: params.modelRegistry,
         model: params.model,
         thinkingLevel: mapThinkingLevel(params.thinkLevel),
-        tools: builtInTools,
-        customTools: allCustomTools,
+        tools: abortGuardedBuiltInTools,
+        customTools: abortGuardedCustomTools,
         sessionManager,
         settingsManager,
         resourceLoader,
