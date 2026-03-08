@@ -582,7 +582,7 @@ export function createAgentEventHandler({
       const toolPhase = typeof evt.data?.phase === "string" ? evt.data.phase : "";
       // Flush pending assistant text before tool-start events so clients can
       // render complete pre-tool text above tool cards (not truncated by delta throttle).
-      if (toolPhase === "start" && isControlUiVisible && sessionKey && !isAborted) {
+      if (toolPhase === "start" && sessionKey && !isAborted) {
         flushBufferedChatDeltaIfNeeded(sessionKey, clientRunId, evt.runId, evt.seq);
       }
       // Always broadcast tool events to registered WS recipients with
@@ -593,14 +593,14 @@ export function createAgentEventHandler({
       if (recipients && recipients.size > 0) {
         broadcastToConnIds("agent", toolPayload, recipients);
       }
-    } else {
+    } else if (isControlUiVisible) {
       broadcast("agent", agentPayload);
     }
 
     const lifecyclePhase =
       evt.stream === "lifecycle" && typeof evt.data?.phase === "string" ? evt.data.phase : null;
 
-    if (isControlUiVisible && sessionKey) {
+    if (sessionKey) {
       // Send tool events to node/channel subscribers only when verbose is enabled;
       // WS clients already received the event above via broadcastToConnIds.
       if (!isToolEvent || toolVerbose !== "off") {
