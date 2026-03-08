@@ -202,15 +202,16 @@ export class NodeRegistry {
 
   private sendEventInternal(node: NodeSession, event: string, payload: unknown): boolean {
     try {
-      node.client.socket.send(
-        JSON.stringify({
-          type: "event",
-          event,
-          payload,
-        }),
-      );
+      const data = JSON.stringify({
+        type: "event",
+        event,
+        payload,
+      });
+      console.log(`[node-registry] sendEvent nodeId=${node.nodeId.slice(0,8)} event=${event} len=${data.length} readyState=${node.client.socket.readyState}`);
+      node.client.socket.send(data);
       return true;
-    } catch {
+    } catch (e) {
+      console.log(`[node-registry] sendEvent FAILED nodeId=${node.nodeId.slice(0,8)} event=${event} error=${e}`);
       return false;
     }
   }

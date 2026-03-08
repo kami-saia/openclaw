@@ -458,8 +458,10 @@ export function createAgentEventHandler({
     error?: unknown,
     stopReason?: string,
   ) => {
+    const rawBuffered = chatRunState.buffers.get(clientRunId);
+    console.log(`[emitChatFinal] clientRunId=${clientRunId.slice(0,8)} sourceRunId=${sourceRunId.slice(0,8)} bufferExists=${rawBuffered !== undefined} bufferLen=${rawBuffered?.length ?? 0} jobState=${jobState}`);
     const bufferedText = stripInlineDirectiveTagsForDisplay(
-      chatRunState.buffers.get(clientRunId) ?? "",
+      rawBuffered ?? "",
     ).text.trim();
     const normalizedHeartbeatText = normalizeHeartbeatChatFinalText({
       runId: clientRunId,
@@ -469,10 +471,12 @@ export function createAgentEventHandler({
     const text = normalizedHeartbeatText.text.trim();
     const shouldSuppressSilent =
       normalizedHeartbeatText.suppress || isSilentReplyText(text, SILENT_REPLY_TOKEN);
+    const shouldSuppressSilentLeadFragment = isSilentReplyLeadFragment(text);
     // Flush any throttled delta so streaming clients receive the complete text
     // before the final event. The 150 ms throttle in emitChatDelta may have
     // suppressed the most recent chunk, leaving the client with stale text.
     // Only flush if the buffer has grown since the last broadcast to avoid duplicates.
+    console.log(`[emitChatFinal] textLen=${text.length} suppressSilent=${shouldSuppressSilent} suppressLeadFrag=${shouldSuppressSilentLeadFragment}`);
     flushBufferedChatDeltaIfNeeded(sessionKey, clientRunId, sourceRunId, seq);
     chatRunState.deltaLastBroadcastLen.delete(clientRunId);
     chatRunState.buffers.delete(clientRunId);
@@ -493,8 +497,10 @@ export function createAgentEventHandler({
               }
             : undefined,
       };
-      broadcast("chat", payload);
+      // Send to node subscribers BEFORE broadcast, because broadcast's
+      // sanitizePayloadForClient may mutate the payload (delete message).
       nodeSendToSession(sessionKey, "chat", payload);
+      broadcast("chat", payload);
       onChatFinal?.({
         sessionKey,
         text: shouldSuppressSilent || shouldSuppressSilentLeadFragment ? "" : text,
@@ -536,12 +542,17 @@ export function createAgentEventHandler({
   };
 
   return (evt: AgentEventPayload) => {
+    if (evt.stream === "lifecycle") console.log(`[chat-lifecycle] runId=${evt.runId.slice(0,8)} phase=${evt.data?.phase} sessionKey=${evt.sessionKey ?? "none"}`);
+    if (evt.stream === "assistant") console.log(`[chat-assistant] runId=${evt.runId.slice(0,8)} hasText=${typeof evt.data?.text === "string"} textLen=${evt.data?.text?.length ?? 0}`);
     const chatLink = chatRunState.registry.peek(evt.runId);
     const eventSessionKey =
       typeof evt.sessionKey === "string" && evt.sessionKey.trim() ? evt.sessionKey : undefined;
     const isControlUiVisible = getAgentRunContext(evt.runId)?.isControlUiVisible ?? true;
     const sessionKey =
       chatLink?.sessionKey ?? eventSessionKey ?? resolveSessionKeyForRun(evt.runId);
+    if (evt.stream === "assistant" || (evt.stream === "lifecycle" && evt.data?.phase === "end")) {
+      console.log(`[chat-resolve] stream=${evt.stream} evtRunId=${evt.runId.slice(0,8)} sessionKey=${sessionKey ?? "NONE"} eventSessionKey=${eventSessionKey ?? "NONE"}`);
+    }
     const clientRunId = chatLink?.clientRunId ?? evt.runId;
     const eventRunId = chatLink?.clientRunId ?? evt.runId;
     const eventForClients = chatLink ? { ...evt, runId: eventRunId } : evt;
@@ -627,6 +638,7 @@ export function createAgentEventHandler({
             evtStopReason,
           );
         } else {
+          console.log(`[chat-final-call] runId=${eventRunId.slice(0,8)} sessionKey=${sessionKey}`);
           emitChatFinal(
             sessionKey,
             eventRunId,

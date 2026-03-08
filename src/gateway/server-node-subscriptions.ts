@@ -114,6 +114,7 @@ export function createNodeSubscriptionManager(): NodeSubscriptionManager {
 
     const payloadJSON = toPayloadJSON(payload);
     for (const nodeId of subs) {
+      console.log(`[node-sub] sendToSession: sessionKey=${normalizedSessionKey} event=${event} nodeId=${nodeId} payloadLen=${payloadJSON?.length ?? 0}`);
       sendEvent({ nodeId, event, payloadJSON });
     }
   };

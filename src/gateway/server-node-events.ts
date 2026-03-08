@@ -434,6 +434,7 @@ export const handleNodeEvent = async (ctx: NodeEventContext, nodeId: string, evt
         );
       }
 
+      console.log(`[node-evt] agent.request: node=${nodeId} sessionKey=${canonicalKey} messageLen=${message.length} deliver=${deliver}`);
       void agentCommandFromIngress(
         {
           message,
@@ -504,6 +505,7 @@ export const handleNodeEvent = async (ctx: NodeEventContext, nodeId: string, evt
       if (!sessionKey) {
         return;
       }
+      console.log(`[node-evt] chat.subscribe: node=${nodeId} sessionKey=${sessionKey}`);
       ctx.nodeSubscribe(nodeId, sessionKey);
       return;
     }
