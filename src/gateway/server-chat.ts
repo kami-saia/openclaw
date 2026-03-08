@@ -458,7 +458,7 @@ export function createAgentEventHandler({
         state: "final" as const,
         ...(stopReason && { stopReason }),
         message:
-          text && !shouldSuppressSilent
+          text && !shouldSuppressSilent && !shouldSuppressSilentLeadFragment
             ? {
                 role: "assistant",
                 content: [{ type: "text", text }],
@@ -468,7 +468,11 @@ export function createAgentEventHandler({
       };
       broadcast("chat", payload);
       nodeSendToSession(sessionKey, "chat", payload);
-      onChatFinal?.({ sessionKey, text: shouldSuppressSilent ? "" : text, role: "assistant" });
+      onChatFinal?.({
+        sessionKey,
+        text: shouldSuppressSilent || shouldSuppressSilentLeadFragment ? "" : text,
+        role: "assistant",
+      });
       return;
     }
     const payload = {
