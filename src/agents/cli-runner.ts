@@ -4,6 +4,7 @@ import type { ThinkLevel } from "../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { shouldLogVerbose } from "../globals.js";
 import { isTruthyEnvValue } from "../infra/env.js";
+import { resolveHeartbeatSessionKey } from "../infra/heartbeat-runner.js";
 import { requestHeartbeatNow } from "../infra/heartbeat-wake.js";
 import { enqueueSystemEvent } from "../infra/system-events.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
@@ -135,7 +136,8 @@ export async function runCliAgent(params: {
     agentId: params.agentId,
   });
   const heartbeatPrompt =
-    sessionAgentId === defaultAgentId
+    sessionAgentId === defaultAgentId &&
+    params.sessionKey === resolveHeartbeatSessionKey(params.config, sessionAgentId)
       ? resolveHeartbeatPrompt(params.config?.agents?.defaults?.heartbeat?.prompt)
       : undefined;
   const docsPath = await resolveOpenClawDocsPath({

@@ -100,6 +100,60 @@ export type HeartbeatSummary = {
 const DEFAULT_HEARTBEAT_TARGET = "none";
 export { isCronSystemEvent };
 
+/**
+ * Resolve the session key that heartbeats target for a given agent.
+ * This is a lightweight check that doesn't load the session store —
+ * suitable for deciding whether to include heartbeat instructions in
+ * a session's system prompt.
+ */
+export function resolveHeartbeatSessionKey(
+  cfg: OpenClawConfig | undefined,
+  agentId?: string,
+): string | undefined {
+  if (!cfg) {
+    return undefined;
+  }
+  const heartbeat = resolveHeartbeatConfig(cfg, agentId);
+  const sessionCfg = cfg.session;
+  const scope = sessionCfg?.scope ?? "per-sender";
+  const resolvedAgentId = normalizeAgentId(agentId ?? resolveDefaultAgentId(cfg));
+  const mainSessionKey =
+    scope === "global" ? "global" : resolveAgentMainSessionKey({ cfg, agentId: resolvedAgentId });
+
+  if (scope === "global") {
+    return mainSessionKey;
+  }
+
+  const trimmed = heartbeat?.session?.trim() ?? "";
+  if (!trimmed) {
+    return mainSessionKey;
+  }
+
+  const normalized = trimmed.toLowerCase();
+  if (normalized === "main" || normalized === "global") {
+    return mainSessionKey;
+  }
+
+  const candidate = toAgentStoreSessionKey({
+    agentId: resolvedAgentId,
+    requestKey: trimmed,
+    mainKey: cfg.session?.mainKey,
+  });
+  const canonical = canonicalizeMainSessionAlias({
+    cfg,
+    agentId: resolvedAgentId,
+    sessionKey: candidate,
+  });
+  if (canonical !== "global") {
+    const sessionAgentId = resolveAgentIdFromSessionKey(canonical);
+    if (sessionAgentId === normalizeAgentId(resolvedAgentId)) {
+      return canonical;
+    }
+  }
+
+  return mainSessionKey;
+}
+
 type HeartbeatAgentState = {
   agentId: string;
   heartbeat?: HeartbeatConfig;
