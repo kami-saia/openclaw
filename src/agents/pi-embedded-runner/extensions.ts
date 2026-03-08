@@ -96,6 +96,7 @@ export function buildEmbeddedExtensionFactories(params: {
       qualityGuardMaxRetries: qualityGuardCfg?.maxRetries,
       model: params.model,
       compactionMode: compactionCfg?.mode,
+      recentTurnsPreserve: compactionCfg?.recentTurnsPreserve,
     });
     factories.push(compactionSafeguardExtension);
   }
