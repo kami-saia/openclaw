@@ -16,7 +16,6 @@ import {
   resolveContextEngine,
 } from "../../context-engine/index.js";
 import { createInternalHookEvent, triggerInternalHook } from "../../hooks/internal-hooks.js";
-import { resolveHeartbeatSessionKey } from "../../infra/heartbeat-runner.js";
 import { getMachineDisplayName } from "../../infra/machine-name.js";
 import { generateSecureToken } from "../../infra/secure-random.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
@@ -512,11 +511,9 @@ export async function compactEmbeddedPiSessionDirect(
       ownerDisplay: ownerDisplay.ownerDisplay,
       ownerDisplaySecret: ownerDisplay.ownerDisplaySecret,
       reasoningTagHint,
-      heartbeatPrompt:
-        isDefaultAgent &&
-        params.sessionKey === resolveHeartbeatSessionKey(params.config, sessionAgentId)
-          ? resolveHeartbeatPrompt(params.config?.agents?.defaults?.heartbeat?.prompt)
-          : undefined,
+      heartbeatPrompt: isDefaultAgent
+        ? resolveHeartbeatPrompt(params.config?.agents?.defaults?.heartbeat?.prompt)
+        : undefined,
       skillsPrompt,
       docsPath: docsPath ?? undefined,
       ttsHint,

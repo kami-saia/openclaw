@@ -10,7 +10,6 @@ import {
 import { resolveHeartbeatPrompt } from "../../../auto-reply/heartbeat.js";
 import { resolveChannelCapabilities } from "../../../config/channel-capabilities.js";
 import type { OpenClawConfig } from "../../../config/config.js";
-import { resolveHeartbeatSessionKey } from "../../../infra/heartbeat-runner.js";
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
 import { ensureGlobalUndiciStreamTimeouts } from "../../../infra/net/undici-global-dispatcher.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
@@ -999,11 +998,9 @@ export async function runEmbeddedAttempt(
       ownerDisplay: ownerDisplay.ownerDisplay,
       ownerDisplaySecret: ownerDisplay.ownerDisplaySecret,
       reasoningTagHint,
-      heartbeatPrompt:
-        isDefaultAgent &&
-        params.sessionKey === resolveHeartbeatSessionKey(params.config, sessionAgentId)
-          ? resolveHeartbeatPrompt(params.config?.agents?.defaults?.heartbeat?.prompt)
-          : undefined,
+      heartbeatPrompt: isDefaultAgent
+        ? resolveHeartbeatPrompt(params.config?.agents?.defaults?.heartbeat?.prompt)
+        : undefined,
       skillsPrompt,
       docsPath: docsPath ?? undefined,
       ttsHint,
