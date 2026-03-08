@@ -66,7 +66,15 @@ export function formatContextPressureMessage(signal: ContextPressureSignal): str
 
   return (
     tag +
-    " Context is filling up. Use the `compact` tool with a summary when you have a natural break point. " +
-    "Include: goals, progress, key decisions, and context needed to continue."
+    "\n\nContext is filling up. Call `compact` with a summary at your next natural break point." +
+    "\n\n**Compaction guidelines:**" +
+    "\n- Structure: Goal → Decisions → Progress (done/in-progress) → Open TODOs → Critical Context → Next Steps" +
+    "\n- Keep ONLY what's needed to continue the current work thread" +
+    "\n- Drop completed work details — just note they're done" +
+    "\n- Drop exact identifiers (commit hashes, PIDs, message IDs, timestamps) unless actively needed" +
+    "\n- Carry forward file paths and session keys only if the next steps reference them" +
+    "\n- Be concise — a good summary is 1500-3000 chars, not 10000" +
+    "\n- Don't duplicate what's already in workspace files (MEMORY.md, AGENTS.md, TOOLS.md)" +
+    "\n- Preserve any pending user asks or unanswered questions verbatim"
   );
 }

@@ -8,6 +8,7 @@ import type { VoicePlugin } from "@buape/carbon/voice";
 import {
   AudioPlayerStatus,
   EndBehaviorType,
+  StreamType,
   VoiceConnectionStatus,
   createAudioPlayer,
   createAudioResource,
@@ -413,10 +414,26 @@ export class DiscordVoiceManager {
       decryptionFailureTolerance,
     });
 
+    connection.on("stateChange", (oldState, newState) => {
+      logger.info(
+        `discord voice: connection state ${oldState.status} → ${newState.status} (guild ${guildId})`,
+      );
+    });
+    connection.on("error", (err) => {
+      logger.warn(`discord voice: connection error: ${formatErrorMessage(err)} (guild ${guildId})`);
+    });
+    connection.on("debug", (msg) => {
+      logger.info(`discord voice: [debug] ${msg}`);
+    });
     try {
-      await entersState(connection, VoiceConnectionStatus.Ready, PLAYBACK_READY_TIMEOUT_MS);
-      logVoiceVerbose(`join: connected to guild ${guildId} channel ${channelId}`);
+      await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
+      logger.info(
+        `discord voice: joined guild ${guildId} channel ${channelId} (DAVE=${daveEncryption === false ? "off" : "on"})`,
+      );
     } catch (err) {
+      logger.warn(
+        `discord voice: join timeout — destroying connection (guild ${guildId}, last state: ${connection.state.status})`,
+      );
       connection.destroy();
       return { ok: false, message: `Failed to join voice channel: ${formatErrorMessage(err)}` };
     }
@@ -561,6 +578,7 @@ export class DiscordVoiceManager {
   }
 
   private async handleSpeakingStart(entry: VoiceSessionEntry, userId: string) {
+    logger.info(`discord voice: speaking start event — guild ${entry.guildId} user ${userId}`);
     if (!userId || entry.activeSpeakers.has(userId)) {
       return;
     }
@@ -588,6 +606,9 @@ export class DiscordVoiceManager {
 
     try {
       const pcm = await decodeOpusStream(stream);
+      logger.info(
+        `discord voice: decoded pcm ${pcm.length} bytes, guild ${entry.guildId} user ${userId}`,
+      );
       if (pcm.length === 0) {
         logVoiceVerbose(
           `capture empty: guild ${entry.guildId} channel ${entry.channelId} user ${userId}`,
@@ -660,25 +681,37 @@ export class DiscordVoiceManager {
       .trim();
 
     if (!replyText) {
-      logVoiceVerbose(
-        `reply empty: guild ${entry.guildId} channel ${entry.channelId} user ${userId}`,
+      logger.info(
+        `discord voice: reply empty (payloads=${result.payloads?.length ?? 0}): guild ${entry.guildId} channel ${entry.channelId} user ${userId}`,
       );
       return;
     }
-    logVoiceVerbose(
-      `reply ok (${replyText.length} chars): guild ${entry.guildId} channel ${entry.channelId}`,
+    logger.info(
+      `discord voice: reply ok (${replyText.length} chars): guild ${entry.guildId} channel ${entry.channelId}`,
     );
 
-    const { cfg: ttsCfg, resolved: ttsConfig } = resolveVoiceTtsConfig({
-      cfg: this.params.cfg,
-      override: this.params.discordConfig.voice?.tts,
-    });
+    let ttsConfig: ReturnType<typeof resolveVoiceTtsConfig>["resolved"];
+    let ttsCfg: ReturnType<typeof resolveVoiceTtsConfig>["cfg"];
+    try {
+      const resolved = resolveVoiceTtsConfig({
+        cfg: this.params.cfg,
+        override: this.params.discordConfig.voice?.tts,
+      });
+      ttsConfig = resolved.resolved;
+      ttsCfg = resolved.cfg;
+    } catch (err) {
+      logger.warn(`discord voice: resolveVoiceTtsConfig failed: ${formatErrorMessage(err)}`);
+      return;
+    }
     const directive = parseTtsDirectives(
       replyText,
       ttsConfig.modelOverrides,
       ttsConfig.openai.baseUrl,
     );
     const speakText = directive.overrides.ttsText ?? directive.cleanedText.trim();
+    logger.info(
+      `discord voice: tts speakText=${speakText.length} chars, baseUrl=${ttsConfig.openai.baseUrl}`,
+    );
     if (!speakText) {
       logVoiceVerbose(
         `tts skipped (empty): guild ${entry.guildId} channel ${entry.channelId} user ${userId}`,
@@ -686,35 +719,163 @@ export class DiscordVoiceManager {
       return;
     }
 
-    const ttsResult = await textToSpeech({
-      text: speakText,
-      cfg: ttsCfg,
-      channel: "discord",
-      overrides: directive.overrides,
-    });
-    if (!ttsResult.success || !ttsResult.audioPath) {
-      logger.warn(`discord voice: TTS failed: ${ttsResult.error ?? "unknown error"}`);
-      return;
-    }
-    const audioPath = ttsResult.audioPath;
-    logVoiceVerbose(
-      `tts ok (${speakText.length} chars): guild ${entry.guildId} channel ${entry.channelId}`,
-    );
+    // Try streaming TTS path if configured baseUrl is local daemon
+    const streamBaseUrl = ttsConfig.openai.baseUrl;
+    const useStreaming = streamBaseUrl && /localhost|127\.0\.0\.1/.test(streamBaseUrl);
 
-    this.enqueuePlayback(entry, async () => {
+    if (useStreaming) {
       logVoiceVerbose(
-        `playback start: guild ${entry.guildId} channel ${entry.channelId} file ${path.basename(audioPath)}`,
+        `tts streaming: guild ${entry.guildId} channel ${entry.channelId} (${speakText.length} chars)`,
       );
-      const resource = createAudioResource(audioPath);
-      entry.player.play(resource);
-      await entersState(entry.player, AudioPlayerStatus.Playing, PLAYBACK_READY_TIMEOUT_MS).catch(
-        () => undefined,
+      const streamUrl = streamBaseUrl.replace(/\/v1\/?$/, "") + "/v1/audio/speech/stream";
+      logger.info(`discord voice: TTS streaming fetch → ${streamUrl}`);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30_000);
+      let response: Response;
+      try {
+        response = await fetch(streamUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ input: speakText, model: "kyutai-tts", voice: "saia" }),
+          signal: controller.signal,
+        });
+      } catch (err) {
+        clearTimeout(timeout);
+        logger.warn(`discord voice: streaming TTS fetch failed: ${formatErrorMessage(err)}`);
+        return;
+      }
+      if (!response.ok || !response.body) {
+        clearTimeout(timeout);
+        logger.warn(`discord voice: streaming TTS HTTP ${response.status}`);
+        return;
+      }
+      logger.info(`discord voice: TTS streaming response OK, enqueueing playback`);
+
+      this.enqueuePlayback(entry, async () => {
+        logger.info(`discord voice: playback callback starting`);
+        try {
+          const { Readable, PassThrough } = await import("node:stream");
+          const nodeStream = Readable.fromWeb(
+            response.body as import("node:stream/web").ReadableStream,
+          );
+          // Skip 8-byte PCMS header, then pipe PCM through PassThrough
+          const pcmStream = new PassThrough();
+          let headerSkipped = false;
+          let headerBuf = Buffer.alloc(0);
+          nodeStream.on("data", (chunk: Buffer) => {
+            if (!headerSkipped) {
+              headerBuf = Buffer.concat([
+                headerBuf,
+                Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk),
+              ]);
+              if (headerBuf.length >= 8) {
+                pcmStream.write(headerBuf.subarray(8));
+                headerSkipped = true;
+              }
+              return;
+            }
+            pcmStream.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+          });
+          nodeStream.on("end", () => {
+            pcmStream.end();
+            clearTimeout(timeout);
+          });
+          nodeStream.on("error", (err) => {
+            pcmStream.destroy(err instanceof Error ? err : new Error(String(err)));
+            clearTimeout(timeout);
+          });
+
+          // Convert 24kHz mono s16le PCM to 48kHz stereo s16le PCM via ffmpeg, then feed as Raw
+          const { spawn } = await import("node:child_process");
+          const ffmpeg = spawn(
+            "ffmpeg",
+            [
+              "-f",
+              "s16le",
+              "-ar",
+              "24000",
+              "-ac",
+              "1",
+              "-i",
+              "pipe:0",
+              "-f",
+              "s16le",
+              "-ar",
+              "48000",
+              "-ac",
+              "2",
+              "pipe:1",
+            ],
+            { stdio: ["pipe", "pipe", "ignore"] },
+          );
+          pcmStream.pipe(ffmpeg.stdin);
+          const resource = createAudioResource(ffmpeg.stdout, {
+            inputType: StreamType.Raw,
+            inlineVolume: false,
+          });
+          entry.player.play(resource);
+          logger.info(`discord voice: player.play() called, waiting for Playing state`);
+          const playingOk = await entersState(
+            entry.player,
+            AudioPlayerStatus.Playing,
+            PLAYBACK_READY_TIMEOUT_MS,
+          ).then(
+            () => true,
+            () => false,
+          );
+          logger.info(
+            `discord voice: Playing state reached: ${playingOk}, current state: ${entry.player.state.status}`,
+          );
+          const idleOk = await entersState(
+            entry.player,
+            AudioPlayerStatus.Idle,
+            SPEAKING_READY_TIMEOUT_MS,
+          ).then(
+            () => true,
+            () => false,
+          );
+          logger.info(
+            `discord voice: Idle state reached: ${idleOk}, current state: ${entry.player.state.status}`,
+          );
+        } catch (err) {
+          logger.warn(`discord voice: streaming playback failed: ${formatErrorMessage(err)}`);
+          clearTimeout(timeout);
+        }
+        logVoiceVerbose(
+          `playback done (stream): guild ${entry.guildId} channel ${entry.channelId}`,
+        );
+      });
+    } else {
+      const ttsResult = await textToSpeech({
+        text: speakText,
+        cfg: ttsCfg,
+        channel: "discord",
+        overrides: directive.overrides,
+      });
+      if (!ttsResult.success || !ttsResult.audioPath) {
+        logger.warn(`discord voice: TTS failed: ${ttsResult.error ?? "unknown error"}`);
+        return;
+      }
+      const audioPath = ttsResult.audioPath;
+      logVoiceVerbose(
+        `tts ok (${speakText.length} chars): guild ${entry.guildId} channel ${entry.channelId}`,
       );
-      await entersState(entry.player, AudioPlayerStatus.Idle, SPEAKING_READY_TIMEOUT_MS).catch(
-        () => undefined,
-      );
-      logVoiceVerbose(`playback done: guild ${entry.guildId} channel ${entry.channelId}`);
-    });
+
+      this.enqueuePlayback(entry, async () => {
+        logVoiceVerbose(
+          `playback start: guild ${entry.guildId} channel ${entry.channelId} file ${path.basename(audioPath)}`,
+        );
+        const resource = createAudioResource(audioPath);
+        entry.player.play(resource);
+        await entersState(entry.player, AudioPlayerStatus.Playing, PLAYBACK_READY_TIMEOUT_MS).catch(
+          () => undefined,
+        );
+        await entersState(entry.player, AudioPlayerStatus.Idle, SPEAKING_READY_TIMEOUT_MS).catch(
+          () => undefined,
+        );
+        logVoiceVerbose(`playback done: guild ${entry.guildId} channel ${entry.channelId}`);
+      });
+    }
   }
 
   private handleReceiveError(entry: VoiceSessionEntry, err: unknown) {

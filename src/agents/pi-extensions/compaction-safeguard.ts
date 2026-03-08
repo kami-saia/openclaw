@@ -699,6 +699,14 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
   api.on("session_before_compact", async (event, ctx) => {
     const { preparation, customInstructions, signal } = event;
 
+    // When compaction mode is "agent", the agent handles compaction via the compact tool.
+    // Cancel SDK-triggered compaction to prevent legacy compaction from running.
+    const compactionRuntime = getCompactionSafeguardRuntime(ctx.sessionManager);
+    if (compactionRuntime?.compactionMode === "agent") {
+      log.info("Compaction safeguard: agent mode — cancelling SDK-triggered compaction.");
+      return { cancel: true };
+    }
+
     if (!preparation.messagesToSummarize.some(isRealConversationMessage)) {
       log.warn(
         "Compaction safeguard: cancelling compaction with no real conversation messages to summarize.",

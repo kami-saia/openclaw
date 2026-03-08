@@ -27,7 +27,7 @@ export function createTtsTool(opts?: {
       const params = args as Record<string, unknown>;
       const text = readStringParam(params, "text", { required: true });
       const channel = readStringParam(params, "channel");
-      const cfg = opts?.config ?? loadConfig();
+      const cfg = loadConfig();
       const result = await textToSpeech({
         text,
         cfg,

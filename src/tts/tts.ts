@@ -579,7 +579,6 @@ export async function textToSpeech(params: {
   const providers = resolveTtsProviderOrder(provider);
 
   const errors: string[] = [];
-
   for (const provider of providers) {
     const providerStart = Date.now();
     try {
