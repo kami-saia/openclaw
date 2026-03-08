@@ -20,23 +20,9 @@ export type AgentRunContext = {
 };
 
 // Keep per-run counters so streams stay strictly monotonic per runId.
-// Use globalThis to ensure a single shared event bus even when the bundler
-// duplicates this module across multiple chunks (tsdown code-splitting).
-const GLOBAL_KEY = "__openclaw_agent_events__" as const;
-type AgentEventGlobals = {
-  seqByRun: Map<string, number>;
-  listeners: Set<(evt: AgentEventPayload) => void>;
-  runContextById: Map<string, AgentRunContext>;
-};
-const g = globalThis as unknown as Record<string, AgentEventGlobals | undefined>;
-if (!g[GLOBAL_KEY]) {
-  g[GLOBAL_KEY] = {
-    seqByRun: new Map(),
-    listeners: new Set(),
-    runContextById: new Map(),
-  };
-}
-const { seqByRun, listeners, runContextById } = g[GLOBAL_KEY]!;
+const seqByRun = new Map<string, number>();
+const listeners = new Set<(evt: AgentEventPayload) => void>();
+const runContextById = new Map<string, AgentRunContext>();
 
 export function registerAgentRunContext(runId: string, context: AgentRunContext) {
   if (!runId) {
