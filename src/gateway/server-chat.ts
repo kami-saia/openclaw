@@ -542,8 +542,8 @@ export function createAgentEventHandler({
   };
 
   return (evt: AgentEventPayload) => {
-    if (evt.stream === "lifecycle") console.log(`[chat-lifecycle] runId=${evt.runId.slice(0,8)} phase=${evt.data?.phase} sessionKey=${evt.sessionKey ?? "none"}`);
-    if (evt.stream === "assistant") console.log(`[chat-assistant] runId=${evt.runId.slice(0,8)} hasText=${typeof evt.data?.text === "string"} textLen=${evt.data?.text?.length ?? 0}`);
+    if (evt.stream === "lifecycle") {console.log(`[chat-lifecycle] runId=${evt.runId.slice(0,8)} phase=${evt.data?.phase} sessionKey=${evt.sessionKey ?? "none"}`);}
+    if (evt.stream === "assistant") {console.log(`[chat-assistant] runId=${evt.runId.slice(0,8)} hasText=${typeof evt.data?.text === "string"} textLen=${evt.data?.text?.length ?? 0}`);}
     const chatLink = chatRunState.registry.peek(evt.runId);
     const eventSessionKey =
       typeof evt.sessionKey === "string" && evt.sessionKey.trim() ? evt.sessionKey : undefined;

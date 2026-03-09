@@ -26,11 +26,24 @@ async function loadPrepareCompaction(): Promise<void> {
     // our own dist dir, walk up to node_modules. Convert to file:// URL to bypass exports.
     const { resolve, dirname } = await import("node:path");
     const { pathToFileURL, fileURLToPath } = await import("node:url");
-    const thisDir = dirname(fileURLToPath(import.meta.url));
-    const abs = resolve(
-      thisDir,
-      "../node_modules/@mariozechner/pi-coding-agent/dist/core/compaction/compaction.js",
-    );
+    const { existsSync } = await import("node:fs");
+    // Walk up from the bundled file until we find a directory containing node_modules/,
+    // since the bundled output may be nested (e.g. dist/plugin-sdk/).
+    const target =
+      "@mariozechner/pi-coding-agent/dist/core/compaction/compaction.js";
+    let dir = dirname(fileURLToPath(import.meta.url));
+    let abs = "";
+    for (let i = 0; i < 10; i++) {
+      const candidate = resolve(dir, "node_modules", target);
+      if (existsSync(candidate)) {
+        abs = candidate;
+        break;
+      }
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    if (!abs) throw new Error(`Could not find ${target} in any ancestor node_modules`);
     const mod = await import(pathToFileURL(abs).href);
     prepareCompaction = mod.prepareCompaction as typeof prepareCompaction;
   } catch (err) {
