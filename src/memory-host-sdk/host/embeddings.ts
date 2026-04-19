@@ -68,8 +68,7 @@ export type EmbeddingProviderResult = {
   lmstudio?: LmstudioEmbeddingClient;
 };
 
-export const DEFAULT_LOCAL_MODEL =
-  "hf:ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/embeddinggemma-300m-qat-Q8_0.gguf";
+export const DEFAULT_LOCAL_MODEL = "hf:ggml-org/bge-m3-Q8_0-GGUF/bge-m3-q8_0.gguf";
 
 function canAutoSelectLocal(options: EmbeddingProviderOptions): boolean {
   const modelPath = options.local?.modelPath?.trim();

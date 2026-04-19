@@ -538,6 +538,7 @@ describe("local embedding normalization", () => {
     const magnitude = Math.sqrt(embedding.reduce((sum, x) => sum + x * x, 0));
 
     expect(magnitude).toBeCloseTo(1.0, 5);
+    expect(DEFAULT_LOCAL_MODEL).toBe("hf:ggml-org/bge-m3-Q8_0-GGUF/bge-m3-q8_0.gguf");
     expect(resolveModelFileMock).toHaveBeenCalledWith(DEFAULT_LOCAL_MODEL, undefined);
   });
 
