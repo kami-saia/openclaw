@@ -48,7 +48,20 @@ function estimateSessionTokensFromTranscriptDefault(entry: SessionEntry): number
     if (!filePath) {
       return undefined;
     }
+    return estimateSessionTokensFromTranscriptFile(filePath);
+  } catch {
+    return undefined;
+  }
+}
 
+/**
+ * Pure estimator: given a session transcript file path, return the
+ * estimated token count of the LLM-facing context after the most recent
+ * compaction. Exported for testing.
+ */
+export function estimateSessionTokensFromTranscriptFile(filePath: string): number | undefined {
+  try {
+    const fs = require("node:fs");
     const lines = fs.readFileSync(filePath, "utf-8").split(/\r?\n/);
 
     // Find last compaction's firstKeptEntryId
@@ -67,9 +80,16 @@ function estimateSessionTokensFromTranscriptDefault(entry: SessionEntry): number
       }
     }
 
-    // Collect only kept messages (after compaction marker)
+    // Collect only kept messages (after compaction marker).
+    // Each compaction supersedes prior summaries (the new summary folds in
+    // earlier ones), so we only count the MOST RECENT compaction summary,
+    // not every historical one. Without this, sessions with many compactions
+    // accumulate stale summaries in the token estimate and inflate pressure
+    // far above the actual LLM-facing context size, causing repeated
+    // compaction signals on every turn.
     let foundKept = !firstKeptId; // if no compaction, keep all
     const messages: unknown[] = [];
+    let latestCompactionSummary: string | null = null;
     for (const line of lines) {
       if (!line.trim()) {
         continue;
@@ -79,13 +99,9 @@ function estimateSessionTokensFromTranscriptDefault(entry: SessionEntry): number
         if (!foundKept && parsed?.id === firstKeptId) {
           foundKept = true;
         }
-        // Include compaction summary as a message
+        // Track the most recent compaction summary; older ones are subsumed.
         if (parsed?.type === "compaction" && parsed.summary) {
-          messages.push({
-            role: "assistant",
-            content: [{ type: "text", text: parsed.summary }],
-            timestamp: Date.now(),
-          });
+          latestCompactionSummary = parsed.summary as string;
         }
         if (foundKept && parsed?.message) {
           messages.push(parsed.message);
@@ -93,6 +109,15 @@ function estimateSessionTokensFromTranscriptDefault(entry: SessionEntry): number
       } catch {
         // ignore malformed lines
       }
+    }
+
+    // Prepend the single most-recent compaction summary (if any) as one message.
+    if (latestCompactionSummary) {
+      messages.unshift({
+        role: "assistant",
+        content: [{ type: "text", text: latestCompactionSummary }],
+        timestamp: Date.now(),
+      });
     }
 
     if (messages.length === 0) {
