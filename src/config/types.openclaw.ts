@@ -135,6 +135,31 @@ export type OpenClawConfig = {
   gateway?: GatewayConfig;
   memory?: MemoryConfig;
   mcp?: McpConfig;
+  /**
+   * Workspace-level configuration. Affects only how the active workspace
+   * directory is treated; not per-agent and not per-channel.
+   */
+  workspace?: {
+    /**
+     * Bootstrap-injection controls. Bootstrap files are the canonical workspace
+     * Markdown files (AGENTS.md, SOUL.md, TOOLS.md, IDENTITY.md, USER.md,
+     * HEARTBEAT.md, BOOTSTRAP.md, MEMORY.md) that get auto-injected into the
+     * project context for sessions running in this workspace.
+     */
+    bootstrap?: {
+      /**
+       * Canonical bootstrap filenames to omit from automatic project-context
+       * injection. Matched case-sensitively against the canonical names listed
+       * in `VALID_BOOTSTRAP_NAMES`. Unknown names are ignored.
+       *
+       * Excluded files are still readable via the `read` tool and other
+       * explicit access paths; only auto-injection is suppressed.
+       *
+       * Default: `[]` (no exclusions; behavior unchanged from prior versions).
+       */
+      exclude?: string[];
+    };
+  };
 };
 
 declare const openClawConfigStateBrand: unique symbol;

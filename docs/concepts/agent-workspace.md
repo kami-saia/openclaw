@@ -125,6 +125,29 @@ adjust limits with `agents.defaults.bootstrapMaxChars` (default: 12000) and
 `openclaw setup` can recreate missing defaults without overwriting existing
 files.
 
+### Excluding bootstrap files from auto-injection
+
+To opt a workspace out of auto-injecting specific canonical bootstrap files
+(while keeping them readable via the `read` tool), set
+`workspace.bootstrap.exclude` in `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "workspace": {
+    "bootstrap": {
+      "exclude": ["HEARTBEAT.md"]
+    }
+  }
+}
+```
+
+- Names are matched case-sensitively against the canonical bootstrap filenames
+  (`AGENTS.md`, `SOUL.md`, `TOOLS.md`, `IDENTITY.md`, `USER.md`, `HEARTBEAT.md`,
+  `BOOTSTRAP.md`, `MEMORY.md`). Unknown or non-canonical names are ignored.
+- Default is `[]` — no exclusions, behavior unchanged.
+- Only auto-injection into the project context is suppressed. Tools that read
+  files explicitly (for example the `read` tool) still see the file.
+
 ## What is NOT in the workspace
 
 These live under `~/.openclaw/` and should NOT be committed to the workspace repo:

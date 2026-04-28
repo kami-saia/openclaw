@@ -1025,6 +1025,22 @@ export const OpenClawSchema = z
           .strict(),
       )
       .optional(),
+    workspace: z
+      .object({
+        bootstrap: z
+          .object({
+            /**
+             * Canonical bootstrap filenames to omit from automatic
+             * project-context injection. Case-sensitive; unknown names are
+             * ignored. Explicit reads (e.g. the `read` tool) are unaffected.
+             */
+            exclude: z.array(z.string()).optional(),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((cfg, ctx) => {
