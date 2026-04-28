@@ -1311,6 +1311,7 @@ export async function runEmbeddedAttempt(
       applyPiAutoCompactionGuard({
         settingsManager,
         contextEngineInfo: activeContextEngine?.info,
+        cfg: params.config,
       });
 
       // Sets compaction/pruning runtime state and returns extension factories

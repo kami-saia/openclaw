@@ -125,17 +125,30 @@ export function applyPiCompactionSettingsFromConfig(params: {
 /** Decide whether Pi's internal auto-compaction should be disabled for this run. */
 export function shouldDisablePiAutoCompaction(params: {
   contextEngineInfo?: ContextEngineInfo;
+  cfg?: OpenClawConfig;
 }): boolean {
-  return params.contextEngineInfo?.ownsCompaction === true;
+  if (params.contextEngineInfo?.ownsCompaction === true) {
+    return true;
+  }
+  // Fork patch: in agent-controlled compaction mode, the agent owns compaction
+  // via the `compact` tool + pressure signal. Disable Pi's internal auto-trigger
+  // so the safeguard extension does not run system-style summarization behind the
+  // agent's back.
+  if (params.cfg?.agents?.defaults?.compaction?.mode === "agent") {
+    return true;
+  }
+  return false;
 }
 
 /** Disable Pi auto-compaction via settings when a context engine owns compaction. */
 export function applyPiAutoCompactionGuard(params: {
   settingsManager: PiSettingsManagerLike;
   contextEngineInfo?: ContextEngineInfo;
+  cfg?: OpenClawConfig;
 }): { supported: boolean; disabled: boolean } {
   const disable = shouldDisablePiAutoCompaction({
     contextEngineInfo: params.contextEngineInfo,
+    cfg: params.cfg,
   });
   const hasMethod = typeof params.settingsManager.setCompactionEnabled === "function";
   if (!disable || !hasMethod) {

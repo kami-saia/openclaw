@@ -38,6 +38,7 @@ type CliCompactionDeps = {
   applyPiAutoCompactionGuard: (params: {
     settingsManager: SettingsManagerLike;
     contextEngineInfo?: ContextEngine["info"];
+    cfg?: OpenClawConfig;
   }) => unknown;
   shouldPreemptivelyCompactBeforePrompt: typeof shouldPreemptivelyCompactBeforePromptImpl;
   resolveLiveToolResultMaxChars: typeof resolveLiveToolResultMaxCharsImpl;
@@ -206,6 +207,7 @@ export async function runCliTurnCompactionLifecycle(params: {
   await cliCompactionDeps.applyPiAutoCompactionGuard({
     settingsManager,
     contextEngineInfo: contextEngine.info,
+    cfg: params.cfg,
   });
 
   const preemptiveCompaction = cliCompactionDeps.shouldPreemptivelyCompactBeforePrompt({

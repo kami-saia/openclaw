@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { MIN_PROMPT_BUDGET_RATIO, MIN_PROMPT_BUDGET_TOKENS } from "./pi-compaction-constants.js";
 import {
+  applyPiAutoCompactionGuard,
   applyPiCompactionSettingsFromConfig,
   DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR,
   resolveCompactionReserveTokensFloor,
+  shouldDisablePiAutoCompaction,
 } from "./pi-settings.js";
 
 describe("applyPiCompactionSettingsFromConfig", () => {
@@ -343,5 +345,74 @@ describe("resolveCompactionReserveTokensFloor", () => {
         agents: { defaults: { compaction: { reserveTokensFloor: 0 } } },
       }),
     ).toBe(0);
+  });
+});
+
+describe("shouldDisablePiAutoCompaction (fork: agent-mode gating)", () => {
+  it("disables when a context engine owns compaction", () => {
+    expect(
+      shouldDisablePiAutoCompaction({
+        contextEngineInfo: { ownsCompaction: true } as never,
+      }),
+    ).toBe(true);
+  });
+
+  it("disables when agents.defaults.compaction.mode === 'agent' (fork patch)", () => {
+    expect(
+      shouldDisablePiAutoCompaction({
+        cfg: { agents: { defaults: { compaction: { mode: "agent" } } } } as never,
+      }),
+    ).toBe(true);
+  });
+
+  it("does NOT disable when mode is 'safeguard' or 'default'", () => {
+    expect(
+      shouldDisablePiAutoCompaction({
+        cfg: { agents: { defaults: { compaction: { mode: "safeguard" } } } } as never,
+      }),
+    ).toBe(false);
+    expect(
+      shouldDisablePiAutoCompaction({
+        cfg: { agents: { defaults: { compaction: { mode: "default" } } } } as never,
+      }),
+    ).toBe(false);
+  });
+
+  it("does NOT disable when no config or context-engine info", () => {
+    expect(shouldDisablePiAutoCompaction({})).toBe(false);
+  });
+});
+
+describe("applyPiAutoCompactionGuard (fork: agent-mode gating)", () => {
+  it("calls setCompactionEnabled(false) in agent mode", () => {
+    const setCompactionEnabled = vi.fn();
+    const settingsManager = {
+      getCompactionReserveTokens: () => 0,
+      getCompactionKeepRecentTokens: () => 0,
+      applyOverrides: vi.fn(),
+      setCompactionEnabled,
+    };
+    const result = applyPiAutoCompactionGuard({
+      settingsManager,
+      cfg: { agents: { defaults: { compaction: { mode: "agent" } } } } as never,
+    });
+    expect(result).toEqual({ supported: true, disabled: true });
+    expect(setCompactionEnabled).toHaveBeenCalledWith(false);
+  });
+
+  it("does nothing when mode is not 'agent' and no context engine owns compaction", () => {
+    const setCompactionEnabled = vi.fn();
+    const settingsManager = {
+      getCompactionReserveTokens: () => 0,
+      getCompactionKeepRecentTokens: () => 0,
+      applyOverrides: vi.fn(),
+      setCompactionEnabled,
+    };
+    const result = applyPiAutoCompactionGuard({
+      settingsManager,
+      cfg: { agents: { defaults: { compaction: { mode: "safeguard" } } } } as never,
+    });
+    expect(result).toEqual({ supported: true, disabled: false });
+    expect(setCompactionEnabled).not.toHaveBeenCalled();
   });
 });
