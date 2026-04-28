@@ -17,6 +17,7 @@ import {
   filterBootstrapFilesForSession,
   isWorkspaceBootstrapPending,
   loadWorkspaceBootstrapFiles,
+  VALID_BOOTSTRAP_NAMES,
   type WorkspaceBootstrapFile,
 } from "./workspace.js";
 
@@ -214,6 +215,42 @@ function filterHeartbeatBootstrapFile(
   return files.filter((file) => file.name !== DEFAULT_HEARTBEAT_FILENAME);
 }
 
+function resolveBootstrapExcludeSet(config?: OpenClawConfig): ReadonlySet<string> {
+  const raw = config?.workspace?.bootstrap?.exclude;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return EMPTY_BOOTSTRAP_EXCLUDE_SET;
+  }
+  const names = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry !== "string") {
+      continue;
+    }
+    const trimmed = entry.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+    if (!VALID_BOOTSTRAP_NAMES.has(trimmed)) {
+      // Unknown / non-canonical names are ignored on purpose: this is a
+      // workspace-level filter on canonical bootstrap files only.
+      continue;
+    }
+    names.add(trimmed);
+  }
+  return names.size === 0 ? EMPTY_BOOTSTRAP_EXCLUDE_SET : names;
+}
+
+const EMPTY_BOOTSTRAP_EXCLUDE_SET: ReadonlySet<string> = new Set<string>();
+
+function filterWorkspaceBootstrapExclude(
+  files: WorkspaceBootstrapFile[],
+  exclude: ReadonlySet<string>,
+): WorkspaceBootstrapFile[] {
+  if (exclude.size === 0) {
+    return files;
+  }
+  return files.filter((file) => !exclude.has(file.name));
+}
+
 export async function resolveBootstrapFilesForRun(params: {
   workspaceDir: string;
   config?: OpenClawConfig;
@@ -225,6 +262,7 @@ export async function resolveBootstrapFilesForRun(params: {
   runKind?: BootstrapContextRunKind;
 }): Promise<WorkspaceBootstrapFile[]> {
   const excludeHeartbeatBootstrapFile = shouldExcludeHeartbeatBootstrapFile(params);
+  const excludeNames = resolveBootstrapExcludeSet(params.config);
   const sessionKey = params.sessionKey ?? params.sessionId;
   const rawFiles = params.sessionKey
     ? await getOrLoadBootstrapFiles({
@@ -233,7 +271,10 @@ export async function resolveBootstrapFilesForRun(params: {
       })
     : await loadWorkspaceBootstrapFiles(params.workspaceDir);
   const bootstrapFiles = applyContextModeFilter({
-    files: filterBootstrapFilesForSession(rawFiles, sessionKey),
+    files: filterWorkspaceBootstrapExclude(
+      filterBootstrapFilesForSession(rawFiles, sessionKey),
+      excludeNames,
+    ),
     contextMode: params.contextMode,
     runKind: params.runKind,
   });
@@ -247,7 +288,10 @@ export async function resolveBootstrapFilesForRun(params: {
     agentId: params.agentId,
   });
   return sanitizeBootstrapFiles(
-    filterHeartbeatBootstrapFile(updated, excludeHeartbeatBootstrapFile),
+    filterHeartbeatBootstrapFile(
+      filterWorkspaceBootstrapExclude(updated, excludeNames),
+      excludeHeartbeatBootstrapFile,
+    ),
     params.warn,
   );
 }

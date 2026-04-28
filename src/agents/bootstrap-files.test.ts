@@ -72,6 +72,79 @@ function expectHeartbeatExcludedAndAgentsKept(files: WorkspaceBootstrapFile[]) {
   expect(files.some((file) => file.name === "AGENTS.md")).toBe(true);
 }
 
+describe("workspace.bootstrap.exclude", () => {
+  beforeEach(() => clearInternalHooks());
+  afterEach(() => clearInternalHooks());
+
+  async function seedCanonicalBootstrapFiles(): Promise<string> {
+    const workspaceDir = await makeTempWorkspace("openclaw-bootstrap-exclude-");
+    await fs.writeFile(path.join(workspaceDir, "AGENTS.md"), "agents", "utf8");
+    await fs.writeFile(path.join(workspaceDir, "SOUL.md"), "soul", "utf8");
+    await fs.writeFile(path.join(workspaceDir, "HEARTBEAT.md"), "heartbeat", "utf8");
+    return workspaceDir;
+  }
+
+  it("omits excluded canonical files from auto-injection", async () => {
+    const workspaceDir = await seedCanonicalBootstrapFiles();
+    const result = await resolveBootstrapContextForRun({
+      workspaceDir,
+      config: { workspace: { bootstrap: { exclude: ["HEARTBEAT.md"] } } } as never,
+    });
+    expect(result.bootstrapFiles.some((file) => file.name === "HEARTBEAT.md")).toBe(false);
+    expect(result.contextFiles.some((file) => file.path.endsWith("HEARTBEAT.md"))).toBe(false);
+    expect(result.bootstrapFiles.some((file) => file.name === "AGENTS.md")).toBe(true);
+    expect(result.contextFiles.some((file) => file.path.endsWith("AGENTS.md"))).toBe(true);
+    expect(result.bootstrapFiles.some((file) => file.name === "SOUL.md")).toBe(true);
+  });
+
+  it("defaults to no exclusions when config is missing or exclude is empty", async () => {
+    const workspaceDir = await seedCanonicalBootstrapFiles();
+    const baseline = await resolveBootstrapContextForRun({ workspaceDir });
+    expect(baseline.bootstrapFiles.some((file) => file.name === "HEARTBEAT.md")).toBe(true);
+
+    const explicitEmpty = await resolveBootstrapContextForRun({
+      workspaceDir,
+      config: { workspace: { bootstrap: { exclude: [] } } } as never,
+    });
+    expect(explicitEmpty.bootstrapFiles.some((file) => file.name === "HEARTBEAT.md")).toBe(true);
+  });
+
+  it("matches canonical names case-sensitively and ignores unknown entries", async () => {
+    const workspaceDir = await seedCanonicalBootstrapFiles();
+    const result = await resolveBootstrapContextForRun({
+      workspaceDir,
+      config: {
+        workspace: {
+          bootstrap: { exclude: ["heartbeat.md", "NOT_A_BOOTSTRAP.md", "  "] },
+        },
+      } as never,
+    });
+    expect(result.bootstrapFiles.some((file) => file.name === "HEARTBEAT.md")).toBe(true);
+  });
+
+  it("wins over hook-injected files with the same canonical name", async () => {
+    registerInternalHook("agent:bootstrap", (event) => {
+      const context = event.context as AgentBootstrapHookContext;
+      context.bootstrapFiles = [
+        ...context.bootstrapFiles,
+        {
+          name: "HEARTBEAT.md",
+          path: path.join(context.workspaceDir, "HEARTBEAT.md"),
+          content: "hook-injected",
+          missing: false,
+        } as unknown as WorkspaceBootstrapFile,
+      ];
+    });
+
+    const workspaceDir = await seedCanonicalBootstrapFiles();
+    const result = await resolveBootstrapFilesForRun({
+      workspaceDir,
+      config: { workspace: { bootstrap: { exclude: ["HEARTBEAT.md"] } } } as never,
+    });
+    expect(result.some((file) => file.name === "HEARTBEAT.md")).toBe(false);
+  });
+});
+
 describe("resolveBootstrapFilesForRun", () => {
   beforeEach(() => clearInternalHooks());
   afterEach(() => clearInternalHooks());
