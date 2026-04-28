@@ -13,13 +13,19 @@
       },
       "blockedRepos": {
         "type": "array",
-        "items": { "type": "string" },
+        "items": {
+          "type": "string"
+        },
         "description": "Git remote URL substrings that trigger the diff scan. Defaults to ['kami-saia/openclaw'].",
-        "default": ["kami-saia/openclaw"]
+        "default": [
+          "kami-saia/openclaw"
+        ]
       },
       "blocklist": {
         "type": "array",
-        "items": { "type": "string" },
+        "items": {
+          "type": "string"
+        },
         "description": "Strings (plain or /regex/flags) to search for in the diff. Matches block the push.",
         "default": [
           "/home/damon",
@@ -64,5 +70,8 @@
       "label": "Upstream Branch",
       "help": "Branch on the upstream remote to diff against (e.g. 'main', 'develop')."
     }
+  },
+  "activation": {
+    "onStartup": true
   }
 }

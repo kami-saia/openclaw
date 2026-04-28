@@ -42,6 +42,7 @@ export function createMockPluginRegistry(
     musicGenerationProviders: [],
     webFetchProviders: [],
     webSearchProviders: [],
+    migrationProviders: [],
     codexAppServerExtensionFactories: [],
     agentToolResultMiddlewares: [],
     memoryEmbeddingProviders: [],
@@ -78,12 +79,14 @@ export function addTestHook(params: {
   handler: PluginHookRegistration["handler"];
   priority?: number;
   toolNames?: string[];
+  timeoutMs?: number;
 }) {
   params.registry.typedHooks.push({
     pluginId: params.pluginId,
     hookName: params.hookName,
     handler: params.handler,
     priority: params.priority ?? 0,
+    ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
     source: "test",
     ...(params.toolNames ? { toolNames: params.toolNames } : {}),
   } as PluginHookRegistration);
@@ -97,6 +100,7 @@ export function addTestHooks(
     handler: PluginHookRegistration["handler"];
     priority?: number;
     toolNames?: string[];
+    timeoutMs?: number;
   }>,
 ) {
   for (const hook of hooks) {
@@ -107,6 +111,7 @@ export function addTestHooks(
       handler: hook.handler,
       ...(hook.priority !== undefined ? { priority: hook.priority } : {}),
       ...(hook.toolNames ? { toolNames: hook.toolNames } : {}),
+      ...(hook.timeoutMs !== undefined ? { timeoutMs: hook.timeoutMs } : {}),
     });
   }
 }

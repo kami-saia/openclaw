@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createTestPluginApi } from "../../test/helpers/plugins/plugin-api.js";
+import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
 import entry, { registerForkGuardPlugin } from "./index.js";
 
 describe("fork-guard plugin registration", () => {
