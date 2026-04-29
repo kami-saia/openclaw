@@ -161,6 +161,73 @@ describe("agent compaction pressure signaling", () => {
     expect(enqueueSystemEventMock).toHaveBeenCalledTimes(2);
   });
 
+  it("prefers API-fresh totalTokens over transcript estimate (regression: pressure never fired in production)", async () => {
+    // Regression: pre-fix, the production code path used transcript-based
+    // estimation only, which omits system prompt + bootstrap files + project
+    // context + tool defs (~80-100k of tokens). Result: pressure signal
+    // computed ~0.30 when API-reported context was ~0.99, and the
+    // compaction_recommended signal never fired. This test installs a
+    // transcript source that returns a low number and asserts that we still
+    // pick up the high API-fresh number from entry.totalTokens.
+    _setTokenSourceForTests(() => 5_000); // pretend transcript is tiny
+    try {
+      const entry = createEntry(95_000); // API-fresh says we're at 95%
+      maybeInjectAgentCompactionPressureSignal({
+        cfg: createCfg("agent"),
+        sessionEntry: entry,
+        sessionKey: "agent:main:main",
+        defaultModel: "test/model",
+        agentCfgContextTokens: 100_000,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const expected = formatContextPressureMessage({
+        pressure: 0.95,
+        compactionRecommended: true,
+      });
+      expect(enqueueSystemEventMock).toHaveBeenCalledWith(expected, {
+        sessionKey: "agent:main:main",
+      });
+    } finally {
+      // Restore the default test override for subsequent tests.
+      _setTokenSourceForTests(
+        (entry) =>
+          ((entry as Record<string, unknown>).totalTokens as number | undefined) ?? undefined,
+      );
+    }
+  });
+
+  it("falls back to transcript estimate when totalTokensFresh is false", async () => {
+    _setTokenSourceForTests(() => 90_000); // transcript is reliable here
+    try {
+      const entry = {
+        totalTokens: 5_000, // stale cumulative noise; would mislead if used
+        totalTokensFresh: false,
+      } as SessionEntry;
+      maybeInjectAgentCompactionPressureSignal({
+        cfg: createCfg("agent"),
+        sessionEntry: entry,
+        sessionKey: "agent:main:main",
+        defaultModel: "test/model",
+        agentCfgContextTokens: 100_000,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const expected = formatContextPressureMessage({
+        pressure: 0.9,
+        compactionRecommended: true,
+      });
+      expect(enqueueSystemEventMock).toHaveBeenCalledWith(expected, {
+        sessionKey: "agent:main:main",
+      });
+    } finally {
+      _setTokenSourceForTests(
+        (entry) =>
+          ((entry as Record<string, unknown>).totalTokens as number | undefined) ?? undefined,
+      );
+    }
+  });
+
   it("suppresses one signal after resetPressureTracking() (post-compaction guard)", async () => {
     // Regression: pre-fix, the turn immediately after compaction would re-emit
     // a `compaction_recommended: true` signal because the next compute call

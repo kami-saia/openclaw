@@ -11,7 +11,7 @@ import {
   formatContextPressureMessage,
 } from "../../agents/context-pressure.js";
 import type { OpenClawConfig } from "../../config/config.js";
-import type { SessionEntry } from "../../config/sessions.js";
+import { resolveFreshSessionTotalTokens, type SessionEntry } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
 
 /**
@@ -127,15 +127,25 @@ export function maybeInjectAgentCompactionPressureSignal(params: {
     ((entry as Record<string, unknown>).contextTokens as number | undefined) ??
     128_000;
 
-  const totalTokens = tokenSourceOverride
+  const transcriptTokens = tokenSourceOverride
     ? tokenSourceOverride(entry)
     : estimateSessionTokensFromTranscriptDefault(entry);
+
+  // Prefer API-reported fresh totalTokens (includes system prompt, bootstrap
+  // files, project context, tool definitions — none of which appear in the
+  // transcript jsonl). The transcript estimate severely under-counts because
+  // it only sees conversation messages, missing ~80-100k of system overhead.
+  // Fall back to transcript estimation only when the API number is stale or
+  // unavailable (totalTokensFresh=false or missing).
+  const apiTokens = resolveFreshSessionTotalTokens(entry);
+  const totalTokens = apiTokens ?? transcriptTokens;
+  const tokenSource = apiTokens !== undefined ? "api-fresh" : "transcript";
 
   logVerbose(
     `preflightCompaction check: sessionKey=${params.sessionKey} ` +
       `tokenCount=${totalTokens} contextWindow=${contextWindowTokens} ` +
       `threshold=${contextWindowTokens * 0.85} ` +
-      `estimated=true method=transcript`,
+      `estimated=true method=${tokenSource}`,
   );
 
   const signal = computeContextPressure({
