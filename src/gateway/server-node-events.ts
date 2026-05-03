@@ -419,7 +419,7 @@ export const handleNodeEvent = async (
             sourceChannel: "voice",
             sourceTool: "gateway.voice.transcript",
           },
-          senderIsOwner: false,
+          senderIsOwner: true,
           allowModelOverride: false,
         },
         defaultRuntime,
@@ -591,7 +591,7 @@ export const handleNodeEvent = async (
           timeout:
             typeof link?.timeoutSeconds === "number" ? link.timeoutSeconds.toString() : undefined,
           messageChannel: "node",
-          senderIsOwner: false,
+          senderIsOwner: true,
           allowModelOverride: false,
         },
         defaultRuntime,
