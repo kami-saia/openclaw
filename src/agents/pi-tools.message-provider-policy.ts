@@ -4,9 +4,11 @@ const TOOL_DENY_BY_MESSAGE_PROVIDER: Readonly<Record<string, readonly string[]>>
   voice: ["tts"],
 };
 
-const TOOL_ALLOW_BY_MESSAGE_PROVIDER: Readonly<Record<string, readonly string[]>> = {
-  node: ["canvas", "image", "pdf", "tts", "web_fetch", "web_search"],
-};
+// Note: node provider was previously restricted to a small allowlist when paired-node
+// trust was treated as untrusted. Now that node events are dispatched with
+// senderIsOwner=true (see gateway/server-node-events.ts), node-originated
+// messages get the full tool surface like other owner-trusted channels.
+const TOOL_ALLOW_BY_MESSAGE_PROVIDER: Readonly<Record<string, readonly string[]>> = {};
 
 export function filterToolNamesByMessageProvider(
   toolNames: readonly string[],
