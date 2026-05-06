@@ -24,6 +24,7 @@ import {
 } from "../../plugin-sdk/media-understanding.js";
 import { resolveUserPath } from "../../utils.js";
 import { isMinimaxVlmProvider } from "../minimax-vlm.js";
+import { sanitizeToolResultImages } from "../tool-images.js";
 import {
   coerceImageAssistantText,
   coerceImageModelConfig,
@@ -592,16 +593,10 @@ export function createImageTool(options?: {
         });
       }
 
-      // MARK: - Run image prompt with all loaded images
-      const result = await runImagePrompt({
-        cfg: options?.config,
-        agentDir,
-        imageModelConfig,
-        modelOverride,
-        prompt: promptRaw,
-        images: loadedImages.map((img) => ({ buffer: img.buffer, mimeType: img.mimeType })),
-      });
-
+      // FORK PATCH (re-applied post-merge): return loaded images as tool-result
+      // image attachments instead of calling a separate vision model. The host
+      // model will then see the images directly in its next turn, just like a
+      // user pasted them. See kami-saia/openclaw#37.
       const imageDetails =
         loadedImages.length === 1
           ? {
@@ -619,7 +614,19 @@ export function createImageTool(options?: {
               ),
             };
 
-      return buildTextToolResult(result, imageDetails);
+      const result = {
+        content: [
+          { type: "text" as const, text: promptRaw },
+          ...loadedImages.map((img) => ({
+            type: "image" as const,
+            data: img.buffer.toString("base64"),
+            mimeType: img.mimeType,
+          })),
+        ],
+        details: imageDetails,
+      };
+
+      return await sanitizeToolResultImages(result, "image");
     },
   };
 }
