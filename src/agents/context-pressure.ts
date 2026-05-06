@@ -103,7 +103,9 @@ export function formatContextPressureMessage(signal: ContextPressureSignal): str
 
   return (
     tag +
-    "\n\nContext is filling up. Call `compact` with a summary at your next natural break point.\n\n" +
+    "\n\n**Context pressure is at the recommended threshold. Call the `compact` tool as your VERY NEXT tool call** — " +
+    "do not start any other work, do not finish the current task, do not wait for a natural break. " +
+    "If you were mid-task, compact first and resume after the next user turn.\n\n" +
     "**Compaction guidelines:** " +
     "Structure: Goal → Decisions → Progress → Open TODOs → Next Steps. " +
     "Keep ONLY what's needed to continue. Drop completed work details, exact identifiers, " +
