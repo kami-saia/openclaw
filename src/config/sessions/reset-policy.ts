@@ -1,7 +1,7 @@
 import type { SessionConfig, SessionResetConfig } from "../types.base.js";
 import { DEFAULT_IDLE_MINUTES } from "./types.js";
 
-export type SessionResetMode = "daily" | "idle";
+export type SessionResetMode = "daily" | "idle" | "never";
 export type SessionResetType = "direct" | "group" | "thread";
 
 export type SessionResetPolicy = {
@@ -17,7 +17,7 @@ export type SessionFreshness = {
   idleExpiresAt?: number;
 };
 
-export const DEFAULT_RESET_MODE: SessionResetMode = "daily";
+export const DEFAULT_RESET_MODE: SessionResetMode = "never";
 export const DEFAULT_RESET_AT_HOUR = 4;
 
 export function resolveDailyResetAtMs(now: number, atHour: number): number {
@@ -76,6 +76,9 @@ export function evaluateSessionFreshness(params: {
   now: number;
   policy: SessionResetPolicy;
 }): SessionFreshness {
+  if (params.policy.mode === "never") {
+    return { fresh: true };
+  }
   const updatedAt = resolveTimestamp(params.updatedAt, params.now) ?? 0;
   const sessionStartedAt = resolveTimestamp(params.sessionStartedAt, params.now) ?? updatedAt;
   const lastInteractionAt =

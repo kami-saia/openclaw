@@ -20334,6 +20334,10 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                     type: "string",
                     const: "idle",
                   },
+                  {
+                    type: "string",
+                    const: "never",
+                  },
                 ],
                 title: "Session Reset Mode",
                 description:
@@ -20377,6 +20381,10 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                         type: "string",
                         const: "idle",
                       },
+                      {
+                        type: "string",
+                        const: "never",
+                      },
                     ],
                   },
                   atHour: {
@@ -20407,6 +20415,10 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                       {
                         type: "string",
                         const: "idle",
+                      },
+                      {
+                        type: "string",
+                        const: "never",
                       },
                     ],
                   },
@@ -20439,6 +20451,10 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                         type: "string",
                         const: "idle",
                       },
+                      {
+                        type: "string",
+                        const: "never",
+                      },
                     ],
                   },
                   atHour: {
@@ -20469,6 +20485,10 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                       {
                         type: "string",
                         const: "idle",
+                      },
+                      {
+                        type: "string",
+                        const: "never",
                       },
                     ],
                   },
@@ -20511,6 +20531,10 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                     {
                       type: "string",
                       const: "idle",
+                    },
+                    {
+                      type: "string",
+                      const: "never",
                     },
                   ],
                 },
