@@ -33,6 +33,7 @@ import { applyPiAutoCompactionGuard } from "../../pi-settings.js";
 
 type GuardCall = {
   cfg?: OpenClawConfig;
+  compactionMode?: import("../../../config/types.agent-defaults.js").AgentCompactionMode;
   contextEngineInfo?: { ownsCompaction?: boolean };
   setCompactionEnabledCalls: boolean[];
 };
@@ -69,7 +70,7 @@ function installCliCompactionTestDeps(captured: GuardCall) {
       return stub.settingsManager as never;
     },
     applyPiAutoCompactionGuard: (params) => {
-      captured.cfg = params.cfg;
+      captured.compactionMode = params.compactionMode;
       captured.contextEngineInfo = params.contextEngineInfo as
         | { ownsCompaction?: boolean }
         | undefined;
@@ -105,7 +106,7 @@ function baseSessionEntry(): SessionEntry {
 }
 
 async function runLifecycle(cfg: OpenClawConfig): Promise<GuardCall> {
-  const captured: GuardCall = { setCompactionEnabledCalls: [] };
+  const captured: GuardCall = { setCompactionEnabledCalls: [], cfg };
   installCliCompactionTestDeps(captured);
   await runCliTurnCompactionLifecycle({
     cfg,

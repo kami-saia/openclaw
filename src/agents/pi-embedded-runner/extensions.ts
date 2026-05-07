@@ -12,7 +12,7 @@ import contextPruningExtension from "../pi-hooks/context-pruning.js";
 import { setContextPruningRuntime } from "../pi-hooks/context-pruning/runtime.js";
 import { computeEffectiveSettings } from "../pi-hooks/context-pruning/settings.js";
 import { makeToolPrunablePredicate } from "../pi-hooks/context-pruning/tools.js";
-import { ensurePiCompactionReserveTokens } from "../pi-settings.js";
+import { ensurePiCompactionReserveTokens, resolveEffectiveCompactionMode } from "../pi-settings.js";
 import { resolveTranscriptPolicy } from "../transcript-policy.js";
 import { isCacheTtlEligibleProvider, readLastCacheTtlTimestamp } from "./cache-ttl.js";
 
@@ -123,17 +123,6 @@ function buildContextPruningFactory(params: {
   return contextPruningExtension;
 }
 
-function resolveCompactionMode(cfg?: OpenClawConfig): "default" | "safeguard" | "agent" {
-  const mode = cfg?.agents?.defaults?.compaction?.mode;
-  if (mode === "safeguard") {
-    return "safeguard";
-  }
-  if (mode === "agent") {
-    return "agent";
-  }
-  return "default";
-}
-
 export function buildEmbeddedExtensionFactories(params: {
   cfg: OpenClawConfig | undefined;
   sessionManager: SessionManager;
@@ -142,7 +131,7 @@ export function buildEmbeddedExtensionFactories(params: {
   model: ProviderRuntimeModel | undefined;
 }): ExtensionFactory[] {
   const factories: ExtensionFactory[] = [];
-  const compactionMode = resolveCompactionMode(params.cfg);
+  const compactionMode = resolveEffectiveCompactionMode(params.cfg);
   if (compactionMode === "safeguard" || compactionMode === "agent") {
     const compactionCfg = params.cfg?.agents?.defaults?.compaction;
     const qualityGuardCfg = compactionCfg?.qualityGuard;

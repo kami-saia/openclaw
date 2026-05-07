@@ -20,7 +20,6 @@ minimumReleaseAgeExclude:
   - "jscpd-*"
   - "@jscpd/*"
   - "protobufjs"
-  - "@buape/carbon"
   - "vite"
   - "@cloudflare/workers-types"
   - "@hono/node-server"
@@ -43,12 +42,16 @@ minimumReleaseAgeExclude:
   - "axios"
 
 onlyBuiltDependencies:
+  - "@openclaw/fs-safe"
+  - "@discordjs/opus"
+  - "@google/genai"
   - "@lydell/node-pty"
   - "@matrix-org/matrix-sdk-crypto-nodejs"
   - "@napi-rs/canvas"
   - "@tloncorp/api"
   - "@tloncorp/tlon-skill"
   - "@whiskeysockets/baileys"
+  - "@whiskeysockets/libsignal-node"
   - authenticate-pam
   - esbuild
   - node-llama-cpp
@@ -57,3 +60,4 @@ onlyBuiltDependencies:
 
 ignoredBuiltDependencies:
   - koffi
+  - tree-sitter-bash
