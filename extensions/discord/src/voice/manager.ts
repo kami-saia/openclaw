@@ -548,13 +548,17 @@ export class DiscordVoiceManager {
   }
 
   private scheduleCaptureFinalize(entry: VoiceSessionEntry, userId: string, reason: string) {
+    const graceMs = resolveVoiceTimeoutMs(
+      this.params.discordConfig.voice?.captureSilenceGraceMs,
+      CAPTURE_FINALIZE_GRACE_MS,
+    );
     scheduleVoiceCaptureFinalize({
       state: entry.capture,
       userId,
-      delayMs: CAPTURE_FINALIZE_GRACE_MS,
+      delayMs: graceMs,
       onFinalize: () => {
         logVoiceVerbose(
-          `capture finalize: guild ${entry.guildId} channel ${entry.channelId} user ${userId} reason=${reason} grace=${CAPTURE_FINALIZE_GRACE_MS}ms`,
+          `capture finalize: guild ${entry.guildId} channel ${entry.channelId} user ${userId} reason=${reason} grace=${graceMs}ms`,
         );
       },
     });
@@ -582,15 +586,17 @@ export class DiscordVoiceManager {
       `capture start: guild ${entry.guildId} channel ${entry.channelId} user ${userId}`,
     );
     const voiceSdk = loadDiscordVoiceSdk();
+    if (entry.player.state.status === voiceSdk.AudioPlayerStatus.Playing) {
+      logVoiceVerbose(
+        `capture ignored during playback: guild ${entry.guildId} channel ${entry.channelId} user ${userId}`,
+      );
+      return;
+    }
     this.enableDaveReceivePassthrough(
       entry,
       `speaker ${userId} start`,
       DAVE_RECEIVE_PASSTHROUGH_REARM_EXPIRY_SECONDS,
     );
-    if (entry.player.state.status === voiceSdk.AudioPlayerStatus.Playing) {
-      entry.player.stop(true);
-    }
-
     const stream = entry.connection.receiver.subscribe(userId, {
       end: {
         behavior: voiceSdk.EndBehaviorType.Manual,
@@ -661,6 +667,10 @@ export class DiscordVoiceManager {
 
   private handleReceiveError(entry: VoiceSessionEntry, err: unknown) {
     const analysis = analyzeVoiceReceiveError(err);
+    if (analysis.isAbortLike && !analysis.countsAsDecryptFailure) {
+      logVoiceVerbose(`receive stream ended: ${analysis.message}`);
+      return;
+    }
     logger.warn(`discord voice: receive error: ${analysis.message}`);
     if (analysis.shouldAttemptPassthrough) {
       this.enableDaveReceivePassthrough(
