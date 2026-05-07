@@ -773,6 +773,12 @@ export async function runEmbeddedAttempt(
     prepStages.mark("skills");
 
     const sessionLabel = params.sessionKey ?? params.sessionId;
+    // FORK: Holder for the live AgentSession so tools created BEFORE
+    // createAgentSession can lazily resolve sessionManager + agent state.
+    // Populated below once `session` is created.
+    const liveSessionRef: {
+      current: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
+    } = { current: undefined };
     const contextInjectionMode = resolveContextInjectionMode(params.config);
     const isRawModelRun = params.modelRun === true || params.promptMode === "none";
     if (isRawModelRun && log.isEnabled("debug")) {
@@ -896,6 +902,18 @@ export async function runEmbeddedAttempt(
             enableHeartbeatTool: params.enableHeartbeatTool,
             forceHeartbeatTool: params.forceHeartbeatTool,
             authProfileStore: params.authProfileStore,
+            // FORK: Wire live SessionManager + agent-state updater into compactTool.
+            getSessionManager: () => liveSessionRef.current?.sessionManager,
+            updateAgentMessagesAfterCompaction: () => {
+              const live = liveSessionRef.current;
+              if (!live) return;
+              try {
+                const ctx = live.sessionManager.buildSessionContext();
+                live.agent.state.messages = ctx.messages;
+              } catch (err) {
+                log.warn(`compact: failed to refresh agent.state.messages: ${String(err)}`);
+              }
+            },
             recordToolPrepStage: (name) => corePluginToolStages.mark(name),
             onToolOutcome: params.onToolOutcome,
             onYield: (message) => {
@@ -1671,6 +1689,8 @@ export async function runEmbeddedAttempt(
       }
       session.setActiveToolsByName(sessionToolAllowlist);
       const activeSession = session;
+      // FORK: publish live session for compactTool getSessionManager + post-compact state refresh.
+      liveSessionRef.current = activeSession;
       prepStages.mark("agent-session");
       if (isRawModelRun) {
         // Raw model probes should measure exactly the requested prompt against

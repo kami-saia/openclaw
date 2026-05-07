@@ -144,6 +144,7 @@ export function createOpenClawTools(
     sessionId?: string;
     /** Getter for the live SessionManager instance (for compact tool). */
     getSessionManager?: () => import("@mariozechner/pi-coding-agent").SessionManager | undefined;
+    updateAgentMessagesAfterCompaction?: () => void;
     /**
      * Workspace directory to pass to spawned subagents for inheritance.
      * Defaults to workspaceDir. Use this to pass the actual agent workspace when the
@@ -305,6 +306,7 @@ export function createOpenClawTools(
     config: options?.config,
     workspaceDir,
     getSessionManager: options?.getSessionManager,
+    updateAgentMessagesAfterCompaction: options?.updateAgentMessagesAfterCompaction,
   });
   const heartbeatTool = options?.enableHeartbeatTool ? createHeartbeatResponseTool() : null;
   options?.recordToolPrepStage?.("openclaw-tools:message-tool");

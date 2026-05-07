@@ -379,6 +379,8 @@ export function createOpenClawCodingTools(options?: {
   senderIsOwner?: boolean;
   /** Getter for the live SessionManager instance (for compact tool). */
   getSessionManager?: () => import("@mariozechner/pi-coding-agent").SessionManager | undefined;
+  /** Refresh the live agent state after a compaction is appended (for compact tool). */
+  updateAgentMessagesAfterCompaction?: () => void;
   /**
    * Additional owner-only tools authorized by a server-side runtime grant.
    * Keep this narrowly scoped; it is not a replacement for sender ownership.
@@ -779,6 +781,7 @@ export function createOpenClawCodingTools(options?: {
           sessionId: options?.sessionId,
           // FORK: SessionManager getter for the compact tool
           getSessionManager: options?.getSessionManager,
+          updateAgentMessagesAfterCompaction: options?.updateAgentMessagesAfterCompaction,
           onYield: options?.onYield,
           allowGatewaySubagentBinding: options?.allowGatewaySubagentBinding,
           recordToolPrepStage: options?.recordToolPrepStage,

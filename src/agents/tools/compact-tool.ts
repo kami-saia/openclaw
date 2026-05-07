@@ -86,6 +86,8 @@ export function createCompactTool(options: {
   config?: OpenClawConfig;
   workspaceDir?: string;
   getSessionManager?: () => import("@mariozechner/pi-coding-agent").SessionManager | undefined;
+  /** Optional: refresh the live agent.state.messages after compaction is appended. */
+  updateAgentMessagesAfterCompaction?: () => void;
 }): AnyAgentTool | null {
   const cfg = options.config;
   const mode = cfg?.agents?.defaults?.compaction?.mode;
@@ -177,6 +179,17 @@ export function createCompactTool(options: {
           undefined, // details
           true, // fromHook
         );
+
+        // FORK: rebuild the in-memory agent state from the freshly compacted
+        // SessionManager so the next turn doesn't keep replaying the full
+        // pre-compaction transcript. Without this, agent.state.messages keeps
+        // growing across compactions because pi-agent only refreshes when its
+        // own session.compact() runs.
+        try {
+          options.updateAgentMessagesAfterCompaction?.();
+        } catch (refreshErr) {
+          log.warn(`Failed to refresh agent messages post-compaction: ${String(refreshErr)}`);
+        }
 
         log.info(
           `Agent compaction: sessionKey=${sessionKey} tokensBefore=${tokensBefore} summaryLength=${summary.length}`,
