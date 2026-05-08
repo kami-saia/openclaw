@@ -109,6 +109,25 @@ function isGatewayAgentEmbeddedFallbackError(err: unknown): boolean {
   return isGatewayTransportError(err);
 }
 
+/**
+ * Channel/group `--to` values like `discord:channel:<id>` or `whatsapp:group:<id>`
+ * point at a real persistent multi-tenant session. If the gateway agent call
+ * times out for one of these targets, spawning a fresh embedded session under
+ * `agent:<id>:explicit:gateway-fallback-<uuid>` creates an orphan agent that
+ * has none of the channel's identity context (e.g. Quant Saia, #saiabets) but
+ * does see the global routing rules. The orphan dutifully `sessions_send`s the
+ * inbound alert into the real channel session with cover text like
+ * "Forwarded to Quant Saia at #saiabets — she'll work the tape and decide.",
+ * producing a bogus second-hand redirect.
+ *
+ * For these targets we refuse the embedded fallback entirely so the original
+ * caller (sentinel, cron, etc.) can use a non-agent send path or retry later.
+ */
+function isMultiTenantChannelTarget(to?: string): boolean {
+  if (!to) return false;
+  return /:(channel|group):/i.test(to.trim());
+}
+
 function createGatewayTimeoutFallbackSessionId(): string {
   return `${GATEWAY_TIMEOUT_FALLBACK_SESSION_PREFIX}${randomUUID()}`;
 }
@@ -238,6 +257,12 @@ export async function agentCliCommand(opts: AgentCliOpts, runtime: RuntimeEnv, d
     return await agentViaGatewayCommand(opts, runtime);
   } catch (err) {
     if (isGatewayAgentTimeoutError(err)) {
+      if (isMultiTenantChannelTarget(opts.to)) {
+        runtime.error?.(
+          `Gateway agent timed out for channel/group target ${opts.to}; refusing embedded fresh-session fallback to avoid orphan-agent re-routing. Original error: ${String(err)}`,
+        );
+        throw err;
+      }
       const fallbackSession = createGatewayTimeoutFallbackSession(opts.agent);
       runtime.error?.(
         `EMBEDDED FALLBACK: Gateway agent timed out; running embedded agent with fresh session ${fallbackSession.sessionId}: ${String(err)}`,
@@ -261,6 +286,13 @@ export async function agentCliCommand(opts: AgentCliOpts, runtime: RuntimeEnv, d
     }
 
     if (!isGatewayAgentEmbeddedFallbackError(err)) {
+      throw err;
+    }
+
+    if (isMultiTenantChannelTarget(opts.to)) {
+      runtime.error?.(
+        `Gateway agent failed for channel/group target ${opts.to}; refusing embedded fallback to avoid orphan-agent re-routing. Original error: ${String(err)}`,
+      );
       throw err;
     }
 

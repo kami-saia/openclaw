@@ -341,6 +341,55 @@ describe("agentCliCommand", () => {
     });
   });
 
+  it("refuses embedded fallback when gateway times out for a channel target", async () => {
+    // Regression: sentinel `wake_quant` calls `openclaw agent --to discord:channel:<id>`.
+    // If the gateway agent times out, the original CLI spawned a fresh embedded session
+    // under a `gateway-fallback-*` key. That orphan session has none of the channel's
+    // identity (e.g. Quant Saia at #saiabets) but DOES read global routing rules and
+    // dutifully `sessions_send`s the alert into the real channel session with cover text
+    // "Forwarded to Quant Saia at #saiabets — she'll work the tape and decide." The fix:
+    // for channel/group targets, refuse the embedded fallback so the caller can use a
+    // non-agent send path or retry later.
+    await withTempStore(async () => {
+      callGateway.mockRejectedValue(createGatewayTimeoutError());
+
+      await expect(
+        agentCliCommand(
+          {
+            message: "⚠️ [STOP PROXIMITY] DIS at $109.29",
+            to: "discord:channel:1469273412357718048",
+          },
+          runtime,
+        ),
+      ).rejects.toThrow();
+
+      expect(agentCommand).not.toHaveBeenCalled();
+      expect(runtime.error).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "refusing embedded fresh-session fallback to avoid orphan-agent re-routing",
+        ),
+      );
+    });
+  });
+
+  it("refuses embedded fallback for group-style targets too", async () => {
+    await withTempStore(async () => {
+      callGateway.mockRejectedValue(createGatewayTimeoutError());
+
+      await expect(
+        agentCliCommand(
+          {
+            message: "hi",
+            to: "whatsapp:group:abc-def",
+          },
+          runtime,
+        ),
+      ).rejects.toThrow();
+
+      expect(agentCommand).not.toHaveBeenCalled();
+    });
+  });
+
   it("passes fallback metadata into JSON embedded fallback output", async () => {
     await withTempStore(async () => {
       callGateway.mockRejectedValue(createGatewayClosedError());
