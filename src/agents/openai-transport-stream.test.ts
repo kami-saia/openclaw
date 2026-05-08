@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import type { Model } from "@mariozechner/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import {
+  type OpenAIModeModel,
   buildOpenAIResponsesParams,
   buildOpenAICompletionsParams,
   createOpenAICompletionsTransportStreamFn,
@@ -2767,7 +2768,7 @@ describe("openai transport stream", () => {
         compat: {
           unsupportedToolSchemaKeywords: ["not"],
         },
-      } satisfies Model<"openai-completions">,
+      } as unknown as OpenAIModeModel,
       {
         systemPrompt: "system",
         messages: [],

@@ -101,7 +101,7 @@ type OpenAIModeCompatInput = Omit<ModelCompatConfig, "thinkingFormat"> & {
   thinkingFormat?: string;
 };
 
-type OpenAIModeModel = Omit<Model<Api>, "compat"> & {
+export type OpenAIModeModel = Omit<Model<Api>, "compat"> & {
   compat?: OpenAIModeCompatInput | null;
 };
 
