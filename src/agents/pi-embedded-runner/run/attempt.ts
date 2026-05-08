@@ -906,7 +906,9 @@ export async function runEmbeddedAttempt(
             getSessionManager: () => liveSessionRef.current?.sessionManager,
             updateAgentMessagesAfterCompaction: () => {
               const live = liveSessionRef.current;
-              if (!live) return;
+              if (!live) {
+                return;
+              }
               try {
                 const ctx = live.sessionManager.buildSessionContext();
                 live.agent.state.messages = ctx.messages;

@@ -8,7 +8,6 @@
  * 3. incrementCompactionCount — session store counter bumps after tool-initiated compaction.
  * 4. Parent chain integrity — new messages after compaction link to the compaction entry's leafId.
  */
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -54,7 +53,11 @@ function makeTmpDir(): string {
 function populateSession(sm: SessionManager, count = 10): void {
   for (let i = 0; i < count; i++) {
     if (i % 2 === 0) {
-      sm.appendMessage({ role: "user", content: `User message ${i / 2 + 1}: ${"x".repeat(2000)}`, timestamp: Date.now() });
+      sm.appendMessage({
+        role: "user",
+        content: `User message ${i / 2 + 1}: ${"x".repeat(2000)}`,
+        timestamp: Date.now(),
+      });
     } else {
       sm.appendMessage({
         role: "assistant",

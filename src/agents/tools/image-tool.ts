@@ -37,7 +37,6 @@ import {
 } from "./image-tool.helpers.js";
 import {
   applyImageModelConfigDefaults,
-  buildTextToolResult,
   resolveMediaToolLocalRoots,
   resolveRemoteMediaSsrfPolicy,
   resolvePromptAndModelOverride,
@@ -263,7 +262,7 @@ type ImageSandboxConfig = {
   bridge: SandboxFsBridge;
 };
 
-async function runImagePrompt(params: {
+async function _runImagePrompt(params: {
   cfg?: OpenClawConfig;
   agentDir: string;
   imageModelConfig: ImageModelConfig;
@@ -486,7 +485,7 @@ export function createImageTool(options?: {
         };
       }
 
-      const { prompt: promptRaw, modelOverride } = resolvePromptAndModelOverride(
+      const { prompt: promptRaw, modelOverride: _modelOverride } = resolvePromptAndModelOverride(
         record,
         DEFAULT_PROMPT,
       );

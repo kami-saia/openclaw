@@ -460,19 +460,24 @@ function createSessionMcpRuntimeManager(
   const sessionsForRuntimeKey = (runtimeKey: string): string[] => {
     const result: string[] = [];
     for (const [sessionId, key] of runtimeKeyBySessionId.entries()) {
-      if (key === runtimeKey) result.push(sessionId);
+      if (key === runtimeKey) {
+        result.push(sessionId);
+      }
     }
     return result;
   };
 
   const minIdleTtlForRuntimeKey = (runtimeKey: string): number => {
     const sessions = sessionsForRuntimeKey(runtimeKey);
-    if (sessions.length === 0) return DEFAULT_SESSION_MCP_RUNTIME_IDLE_TTL_MS;
+    if (sessions.length === 0) {
+      return DEFAULT_SESSION_MCP_RUNTIME_IDLE_TTL_MS;
+    }
     let min = Number.POSITIVE_INFINITY;
     for (const sessionId of sessions) {
-      const ttl =
-        idleTtlMsBySessionId.get(sessionId) ?? DEFAULT_SESSION_MCP_RUNTIME_IDLE_TTL_MS;
-      if (ttl < min) min = ttl;
+      const ttl = idleTtlMsBySessionId.get(sessionId) ?? DEFAULT_SESSION_MCP_RUNTIME_IDLE_TTL_MS;
+      if (ttl < min) {
+        min = ttl;
+      }
     }
     return Number.isFinite(min) ? min : DEFAULT_SESSION_MCP_RUNTIME_IDLE_TTL_MS;
   };
@@ -639,9 +644,7 @@ function createSessionMcpRuntimeManager(
       runtimesByKey.delete(runtimeKey);
       const inFlight = createInFlight.get(runtimeKey);
       createInFlight.delete(runtimeKey);
-      const inFlightRuntime = inFlight
-        ? await inFlight.promise.catch(() => undefined)
-        : undefined;
+      const inFlightRuntime = inFlight ? await inFlight.promise.catch(() => undefined) : undefined;
       const target = runtime ?? inFlightRuntime;
       if (target) {
         await target.dispose();

@@ -124,7 +124,9 @@ function isGatewayAgentEmbeddedFallbackError(err: unknown): boolean {
  * caller (sentinel, cron, etc.) can use a non-agent send path or retry later.
  */
 function isMultiTenantChannelTarget(to?: string): boolean {
-  if (!to) return false;
+  if (!to) {
+    return false;
+  }
   return /:(channel|group):/i.test(to.trim());
 }
 
