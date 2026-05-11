@@ -382,4 +382,115 @@ describe("session-compaction-checkpoints", () => {
       Object.values(nextStore).find((entry) => entry.compactionCheckpoints)?.compactionCheckpoints,
     ).toHaveLength(25);
   });
+
+  test("persist updates top-level sessionId and sessionFile when transcript is rotated", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-checkpoint-rotate-"));
+    tempDirs.push(dir);
+
+    const storePath = path.join(dir, "sessions.json");
+    const sessionKey = "agent:main:main";
+    const oldSessionId = "old-session-id";
+    const oldSessionFile = path.join(dir, `${oldSessionId}.jsonl`);
+    await fs.writeFile(oldSessionFile, "pre-rotation", "utf-8");
+    const now = Date.now();
+    await fs.writeFile(
+      storePath,
+      JSON.stringify(
+        {
+          [sessionKey]: {
+            sessionId: oldSessionId,
+            sessionFile: oldSessionFile,
+            updatedAt: now,
+          },
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+
+    const newSessionId = "new-session-id";
+    const newSessionFile = path.join(dir, `${newSessionId}.jsonl`);
+    await fs.writeFile(newSessionFile, "post-rotation", "utf-8");
+
+    const stored = await persistSessionCompactionCheckpoint({
+      cfg: {
+        session: { store: storePath },
+        agents: { list: [{ id: "main", default: true }] },
+      } as OpenClawConfig,
+      sessionKey: "main",
+      sessionId: newSessionId,
+      reason: "manual",
+      snapshot: {
+        sessionId: oldSessionId,
+        sessionFile: oldSessionFile,
+        leafId: "pre-leaf",
+      },
+      postSessionFile: newSessionFile,
+      postLeafId: "post-leaf",
+      createdAt: now + 100,
+    });
+
+    expect(stored).not.toBeNull();
+    const nextStore = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
+      string,
+      { sessionId?: string; sessionFile?: string }
+    >;
+    const entry = Object.values(nextStore).find((value) => value.sessionId === newSessionId);
+    expect(entry).toBeDefined();
+    expect(entry?.sessionId).toBe(newSessionId);
+    expect(entry?.sessionFile).toBe(newSessionFile);
+  });
+
+  test("persist leaves top-level sessionId and sessionFile untouched when no rotation", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-checkpoint-norotate-"));
+    tempDirs.push(dir);
+
+    const storePath = path.join(dir, "sessions.json");
+    const sessionKey = "agent:main:main";
+    const sessionId = "stable-session-id";
+    const sessionFile = path.join(dir, `${sessionId}.jsonl`);
+    await fs.writeFile(sessionFile, "unchanged", "utf-8");
+    const now = Date.now();
+    await fs.writeFile(
+      storePath,
+      JSON.stringify(
+        {
+          [sessionKey]: {
+            sessionId,
+            sessionFile,
+            updatedAt: now,
+          },
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+
+    const stored = await persistSessionCompactionCheckpoint({
+      cfg: {
+        session: { store: storePath },
+        agents: { list: [{ id: "main", default: true }] },
+      } as OpenClawConfig,
+      sessionKey: "main",
+      sessionId,
+      reason: "manual",
+      snapshot: {
+        sessionId,
+        sessionFile,
+        leafId: "leaf",
+      },
+      createdAt: now + 100,
+    });
+
+    expect(stored).not.toBeNull();
+    const nextStore = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
+      string,
+      { sessionId?: string; sessionFile?: string }
+    >;
+    const entry = Object.values(nextStore).find((value) => value.sessionId === sessionId);
+    expect(entry?.sessionId).toBe(sessionId);
+    expect(entry?.sessionFile).toBe(sessionFile);
+  });
 });

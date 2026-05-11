@@ -457,8 +457,24 @@ export async function persistSessionCompactionCheckpoint(params: {
     const checkpoints = sessionStoreCheckpoints(existing);
     checkpoints.push(checkpoint);
     trimmedCheckpoints = trimSessionCheckpoints(checkpoints);
+    // When the active transcript was rotated as part of this compaction,
+    // the caller passes a new sessionId (and matching postSessionFile) that
+    // points at the successor transcript file. We must update the top-level
+    // sessionId/sessionFile on the session entry so that subsequent inbound
+    // message routing finds the active transcript instead of an orphaned id
+    // that points at a file already cleaned up by trim/cleanup.
+    const rotatedSessionFile = params.postSessionFile?.trim();
+    const rotated =
+      params.sessionId !== existing.sessionId ||
+      (rotatedSessionFile !== undefined && rotatedSessionFile !== existing.sessionFile);
     store[target.canonicalKey] = {
       ...existing,
+      ...(rotated
+        ? {
+            sessionId: params.sessionId,
+            ...(rotatedSessionFile ? { sessionFile: rotatedSessionFile } : {}),
+          }
+        : {}),
       updatedAt: Math.max(existing.updatedAt ?? 0, createdAt),
       compactionCheckpoints: trimmedCheckpoints.kept,
     };
