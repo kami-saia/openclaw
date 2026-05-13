@@ -31,9 +31,6 @@ vi.mock("../../config/config.js", async () => {
     getRuntimeConfig: () => loadConfigMock() as never,
   };
 });
-vi.mock("./sessions-send-tool.a2a.js", () => ({
-  runSessionsSendA2AFlow: vi.fn(),
-}));
 
 let createSessionsListTool: typeof import("./sessions-list-tool.js").createSessionsListTool;
 let createSessionsSendTool: typeof import("./sessions-send-tool.js").createSessionsSendTool;
@@ -770,7 +767,7 @@ describe("sessions_send gating", () => {
     expect(callGatewayMock.mock.calls[0]?.[0]).toMatchObject({ method: "sessions.resolve" });
   });
 
-  it("does not reuse a stale assistant reply when no new reply appears", async () => {
+  it("returns accepted without polling history under fire-and-forget semantics", async () => {
     const tool = createMainSessionsSendTool();
     let historyCalls = 0;
     const staleAssistantMessage = {
@@ -803,14 +800,13 @@ describe("sessions_send gating", () => {
     const result = await tool.execute("call-stale-send", {
       sessionKey: MAIN_AGENT_SESSION_KEY,
       message: "ping",
-      timeoutSeconds: 1,
     });
 
-    expect(historyCalls).toBe(2);
+    expect(historyCalls).toBe(0);
     expect(result.details).toMatchObject({
-      status: "ok",
-      reply: undefined,
+      status: "accepted",
       sessionKey: MAIN_AGENT_SESSION_KEY,
     });
+    expect((result.details as { reply?: unknown }).reply).toBeUndefined();
   });
 });

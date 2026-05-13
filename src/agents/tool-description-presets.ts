@@ -29,7 +29,8 @@ export function describeSessionsSendTool(): string {
   return [
     "Send a message into another visible session by sessionKey or label.",
     "Thread-scoped chat sessions are rejected; target the parent channel session for inter-agent coordination.",
-    "Use this to delegate follow-up work to an existing session; waits for the target run and returns the updated assistant reply when available.",
+    "Fire-and-forget: returns immediately after enqueuing the wake. The target's reply (if any) goes to the target's own delivery channel, not back here.",
+    "To get a response routed back, the receiving session must call sessions_send itself.",
   ].join(" ");
 }
 

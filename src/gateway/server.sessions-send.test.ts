@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, type Mock } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { resolveSessionTranscriptPath } from "../config/sessions.js";
 import { emitAgentEvent } from "../infra/agent-events.js";
 import { captureEnv } from "../test-utils/env.js";
@@ -112,22 +112,14 @@ afterAll(async () => {
 });
 
 describe("sessions_send gateway loopback", () => {
-  it("returns reply when lifecycle ends before agent.wait", async () => {
+  it("returns accepted immediately after enqueuing the wake", async () => {
     const spy = agentCommand as unknown as Mock<(opts: unknown) => Promise<void>>;
     spy.mockImplementation(async (opts: unknown) =>
       emitLifecycleAssistantReply({
         opts,
         defaultSessionId: "main",
         includeTimestamp: true,
-        resolveText: (extraSystemPrompt) => {
-          if (extraSystemPrompt?.includes("Agent-to-agent reply step")) {
-            return "REPLY_SKIP";
-          }
-          if (extraSystemPrompt?.includes("Agent-to-agent announce step")) {
-            return "ANNOUNCE_SKIP";
-          }
-          return "pong";
-        },
+        resolveText: () => "pong",
       }),
     );
 
@@ -136,17 +128,24 @@ describe("sessions_send gateway loopback", () => {
     const result = await tool.execute("call-loopback", {
       sessionKey: "main",
       message: "ping",
-      timeoutSeconds: 5,
     });
     const details = result.details as {
       status?: string;
       reply?: string;
       sessionKey?: string;
+      delivery?: unknown;
     };
-    expect(details.status).toBe("ok");
-    expect(details.reply).toBe("pong");
+    expect(details.status).toBe("accepted");
     expect(details.sessionKey).toBe("main");
+    expect(details.reply).toBeUndefined();
+    expect(details.delivery).toBeUndefined();
 
+    await vi.waitFor(
+      () => {
+        expect(spy.mock.calls.length).toBeGreaterThan(0);
+      },
+      { timeout: 5_000, interval: 10 },
+    );
     const firstCall = spy.mock.calls[0]?.[0] as
       | { lane?: string; inputProvenance?: { kind?: string; sourceTool?: string } }
       | undefined;
@@ -160,7 +159,7 @@ describe("sessions_send gateway loopback", () => {
 
 describe("sessions_send label lookup", () => {
   it(
-    "finds session by label and sends message",
+    "finds session by label and enqueues the wake",
     { timeout: SESSION_SEND_E2E_TIMEOUT_MS },
     async () => {
       // This is an operator feature; enable broader session tool targeting for this test.
@@ -209,15 +208,14 @@ describe("sessions_send label lookup", () => {
       const result = await tool.execute("call-by-label", {
         label: "my-test-worker",
         message: "hello labeled session",
-        timeoutSeconds: 5,
       });
       const details = result.details as {
         status?: string;
         reply?: string;
         sessionKey?: string;
       };
-      expect(details.status).toBe("ok");
-      expect(details.reply).toBe("labeled response");
+      expect(details.status).toBe("accepted");
+      expect(details.reply).toBeUndefined();
       expect(details.sessionKey).toBe("agent:main:test-labeled-session");
     },
   );
