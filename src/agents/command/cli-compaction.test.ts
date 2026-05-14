@@ -118,11 +118,11 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
-        estimatedPromptTokens: 600,
+        route: "compact_only",
+        shouldCompact: true,
+        estimatedPromptTokens: 900,
         promptBudgetBeforeReserve: 800,
-        overflowTokens: 0,
+        overflowTokens: 100,
         toolResultReducibleChars: 0,
         effectiveReserveTokens: 200,
       }),
@@ -166,5 +166,73 @@ describe("runCliTurnCompactionLifecycle", () => {
     expect(updatedEntry?.cliSessionBindings?.["claude-cli"]).toBeUndefined();
     expect(updatedEntry?.cliSessionIds?.["claude-cli"]).toBeUndefined();
     expect(updatedEntry?.claudeCliSessionId).toBeUndefined();
+  });
+
+  it("does not compact when only the totalTokens snapshot is over budget (system prompt + tools, transcript is small)", async () => {
+    // Regression: tokenSnapshot reflects the FULL prior prompt (system + tools
+    // + skills + transcript). Gating compaction on the snapshot triggers no-op
+    // compactions on already-tiny transcripts and loops every turn (deadlocked
+    // Quant on 2026-05-14). Compaction must gate on the transcript-only
+    // estimatedPromptTokens.
+    const sessionKey = "agent:main:cli";
+    const sessionId = "session-cli-snapshot";
+    const sessionFile = path.join(tmpDir, "snapshot-session.jsonl");
+    const storePath = path.join(tmpDir, "snapshot-sessions.json");
+    await writeSessionFile({ sessionFile, sessionId });
+
+    const sessionEntry: SessionEntry = {
+      sessionId,
+      updatedAt: Date.now(),
+      sessionFile,
+      contextTokens: 1_000,
+      // Snapshot is way over the post-reserve budget (800) because it includes
+      // a 60k system prompt + tool defs in real life. Transcript itself is small.
+      totalTokens: 950,
+      totalTokensFresh: true,
+    };
+    const sessionStore: Record<string, SessionEntry> = { [sessionKey]: sessionEntry };
+    await fs.writeFile(storePath, JSON.stringify(sessionStore, null, 2), "utf-8");
+
+    const compactCalls: Array<Parameters<ContextEngine["compact"]>[0]> = [];
+    const maintenance = vi.fn(async () => ({ changed: false, bytesFreed: 0, rewrittenEntries: 0 }));
+    setCliCompactionTestDeps({
+      resolveContextEngine: async () => buildContextEngine({ compactCalls }),
+      createPreparedEmbeddedPiSettingsManager: async () => ({
+        getCompactionReserveTokens: () => 200,
+        getCompactionKeepRecentTokens: () => 0,
+        applyOverrides: () => {},
+      }),
+      shouldPreemptivelyCompactBeforePrompt: () => ({
+        route: "fits",
+        shouldCompact: false,
+        // Transcript itself is well under budget. Snapshot is bigger only because
+        // of the static system prompt + tool defs that compaction can't reduce.
+        estimatedPromptTokens: 600,
+        promptBudgetBeforeReserve: 800,
+        overflowTokens: 0,
+        toolResultReducibleChars: 0,
+        effectiveReserveTokens: 200,
+      }),
+      resolveLiveToolResultMaxChars: () => 20_000,
+      runContextEngineMaintenance: maintenance,
+    });
+
+    const updatedEntry = await runCliTurnCompactionLifecycle({
+      cfg: {} as OpenClawConfig,
+      sessionId,
+      sessionKey,
+      sessionEntry,
+      sessionStore,
+      storePath,
+      sessionAgentId: "main",
+      workspaceDir: tmpDir,
+      agentDir: tmpDir,
+      provider: "claude-cli",
+      model: "opus",
+    });
+
+    expect(compactCalls).toHaveLength(0);
+    expect(maintenance).not.toHaveBeenCalled();
+    expect(updatedEntry).toBe(sessionEntry);
   });
 });

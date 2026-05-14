@@ -227,13 +227,20 @@ export async function runCliTurnCompactionLifecycle(params: {
     }),
   });
   const tokenSnapshot = resolveSessionTokenSnapshot(params.sessionEntry);
+  // The compaction gate must use the transcript-only estimate.
+  // `tokenSnapshot` (sessionEntry.totalTokens) reflects the full prior prompt
+  // including system prompt + tool defs + skills, which compactCliTranscript
+  // cannot reduce. Gating on the snapshot triggers no-op compactions
+  // (delta.messages=0) on already-tiny transcripts and loops every turn.
+  // We still expose the snapshot via `currentTokenCount` for logging/budget
+  // decisions inside compactCliTranscript itself.
   const currentTokenCount = Math.max(
     preemptiveCompaction.estimatedPromptTokens,
     tokenSnapshot ?? 0,
   );
   if (
     !preemptiveCompaction.shouldCompact &&
-    currentTokenCount <= preemptiveCompaction.promptBudgetBeforeReserve
+    preemptiveCompaction.estimatedPromptTokens <= preemptiveCompaction.promptBudgetBeforeReserve
   ) {
     return params.sessionEntry;
   }
