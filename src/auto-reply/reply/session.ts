@@ -35,6 +35,7 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { TtsAutoMode } from "../../config/types.tts.js";
 import { getSessionBindingService } from "../../infra/outbound/session-binding-service.js";
 import { deliverSessionMaintenanceWarning } from "../../infra/session-maintenance-warning.js";
+import { enqueueSystemEvent } from "../../infra/system-events.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { closeTrackedBrowserTabsForSessions } from "../../plugin-sdk/browser-maintenance.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
@@ -57,6 +58,7 @@ import { normalizeInboundTextNewlines } from "./inbound-text.js";
 import { stripMentions, stripStructuralPrefixes } from "./mentions.js";
 import { isResetAuthorizedForContext } from "./reset-authorization.js";
 import {
+  isExternalRoutingChannel,
   maybeRetireLegacyMainDeliveryRoute,
   resolveLastChannelRaw,
   resolveLastToRaw,
@@ -609,6 +611,32 @@ export async function initSessionState(params: {
   const lastTo = deliveryFields.lastTo ?? lastToRaw;
   const lastAccountId = deliveryFields.lastAccountId ?? lastAccountIdRaw;
   const lastThreadId = deliveryFields.lastThreadId ?? lastThreadIdRaw;
+  // Inject a system event when the effective delivery route shifts off a
+  // previously-established external channel (e.g. heartbeat cron or
+  // sessions_send wakes a Discord-bound session). The receiving session needs
+  // to know its plain-reply path no longer reaches the original user, so it
+  // can use the `message` tool to target the right channel. The next external
+  // user reply will flip routing back automatically.
+  if (!isNewSession && baseEntry) {
+    const priorChannel = (baseEntry.lastChannel ?? "").trim();
+    const priorTo = (baseEntry.lastTo ?? "").trim();
+    const nextChannel = (lastChannel ?? "").trim();
+    const nextTo = (lastTo ?? "").trim();
+    const channelChanged = priorChannel !== nextChannel;
+    const toChanged = priorTo !== nextTo;
+    if (
+      (channelChanged || toChanged) &&
+      isExternalRoutingChannel(priorChannel) &&
+      !(isExternalRoutingChannel(nextChannel) && nextChannel === priorChannel && nextTo === priorTo)
+    ) {
+      const newRoute = nextChannel ? `${nextChannel}${nextTo ? `:${nextTo}` : ""}` : "internal";
+      const oldRoute = `${priorChannel}${priorTo ? `:${priorTo}` : ""}`;
+      enqueueSystemEvent(
+        `[delivery_context_changed: route=${newRoute} previous=${oldRoute}. Plain replies now go to ${newRoute}; use the \`message\` tool to send elsewhere. The next user reply will flip routing back.]`,
+        { sessionKey, trusted: true },
+      );
+    }
+  }
   sessionEntry = {
     ...baseEntry,
     sessionId,

@@ -87,7 +87,7 @@ function isDirectSessionKey(sessionKey?: string): boolean {
     : false;
 }
 
-function isExternalRoutingChannel(channel?: string): channel is string {
+export function isExternalRoutingChannel(channel?: string): channel is string {
   return Boolean(
     channel && channel !== INTERNAL_MESSAGE_CHANNEL && isDeliverableMessageChannel(channel),
   );
