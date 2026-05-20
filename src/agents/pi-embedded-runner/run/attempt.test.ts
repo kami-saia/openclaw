@@ -1,11 +1,20 @@
-import { streamSimple } from "@mariozechner/pi-ai";
+import { streamSimple } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
+
+vi.mock("../context-engine-capabilities.js", () => ({
+  resolveContextEngineCapabilities: async () => ({ llm: undefined }),
+}));
 import type { OpenClawConfig } from "../../../config/config.js";
+import { addSession, resetProcessRegistryForTests } from "../../bash-process-registry.js";
+import { createProcessSessionFixture } from "../../bash-process-registry.test-helpers.js";
 import { SYSTEM_PROMPT_CACHE_BOUNDARY } from "../../system-prompt-cache-boundary.js";
 import { buildAgentSystemPrompt } from "../../system-prompt.js";
 import { resolveBootstrapContextTargets } from "./attempt-bootstrap-routing.js";
 import {
   buildContextEnginePromptCacheInfo,
+  buildAutoAddedToolSearchControlNamesForAllowlistCheck,
+  buildCallableToolNamesForEmptyAllowlistCheck,
+  buildToolSearchRunPlan,
   buildAfterTurnRuntimeContext,
   buildAfterTurnRuntimeContextFromUsage,
   composeSystemPromptWithHookContext,
@@ -66,25 +75,327 @@ async function invokeWrappedTestStream(
   return await Promise.resolve(wrappedFn({} as never, {} as never, {} as never));
 }
 
+function requireRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object") {
+    throw new Error(`expected ${label}`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireContentItem(
+  content: Array<{ type?: string; text?: string; name?: string }> | unknown[],
+  index = 0,
+) {
+  return requireRecord(content[index], `content item ${index}`);
+}
+
+function expectSingleTextContent(
+  content: Array<{ type?: string; text?: string }> | unknown[],
+  textFragment: string,
+) {
+  expect(content).toHaveLength(1);
+  const item = requireContentItem(content);
+  expect(item.type).toBe("text");
+  expect(item.text).toContain(textFragment);
+}
+
+function expectSingleToolCallContent(
+  content: Array<{ type?: string; name?: string }> | unknown[],
+  name: string,
+) {
+  expect(content).toHaveLength(1);
+  const item = requireContentItem(content);
+  expect(item.type).toBe("toolCall");
+  expect(item.name).toBe(name);
+}
+
+function firstBaseContext(baseFn: ReturnType<typeof vi.fn>): { messages: unknown[] } {
+  const call = baseFn.mock.calls.at(0);
+  if (!call) {
+    throw new Error("expected base stream call");
+  }
+  return call[1] as { messages: unknown[] };
+}
+
 describe("buildEmbeddedAttemptToolRunContext", () => {
   it("carries runtime toolsAllow into coding tool construction", () => {
-    expect(
-      buildEmbeddedAttemptToolRunContext({
-        trigger: "manual",
-        jobId: "job-1",
-        memoryFlushWritePath: "memory/log.md",
-        toolsAllow: ["memory_search", "memory_get"],
-      }),
-    ).toMatchObject({
+    const context = buildEmbeddedAttemptToolRunContext({
       trigger: "manual",
       jobId: "job-1",
       memoryFlushWritePath: "memory/log.md",
-      runtimeToolAllowlist: ["memory_search", "memory_get"],
+      toolsAllow: ["memory_search", "memory_get"],
     });
+    expect(context.trigger).toBe("manual");
+    expect(context.jobId).toBe("job-1");
+    expect(context.memoryFlushWritePath).toBe("memory/log.md");
+    expect(context.runtimeToolAllowlist).toEqual(["memory_search", "memory_get"]);
+  });
+});
+
+describe("buildCallableToolNamesForEmptyAllowlistCheck", () => {
+  it("ignores auto-added Tool Search controls so bad allowlists still fail", () => {
+    expect(
+      buildCallableToolNamesForEmptyAllowlistCheck({
+        effectiveToolNames: ["tool_search_code"],
+        autoAddedToolSearchControlNames: new Set(["tool_search_code"]),
+        toolSearchCatalogToolCount: 0,
+      }),
+    ).toEqual([]);
+  });
+
+  it("counts cataloged tools hidden behind auto-added Tool Search controls", () => {
+    expect(
+      buildCallableToolNamesForEmptyAllowlistCheck({
+        effectiveToolNames: ["tool_search_code"],
+        autoAddedToolSearchControlNames: new Set(["tool_search_code"]),
+        toolSearchCatalogToolCount: 1,
+      }),
+    ).toEqual(["tool-search:0"]);
+  });
+
+  it("keeps explicitly requested Tool Search controls callable", () => {
+    expect(
+      buildCallableToolNamesForEmptyAllowlistCheck({
+        effectiveToolNames: ["tool_search_code"],
+        autoAddedToolSearchControlNames: new Set(),
+        toolSearchCatalogToolCount: 0,
+      }),
+    ).toEqual(["tool_search_code"]);
+  });
+});
+
+describe("buildAutoAddedToolSearchControlNamesForAllowlistCheck", () => {
+  it("treats controls as auto-added unless any explicit allowlist requested them", () => {
+    expect(
+      buildAutoAddedToolSearchControlNamesForAllowlistCheck({
+        toolSearchControlsEnabled: true,
+        explicitAllowlistSources: [{ entries: ["missing_tool"] }],
+        controlNames: ["tool_search_code", "tool_search"],
+      }),
+    ).toEqual(new Set(["tool_search_code", "tool_search"]));
+
+    expect(
+      buildAutoAddedToolSearchControlNamesForAllowlistCheck({
+        toolSearchControlsEnabled: true,
+        explicitAllowlistSources: [{ entries: ["tool_search_code"] }],
+        controlNames: ["tool_search_code", "tool_search"],
+      }),
+    ).toEqual(new Set(["tool_search"]));
+  });
+});
+
+describe("buildToolSearchRunPlan", () => {
+  it("keeps compact visible names separate from replay-safe names", () => {
+    const plan = buildToolSearchRunPlan({
+      visibleTools: [{ name: "tool_search_code" }] as never,
+      uncompactedTools: [
+        { name: "tool_search_code" },
+        { name: "exec" },
+        { name: "fake_plugin_tool" },
+      ] as never,
+      clientTools: [
+        {
+          type: "function",
+          function: {
+            name: "client_pick_file",
+            parameters: { type: "object", properties: {} },
+          },
+        },
+      ],
+      catalogRegistered: true,
+      catalogToolCount: 2,
+      controlsEnabled: true,
+      explicitAllowlistSources: [{ entries: ["missing_tool"] }],
+    });
+
+    expect([...plan.visibleAllowedToolNames]).toEqual(["tool_search_code"]);
+    expect([...plan.replayAllowedToolNames]).toEqual([
+      "tool_search_code",
+      "exec",
+      "fake_plugin_tool",
+      "client_pick_file",
+    ]);
+    expect(plan.emptyAllowlistCallableNames).toEqual(["tool-search:0", "tool-search:1"]);
+  });
+
+  it("counts explicitly allowlisted client tools before they are cataloged later", () => {
+    const plan = buildToolSearchRunPlan({
+      visibleTools: [{ name: "tool_search_code" }] as never,
+      uncompactedTools: [{ name: "tool_search_code" }] as never,
+      clientTools: [
+        {
+          type: "function",
+          function: {
+            name: "client_pick_file",
+            parameters: { type: "object", properties: {} },
+          },
+        },
+      ],
+      catalogRegistered: true,
+      catalogToolCount: 0,
+      controlsEnabled: true,
+      explicitAllowlistSources: [{ entries: ["client_pick_file"] }],
+    });
+
+    expect(plan.emptyAllowlistCallableNames).toEqual(["tool-search-client:client_pick_file"]);
+  });
+
+  it("keeps code-mode control tools in replay-safe names", () => {
+    const plan = buildToolSearchRunPlan({
+      visibleTools: [{ name: "exec" }, { name: "wait" }] as never,
+      uncompactedTools: [{ name: "fake_plugin_tool" }] as never,
+      clientTools: [],
+      catalogRegistered: true,
+      catalogToolCount: 1,
+      controlsEnabled: true,
+      controlNames: ["exec", "wait"],
+      explicitAllowlistSources: [{ entries: ["missing_tool"] }],
+    });
+
+    expect([...plan.visibleAllowedToolNames]).toEqual(["exec", "wait"]);
+    expect([...plan.replayAllowedToolNames]).toEqual(["fake_plugin_tool", "exec", "wait"]);
+    expect(plan.emptyAllowlistCallableNames).toEqual(["tool-search:0"]);
+  });
+
+  it("does not let unrelated client tools mask a bad explicit allowlist", () => {
+    const plan = buildToolSearchRunPlan({
+      visibleTools: [{ name: "tool_search_code" }] as never,
+      uncompactedTools: [{ name: "tool_search_code" }] as never,
+      clientTools: [
+        {
+          type: "function",
+          function: {
+            name: "client_pick_file",
+            parameters: { type: "object", properties: {} },
+          },
+        },
+      ],
+      catalogRegistered: true,
+      catalogToolCount: 0,
+      controlsEnabled: true,
+      explicitAllowlistSources: [{ entries: ["missing_tool"] }],
+    });
+
+    expect(plan.emptyAllowlistCallableNames).toEqual([]);
   });
 });
 
 describe("normalizeMessagesForLlmBoundary", () => {
+  it("strips inbound metadata from historical user turns before model replay", () => {
+    const historicalEnvelope =
+      'Conversation info (untrusted metadata):\n```json\n{"channel":"telegram","chatType":"dm"}\n```\n\nSender (untrusted metadata):\n```json\n{"id":"user-1"}\n```\n\nActual historical ask';
+    const input = [
+      {
+        role: "user",
+        content: [{ type: "text", text: historicalEnvelope }],
+        timestamp: 1,
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Historical answer" }],
+        timestamp: 2,
+      },
+    ];
+
+    const output = normalizeMessagesForLlmBoundary(
+      input as Parameters<typeof normalizeMessagesForLlmBoundary>[0],
+    ) as unknown as Array<{ content?: Array<{ text?: string }> }>;
+
+    expect(output[0]?.content?.[0]?.text).toBe("Actual historical ask");
+    expect(JSON.stringify(output)).not.toContain("Conversation info");
+    expect(JSON.stringify(output)).not.toContain("Sender (untrusted metadata)");
+    expect(JSON.stringify(input)).toContain("Conversation info");
+  });
+
+  it("strips inbound metadata from string historical user turns", () => {
+    const input = [
+      {
+        role: "user",
+        content:
+          'Conversation info (untrusted metadata):\n```json\n{"channel":"telegram"}\n```\n\nPlain historical ask',
+        timestamp: 1,
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Historical answer" }],
+        timestamp: 2,
+      },
+    ];
+
+    const output = normalizeMessagesForLlmBoundary(
+      input as Parameters<typeof normalizeMessagesForLlmBoundary>[0],
+    ) as unknown as Array<{ content?: string }>;
+
+    expect(output[0]?.content).toBe("Plain historical ask");
+  });
+
+  it("preserves inbound metadata on the current user turn", () => {
+    const historicalEnvelope =
+      'Conversation info (untrusted metadata):\n```json\n{"channel":"discord"}\n```\n\nOld ask';
+    const currentEnvelope =
+      'Conversation info (untrusted metadata):\n```json\n{"channel":"discord","has_reply_context":true}\n```\n\nReply target of current user message (untrusted, for context):\n```json\n{"body":"quoted status body"}\n```\n\nCurrent ask';
+    const input = [
+      {
+        role: "user",
+        content: [{ type: "text", text: historicalEnvelope }],
+        timestamp: 1,
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Historical answer" }],
+        timestamp: 2,
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: currentEnvelope }],
+        timestamp: 3,
+      },
+    ];
+
+    const output = normalizeMessagesForLlmBoundary(
+      input as Parameters<typeof normalizeMessagesForLlmBoundary>[0],
+    ) as unknown as Array<{ content?: Array<{ text?: string }> }>;
+
+    expect(output[0]?.content?.[0]?.text).toBe("Old ask");
+    expect(output[2]?.content?.[0]?.text).toContain(
+      "Reply target of current user message (untrusted, for context):",
+    );
+    expect(output[2]?.content?.[0]?.text).toContain("quoted status body");
+  });
+
+  it("preserves current user inbound metadata through tool-result continuation", () => {
+    const currentEnvelope =
+      'Conversation info (untrusted metadata):\n```json\n{"channel":"discord","has_reply_context":true}\n```\n\nReply target of current user message (untrusted, for context):\n```json\n{"body":"quoted status body"}\n```\n\nCurrent ask';
+    const input = [
+      {
+        role: "user",
+        content: [{ type: "text", text: currentEnvelope }],
+        timestamp: 1,
+      },
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call_1", name: "read", arguments: {} }],
+        timestamp: 2,
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call_1",
+        toolName: "read",
+        content: [{ type: "text", text: "tool output" }],
+        timestamp: 3,
+      },
+    ];
+
+    const output = normalizeMessagesForLlmBoundary(
+      input as Parameters<typeof normalizeMessagesForLlmBoundary>[0],
+    ) as unknown as Array<{ content?: Array<{ text?: string }> }>;
+
+    expect(output[0]?.content?.[0]?.text).toContain(
+      "Reply target of current user message (untrusted, for context):",
+    );
+    expect(output[0]?.content?.[0]?.text).toContain("quoted status body");
+  });
+
   it("strips tool result details before provider conversion", () => {
     const input = [
       {
@@ -142,15 +453,9 @@ describe("normalizeMessagesForLlmBoundary", () => {
     ) as unknown as Array<Record<string, unknown>>;
 
     expect(output).toHaveLength(3);
-    expect(output).not.toEqual(
-      expect.arrayContaining([expect.objectContaining({ content: "old secret runtime context" })]),
-    );
-    expect(output).toEqual(
-      expect.arrayContaining([expect.objectContaining({ content: "secret runtime context" })]),
-    );
-    expect(output).toEqual(
-      expect.arrayContaining([expect.objectContaining({ customType: "other-extension-context" })]),
-    );
+    expect(output.some((item) => item.content === "old secret runtime context")).toBe(false);
+    expect(output.some((item) => item.content === "secret runtime context")).toBe(true);
+    expect(output.some((item) => item.customType === "other-extension-context")).toBe(true);
   });
 
   it("keeps only safe blocked metadata at the LLM boundary", () => {
@@ -452,6 +757,10 @@ describe("remapInjectedContextFilesToWorkspace", () => {
             content: "tools",
           },
           {
+            path: "/real/workspace/..context/USER.md",
+            content: "dot-prefixed context",
+          },
+          {
             path: "/outside/README.md",
             content: "outside",
           },
@@ -467,6 +776,10 @@ describe("remapInjectedContextFilesToWorkspace", () => {
       {
         path: "/sandbox/workspace/nested/TOOLS.md",
         content: "tools",
+      },
+      {
+        path: "/sandbox/workspace/..context/USER.md",
+        content: "dot-prefixed context",
       },
       {
         path: "/outside/README.md",
@@ -582,10 +895,8 @@ describe("mergeOrphanedTrailingUserPrompt", () => {
       } as never,
     });
 
-    expect(result).toMatchObject({
-      merged: true,
-      removeLeaf: true,
-    });
+    expect(result.merged).toBe(true);
+    expect(result.removeLeaf).toBe(true);
     expect(result.prompt).toContain("please inspect this inline image");
     expect(result.prompt).toContain("[image_url] inline data URI (image/png, 4118 chars)");
     expect(result.prompt).not.toContain("base64");
@@ -610,10 +921,8 @@ describe("mergeOrphanedTrailingUserPrompt", () => {
       } as never,
     });
 
-    expect(result).toMatchObject({
-      merged: true,
-      removeLeaf: true,
-    });
+    expect(result.merged).toBe(true);
+    expect(result.removeLeaf).toBe(true);
     expect(result.prompt).toContain("[value] inline data URI (image/png, 10022 chars)");
     expect(result.prompt).toContain("bbbb");
     expect(result.prompt).toContain("(2000 chars)");
@@ -677,7 +986,6 @@ describe("resolveEmbeddedAgentStreamFn", () => {
     const streamFn = resolveEmbeddedAgentStreamFn({
       currentStreamFn: undefined,
       providerStreamFn,
-      shouldUseWebSocketTransport: false,
       sessionId: "session-1",
       model: {
         api: "openai-completions",
@@ -689,11 +997,12 @@ describe("resolveEmbeddedAgentStreamFn", () => {
       },
     });
 
-    await expect(
-      streamFn({ provider: "demo-provider", id: "demo-model" } as never, {} as never, {}),
-    ).resolves.toMatchObject({
-      apiKey: "demo-runtime-key",
-    });
+    const streamOptions = await streamFn(
+      { provider: "demo-provider", id: "demo-model" } as never,
+      {} as never,
+      {},
+    );
+    expect(requireRecord(streamOptions, "stream options").apiKey).toBe("demo-runtime-key");
     expect(providerStreamFn).toHaveBeenCalledTimes(1);
   });
 
@@ -702,7 +1011,6 @@ describe("resolveEmbeddedAgentStreamFn", () => {
     const streamFn = resolveEmbeddedAgentStreamFn({
       currentStreamFn: undefined,
       providerStreamFn,
-      shouldUseWebSocketTransport: false,
       sessionId: "session-1",
       model: {
         api: "openai-completions",
@@ -711,23 +1019,21 @@ describe("resolveEmbeddedAgentStreamFn", () => {
       } as never,
     });
 
-    await expect(
-      streamFn(
-        { provider: "demo-provider", id: "demo-model" } as never,
-        {
-          systemPrompt: `Stable prefix${SYSTEM_PROMPT_CACHE_BOUNDARY}Dynamic suffix`,
-        } as never,
-        {},
-      ),
-    ).resolves.toMatchObject({
-      systemPrompt: "Stable prefix\nDynamic suffix",
-    });
+    const context = await streamFn(
+      { provider: "demo-provider", id: "demo-model" } as never,
+      {
+        systemPrompt: `Stable prefix${SYSTEM_PROMPT_CACHE_BOUNDARY}Dynamic suffix`,
+      } as never,
+      {},
+    );
+    expect(requireRecord(context, "stream context").systemPrompt).toBe(
+      "Stable prefix\nDynamic suffix",
+    );
     expect(providerStreamFn).toHaveBeenCalledTimes(1);
   });
   it("routes supported default streamSimple fallbacks through boundary-aware transports", () => {
     const streamFn = resolveEmbeddedAgentStreamFn({
       currentStreamFn: undefined,
-      shouldUseWebSocketTransport: false,
       sessionId: "session-1",
       model: {
         api: "openai-responses",
@@ -743,7 +1049,6 @@ describe("resolveEmbeddedAgentStreamFn", () => {
     const currentStreamFn = vi.fn();
     const streamFn = resolveEmbeddedAgentStreamFn({
       currentStreamFn: currentStreamFn as never,
-      shouldUseWebSocketTransport: false,
       sessionId: "session-1",
       model: {
         api: "openai-responses",
@@ -753,6 +1058,27 @@ describe("resolveEmbeddedAgentStreamFn", () => {
     });
 
     expect(streamFn).toBe(currentStreamFn);
+  });
+
+  it("routes runtime-auth custom currentStreamFn values through boundary-aware transports", async () => {
+    const currentStreamFn = vi.fn();
+    const streamFn = resolveEmbeddedAgentStreamFn({
+      currentStreamFn: currentStreamFn as never,
+      sessionId: "session-1",
+      model: {
+        api: "anthropic-messages",
+        provider: "cloudflare-ai-gateway",
+        id: "claude-sonnet-4-6",
+        baseUrl: "https://gateway.ai.cloudflare.com/v1/account/gateway/anthropic",
+        maxTokens: 1024,
+        contextWindow: 200_000,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      } as never,
+      resolvedApiKey: "sk-ant-test",
+    });
+
+    expect(streamFn).not.toBe(currentStreamFn);
   });
 });
 
@@ -999,10 +1325,9 @@ describe("wrapStreamFnTrimToolCallNames", () => {
     for (let i = 0; i < 10; i += 1) {
       const stream = await Promise.resolve(wrappedFn({} as never, {} as never, {} as never));
       const result = await stream.result();
-      expect(result).toMatchObject({
-        role: "assistant",
-        content: [{ type: "toolCall", name: "exec" }],
-      });
+      const message = requireRecord(result, "result message");
+      expect(message.role).toBe("assistant");
+      expectSingleToolCallContent(message.content as unknown[], "exec");
     }
 
     const blockedStream = await Promise.resolve(wrappedFn({} as never, {} as never, {} as never));
@@ -1012,12 +1337,7 @@ describe("wrapStreamFnTrimToolCallNames", () => {
     };
 
     expect(blockedResult.role).toBe("assistant");
-    expect(blockedResult.content).toEqual([
-      expect.objectContaining({
-        type: "text",
-        text: expect.stringContaining('"exec"'),
-      }),
-    ]);
+    expectSingleTextContent(blockedResult.content, '"exec"');
   });
 
   it("leaves repeated unavailable tool calls alone when the unknown-tool guard is disabled", async () => {
@@ -1035,10 +1355,9 @@ describe("wrapStreamFnTrimToolCallNames", () => {
     for (let i = 0; i < 11; i += 1) {
       const stream = await Promise.resolve(wrappedFn({} as never, {} as never, {} as never));
       const result = await stream.result();
-      expect(result).toMatchObject({
-        role: "assistant",
-        content: [{ type: "toolCall", name: "exec" }],
-      });
+      const message = requireRecord(result, "result message");
+      expect(message.role).toBe("assistant");
+      expectSingleToolCallContent(message.content as unknown[], "exec");
     }
   });
 
@@ -1066,7 +1385,7 @@ describe("wrapStreamFnTrimToolCallNames", () => {
 
     expect(partialToolCall.name).toBe("exec");
     expect(messageToolCall.name).toBe("exec");
-    expect(result.content).toEqual([expect.objectContaining({ type: "toolCall", name: "exec" })]);
+    expectSingleToolCallContent(result.content, "exec");
   });
 
   it("does not reset the unavailable-tool streak on partial-only stream chunks", async () => {
@@ -1101,12 +1420,7 @@ describe("wrapStreamFnTrimToolCallNames", () => {
     };
 
     expect(secondResult.role).toBe("assistant");
-    expect(secondResult.content).toEqual([
-      expect.objectContaining({
-        type: "text",
-        text: expect.stringContaining('"exec"'),
-      }),
-    ]);
+    expectSingleTextContent(secondResult.content, '"exec"');
   });
 
   it("counts the final unknown-tool retry when streamed messages omit the tool name", async () => {
@@ -1141,12 +1455,7 @@ describe("wrapStreamFnTrimToolCallNames", () => {
     };
 
     expect(secondResult.role).toBe("assistant");
-    expect(secondResult.content).toEqual([
-      expect.objectContaining({
-        type: "text",
-        text: expect.stringContaining('"exec"'),
-      }),
-    ]);
+    expectSingleTextContent(secondResult.content, '"exec"');
   });
 
   it("resets a provisional streamed unknown-tool retry when later chunks resolve to an allowed tool", async () => {
@@ -1196,12 +1505,7 @@ describe("wrapStreamFnTrimToolCallNames", () => {
     };
 
     expect(secondResult.role).toBe("assistant");
-    expect(secondResult.content).toEqual([
-      expect.objectContaining({
-        type: "toolCall",
-        name: "ex",
-      }),
-    ]);
+    expectSingleToolCallContent(secondResult.content, "ex");
   });
 
   it("keeps processing later streamed messages after one streamed unknown-tool retry was counted", async () => {
@@ -1251,12 +1555,7 @@ describe("wrapStreamFnTrimToolCallNames", () => {
     };
 
     expect(secondResult.role).toBe("assistant");
-    expect(secondResult.content).toEqual([
-      expect.objectContaining({
-        type: "toolCall",
-        name: "re",
-      }),
-    ]);
+    expectSingleToolCallContent(secondResult.content, "re");
   });
 
   it("resets a stale unknown-tool streak when a streamed message mixes allowed and unknown tools", async () => {
@@ -1320,12 +1619,7 @@ describe("wrapStreamFnTrimToolCallNames", () => {
     };
 
     expect(thirdResult.role).toBe("assistant");
-    expect(thirdResult.content).toEqual([
-      expect.objectContaining({
-        type: "toolCall",
-        name: "ex",
-      }),
-    ]);
+    expectSingleToolCallContent(thirdResult.content, "ex");
   });
 
   it("infers tool names from malformed toolCallId variants when allowlist is present", async () => {
@@ -1456,7 +1750,7 @@ describe("wrapStreamFnTrimToolCallNames", () => {
     expect(finalToolCall.name).toBe("write");
   });
 
-  it("keeps blank names blank and assigns fallback ids when both name and id are blank", async () => {
+  it("stops final blank tool names before dispatch and still assigns fallback ids", async () => {
     const finalToolCall = { type: "toolCall", id: "", name: "" };
     const finalMessage = { role: "assistant", content: [finalToolCall] };
     const baseFn = vi.fn(() =>
@@ -1467,8 +1761,11 @@ describe("wrapStreamFnTrimToolCallNames", () => {
     );
 
     const stream = await invokeWrappedStream(baseFn, new Set(["read", "write"]));
-    await stream.result();
+    const result = (await stream.result()) as {
+      content: Array<{ type: string; text?: string }>;
+    };
 
+    expectSingleTextContent(result.content, '"blank tool name"');
     expect(finalToolCall.name).toBe("");
     expect(finalToolCall.id).toBe("call_auto_1");
   });
@@ -1597,11 +1894,14 @@ describe("wrapStreamFnTrimToolCallNames", () => {
     );
 
     const stream = await invokeWrappedStream(baseFn, new Set(["exec", "exec2"]));
-    await stream.result();
+    const result = (await stream.result()) as {
+      content: Array<{ type: string; text?: string }>;
+    };
 
+    expectSingleTextContent(result.content, '"blank tool name"');
     expect(finalToolCall.name).toBe("");
   });
-  it("does not collapse whitespace-only tool names to empty strings", async () => {
+  it("leaves provisional blank streamed names recoverable while stopping final blank dispatch", async () => {
     const partialToolCall = { type: "toolCall", name: "   " };
     const finalToolCall = { type: "toolCall", name: "\t  " };
     const event = {
@@ -1615,11 +1915,33 @@ describe("wrapStreamFnTrimToolCallNames", () => {
     for await (const _item of stream) {
       // drain
     }
-    await stream.result();
+    const result = (await stream.result()) as {
+      content: Array<{ type: string; text?: string }>;
+    };
 
+    expectSingleTextContent(result.content, '"blank tool name"');
     expect(partialToolCall.name).toBe("   ");
     expect(finalToolCall.name).toBe("\t  ");
     expect(baseFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not turn blank model output into a callable _blank tool", async () => {
+    const finalToolCall = { type: "toolCall", id: "call_1", name: "", arguments: {} };
+    const finalMessage = { role: "assistant", content: [finalToolCall] };
+    const baseFn = vi.fn(() =>
+      createFakeStream({
+        events: [],
+        resultMessage: finalMessage,
+      }),
+    );
+
+    const stream = await invokeWrappedStream(baseFn, new Set(["_blank"]));
+    const result = (await stream.result()) as {
+      content: Array<{ type: string; text?: string }>;
+    };
+
+    expectSingleTextContent(result.content, '"blank tool name"');
+    expect(finalToolCall.name).toBe("");
   });
 
   it("assigns fallback ids to missing/blank tool call ids in streamed and final messages", async () => {
@@ -1722,7 +2044,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as { messages: unknown[] };
+    const seenContext = firstBaseContext(baseFn);
     expect(seenContext.messages).toEqual([
       {
         role: "user",
@@ -1754,7 +2076,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as { messages: unknown[] };
+    const seenContext = firstBaseContext(baseFn);
     expect(seenContext.messages).toBe(messages);
   });
 
@@ -1786,7 +2108,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as { messages: unknown[] };
+    const seenContext = firstBaseContext(baseFn);
     expect(seenContext.messages).toEqual([
       {
         role: "user",
@@ -1824,7 +2146,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as { messages: unknown[] };
+    const seenContext = firstBaseContext(baseFn);
     expect(seenContext.messages).toEqual([
       {
         role: "user",
@@ -1865,7 +2187,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as { messages: unknown[] };
+    const seenContext = firstBaseContext(baseFn);
     expect(seenContext.messages).toEqual([
       {
         role: "user",
@@ -1905,7 +2227,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as { messages: unknown[] };
+    const seenContext = firstBaseContext(baseFn);
     expect(seenContext.messages).toEqual([
       {
         role: "user",
@@ -1946,7 +2268,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as { messages: unknown[] };
+    const seenContext = firstBaseContext(baseFn);
     expect(seenContext.messages).toEqual([
       {
         role: "user",
@@ -1999,7 +2321,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as { messages: unknown[] };
+    const seenContext = firstBaseContext(baseFn);
     expect(seenContext.messages).toEqual([
       {
         role: "user",
@@ -2058,7 +2380,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as { messages: unknown[] };
+    const seenContext = firstBaseContext(baseFn);
     expect(seenContext.messages).toEqual([
       {
         role: "user",
@@ -2096,33 +2418,31 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as { messages: unknown[] };
-    expect(seenContext.messages).toEqual([
+    const seenContext = firstBaseContext(baseFn);
+    expect(seenContext.messages).toHaveLength(3);
+    expect(seenContext.messages[0]).toEqual({
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "internal", thinkingSignature: "sig_1" },
+        { type: "toolCall", id: "call_1", name: "read", arguments: {} },
+      ],
+    });
+    const repairedToolResult = requireRecord(seenContext.messages[1], "repaired tool result");
+    expect(repairedToolResult.role).toBe("toolResult");
+    expect(repairedToolResult.toolCallId).toBe("call_1");
+    expect(repairedToolResult.toolName).toBe("read");
+    expect(repairedToolResult.content).toEqual([
       {
-        role: "assistant",
-        content: [
-          { type: "thinking", thinking: "internal", thinkingSignature: "sig_1" },
-          { type: "toolCall", id: "call_1", name: "read", arguments: {} },
-        ],
-      },
-      {
-        role: "toolResult",
-        toolCallId: "call_1",
-        toolName: "read",
-        content: [
-          {
-            type: "text",
-            text: "[openclaw] missing tool result in session history; inserted synthetic error result for transcript repair.",
-          },
-        ],
-        isError: true,
-        timestamp: expect.any(Number),
-      },
-      {
-        role: "user",
-        content: [{ type: "text", text: "retry" }],
+        type: "text",
+        text: "[openclaw] missing tool result in session history; inserted synthetic error result for transcript repair.",
       },
     ]);
+    expect(repairedToolResult.isError).toBe(true);
+    expect(repairedToolResult.timestamp).toBeTypeOf("number");
+    expect(seenContext.messages[2]).toEqual({
+      role: "user",
+      content: [{ type: "text", text: "retry" }],
+    });
   });
 
   it("preserves sessions_spawn attachment payloads on replay", async () => {
@@ -2158,7 +2478,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as {
+    const seenContext = firstBaseContext(baseFn) as {
       messages: Array<{ content?: Array<Record<string, unknown>> }>;
     };
     const toolCall = seenContext.messages[0]?.content?.[0] as {
@@ -2196,7 +2516,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as {
+    const seenContext = firstBaseContext(baseFn) as {
       messages: Array<{ content?: unknown[] }>;
     };
     expect(seenContext.messages[0]?.content).toEqual([
@@ -2226,7 +2546,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as { messages: unknown[] };
+    const seenContext = firstBaseContext(baseFn);
     expect(seenContext.messages).toBe(messages);
   });
 
@@ -2248,7 +2568,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as {
+    const seenContext = firstBaseContext(baseFn) as {
       messages: Array<{ content?: Array<{ name?: string }> }>;
     };
     expect(seenContext.messages[0]?.content?.[0]?.name).toBe("read");
@@ -2272,7 +2592,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as {
+    const seenContext = firstBaseContext(baseFn) as {
       messages: Array<{ content?: Array<{ name?: string }> }>;
     };
     expect(seenContext.messages[0]?.content?.[0]?.name).toBe("ReadFile");
@@ -2296,10 +2616,39 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as {
+    const seenContext = firstBaseContext(baseFn) as {
       messages: Array<{ content?: Array<{ name?: string }> }>;
     };
     expect(seenContext.messages[0]?.content?.[0]?.name).toBe("write");
+  });
+
+  it("drops replayed blank tool names that cannot be recovered from ids", async () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call_1", name: "   ", arguments: {} }],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call_1",
+        toolName: "",
+        content: [{ type: "text", text: "stale result" }],
+        isError: true,
+      },
+    ];
+    const baseFn = vi.fn((_model, _context) =>
+      createFakeStream({ events: [], resultMessage: { role: "assistant", content: [] } }),
+    );
+
+    const wrapped = wrapStreamFnSanitizeMalformedToolCalls(baseFn as never);
+    const stream = wrapped({} as never, { messages } as never, {} as never) as
+      | FakeWrappedStream
+      | Promise<FakeWrappedStream>;
+    await Promise.resolve(stream);
+
+    expect(baseFn).toHaveBeenCalledTimes(1);
+    const seenContext = firstBaseContext(baseFn);
+    expect(seenContext.messages).toStrictEqual([]);
   });
 
   it("recovers mangled replayed tool names before dropping the call", async () => {
@@ -2320,7 +2669,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as {
+    const seenContext = firstBaseContext(baseFn) as {
       messages: Array<{ content?: Array<{ name?: string }> }>;
     };
     expect(seenContext.messages[0]?.content?.[0]?.name).toBe("read");
@@ -2356,7 +2705,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as {
+    const seenContext = firstBaseContext(baseFn) as {
       messages: Array<{ role?: string }>;
     };
     expect(seenContext.messages).toEqual([
@@ -2396,7 +2745,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as {
+    const seenContext = firstBaseContext(baseFn) as {
       messages: Array<{ role?: string }>;
     };
     expect(seenContext.messages).toEqual([
@@ -2431,8 +2780,8 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as { messages: unknown[] };
-    expect(seenContext.messages).toEqual([]);
+    const seenContext = firstBaseContext(baseFn);
+    expect(seenContext.messages).toStrictEqual([]);
   });
 
   it("drops ambiguous mangled replay names instead of guessing a tool", async () => {
@@ -2456,8 +2805,8 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as { messages: unknown[] };
-    expect(seenContext.messages).toEqual([]);
+    const seenContext = firstBaseContext(baseFn);
+    expect(seenContext.messages).toStrictEqual([]);
   });
 
   it("preserves matching tool results for retained errored assistant turns", async () => {
@@ -2493,7 +2842,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as { messages: unknown[] };
+    const seenContext = firstBaseContext(baseFn);
     expect(seenContext.messages).toEqual([
       {
         role: "assistant",
@@ -2546,7 +2895,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as {
+    const seenContext = firstBaseContext(baseFn) as {
       messages: Array<{ role?: string; content?: unknown[] }>;
     };
     expect(seenContext.messages).toEqual([
@@ -2593,7 +2942,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as {
+    const seenContext = firstBaseContext(baseFn) as {
       messages: Array<{ role?: string; content?: unknown[] }>;
     };
     expect(seenContext.messages).toEqual([
@@ -2647,7 +2996,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as {
+    const seenContext = firstBaseContext(baseFn) as {
       messages: Array<{ role?: string; content?: unknown[] }>;
     };
     expect(seenContext.messages).toEqual([
@@ -2698,7 +3047,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as {
+    const seenContext = firstBaseContext(baseFn) as {
       messages: Array<{ role?: string; content?: unknown[] }>;
     };
     expect(seenContext.messages).toEqual(messages);
@@ -2740,7 +3089,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
       await Promise.resolve(stream);
 
       expect(baseFn).toHaveBeenCalledTimes(1);
-      const seenContext = baseFn.mock.calls[0]?.[1] as {
+      const seenContext = firstBaseContext(baseFn) as {
         messages: Array<{ role?: string; content?: unknown[] }>;
       };
       expect(seenContext.messages).toEqual(messages);
@@ -2782,7 +3131,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     await Promise.resolve(stream);
 
     expect(baseFn).toHaveBeenCalledTimes(1);
-    const seenContext = baseFn.mock.calls[0]?.[1] as {
+    const seenContext = firstBaseContext(baseFn) as {
       messages: Array<{ role?: string; content?: unknown[] }>;
     };
     expect(seenContext.messages).toEqual([
@@ -2971,8 +3320,8 @@ describe("wrapStreamFnRepairMalformedToolCallArguments", () => {
       // drain
     }
 
-    expect(partialToolCall.arguments).toEqual({});
-    expect(streamedToolCall.arguments).toEqual({});
+    expect(partialToolCall.arguments).toStrictEqual({});
+    expect(streamedToolCall.arguments).toStrictEqual({});
   });
 
   it("keeps incomplete partial JSON unchanged until a complete object exists", async () => {
@@ -2997,7 +3346,7 @@ describe("wrapStreamFnRepairMalformedToolCallArguments", () => {
       // drain
     }
 
-    expect(partialToolCall.arguments).toEqual({});
+    expect(partialToolCall.arguments).toStrictEqual({});
   });
 
   it("does not repair tool arguments when trailing junk exceeds the Kimi-specific allowance", async () => {
@@ -3029,8 +3378,8 @@ describe("wrapStreamFnRepairMalformedToolCallArguments", () => {
       // drain
     }
 
-    expect(partialToolCall.arguments).toEqual({});
-    expect(streamedToolCall.arguments).toEqual({});
+    expect(partialToolCall.arguments).toStrictEqual({});
+    expect(streamedToolCall.arguments).toStrictEqual({});
   });
 
   it("clears a cached repair when later deltas make the trailing suffix invalid", async () => {
@@ -3074,8 +3423,8 @@ describe("wrapStreamFnRepairMalformedToolCallArguments", () => {
       // drain
     }
 
-    expect(partialToolCall.arguments).toEqual({});
-    expect(streamedToolCall.arguments).toEqual({});
+    expect(partialToolCall.arguments).toStrictEqual({});
+    expect(streamedToolCall.arguments).toStrictEqual({});
   });
 
   it("clears a cached repair when a later delta adds a single oversized trailing suffix", async () => {
@@ -3113,8 +3462,8 @@ describe("wrapStreamFnRepairMalformedToolCallArguments", () => {
       // drain
     }
 
-    expect(partialToolCall.arguments).toEqual({});
-    expect(streamedToolCall.arguments).toEqual({});
+    expect(partialToolCall.arguments).toStrictEqual({});
+    expect(streamedToolCall.arguments).toStrictEqual({});
   });
 
   it("preserves preexisting tool arguments when later reevaluation fails", async () => {
@@ -3151,7 +3500,7 @@ describe("wrapStreamFnRepairMalformedToolCallArguments", () => {
     }
 
     expect(partialToolCall.arguments).toEqual({ path: "/etc/hosts" });
-    expect(streamedToolCall.arguments).toEqual({});
+    expect(streamedToolCall.arguments).toStrictEqual({});
   });
 });
 
@@ -3213,6 +3562,59 @@ describe("prependSystemPromptAddition", () => {
 });
 
 describe("buildAfterTurnRuntimeContext", () => {
+  it("preserves sessionId-scoped active process sessions for after-turn context", () => {
+    resetProcessRegistryForTests();
+    try {
+      const active = createProcessSessionFixture({
+        id: "sess-session-id",
+        command: "sleep 600",
+        backgrounded: true,
+        pid: 1234,
+      });
+      active.scopeKey = "session-123";
+      addSession(active);
+      const other = createProcessSessionFixture({
+        id: "sess-other",
+        command: "sleep 600",
+        backgrounded: true,
+      });
+      other.scopeKey = "agent:main";
+      addSession(other);
+
+      const legacy = buildAfterTurnRuntimeContext({
+        attempt: {
+          sessionId: "session-123",
+          config: {} as OpenClawConfig,
+          skillsSnapshot: undefined,
+          senderIsOwner: true,
+          provider: "openai-codex",
+          modelId: "gpt-5.4",
+          thinkLevel: "off",
+          reasoningLevel: "on",
+          extraSystemPrompt: "extra",
+          ownerNumbers: ["+15555550123"],
+        },
+        workspaceDir: "/tmp/workspace",
+        agentDir: "/tmp/agent",
+        activeAgentId: "main",
+      });
+
+      const activeProcessSessions = legacy.activeProcessSessions as
+        | Array<{ sessionId?: string; command?: string; pid?: number }>
+        | undefined;
+      expect(activeProcessSessions).toHaveLength(1);
+      const activeSession = requireRecord(activeProcessSessions?.[0], "active process session");
+      expect(activeSession.sessionId).toBe("sess-session-id");
+      expect(activeSession.command).toBe("sleep 600");
+      expect(activeSession.pid).toBe(1234);
+      expect(activeProcessSessions?.some((session) => session.sessionId === "sess-other")).toBe(
+        false,
+      );
+    } finally {
+      resetProcessRegistryForTests();
+    }
+  });
+
   it("uses primary model when compaction.model is not set", () => {
     const legacy = buildAfterTurnRuntimeContext({
       attempt: {
@@ -3235,10 +3637,8 @@ describe("buildAfterTurnRuntimeContext", () => {
       agentDir: "/tmp/agent",
     });
 
-    expect(legacy).toMatchObject({
-      provider: "openai-codex",
-      model: "gpt-5.4",
-    });
+    expect(legacy.provider).toBe("openai-codex");
+    expect(legacy.model).toBe("gpt-5.4");
   });
 
   it("resolves compaction.model override in runtime context so all context engines use the correct model", () => {
@@ -3274,12 +3674,10 @@ describe("buildAfterTurnRuntimeContext", () => {
     // buildEmbeddedCompactionRuntimeContext now resolves the override eagerly
     // so that context engines (including third-party ones) receive the correct
     // compaction model in the runtime context.
-    expect(legacy).toMatchObject({
-      provider: "openrouter",
-      model: "anthropic/claude-sonnet-4-5",
-      // Auth profile dropped because provider changed from openai-codex to openrouter
-      authProfileId: undefined,
-    });
+    expect(legacy.provider).toBe("openrouter");
+    expect(legacy.model).toBe("anthropic/claude-sonnet-4-5");
+    // Auth profile dropped because provider changed from openai-codex to openrouter.
+    expect(legacy.authProfileId).toBeUndefined();
   });
   it("includes resolved auth profile fields for context-engine afterTurn compaction", () => {
     const promptCache = buildContextEnginePromptCacheInfo({
@@ -3315,20 +3713,14 @@ describe("buildAfterTurnRuntimeContext", () => {
       promptCache,
     });
 
-    expect(legacy).toMatchObject({
-      authProfileId: "openai:p1",
-      provider: "openai-codex",
-      model: "gpt-5.4",
-      workspaceDir: "/tmp/workspace",
-      agentDir: "/tmp/agent",
-      tokenBudget: 1050000,
-      currentTokenCount: 52,
-      promptCache: {
-        lastCallUsage: {
-          total: 57,
-        },
-      },
-    });
+    expect(legacy.authProfileId).toBe("openai:p1");
+    expect(legacy.provider).toBe("openai-codex");
+    expect(legacy.model).toBe("gpt-5.4");
+    expect(legacy.workspaceDir).toBe("/tmp/workspace");
+    expect(legacy.agentDir).toBe("/tmp/agent");
+    expect(legacy.tokenBudget).toBe(1050000);
+    expect(legacy.currentTokenCount).toBe(52);
+    expect(legacy.promptCache?.lastCallUsage?.total).toBe(57);
   });
 
   it("derives afterTurn token count from the current assistant usage snapshot", () => {
@@ -3364,14 +3756,8 @@ describe("buildAfterTurnRuntimeContext", () => {
       promptCache,
     });
 
-    expect(legacy).toMatchObject({
-      currentTokenCount: 52,
-      promptCache: {
-        lastCallUsage: {
-          total: 57,
-        },
-      },
-    });
+    expect(legacy.currentTokenCount).toBe(52);
+    expect(legacy.promptCache?.lastCallUsage?.total).toBe(57);
   });
 
   it("preserves sender and channel routing context for scoped compaction discovery", () => {
@@ -3400,12 +3786,10 @@ describe("buildAfterTurnRuntimeContext", () => {
       agentDir: "/tmp/agent",
     });
 
-    expect(legacy).toMatchObject({
-      senderId: "user-123",
-      currentChannelId: "C123",
-      currentThreadTs: "thread-9",
-      currentMessageId: "msg-42",
-    });
+    expect(legacy.senderId).toBe("user-123");
+    expect(legacy.currentChannelId).toBe("C123");
+    expect(legacy.currentThreadTs).toBe("thread-9");
+    expect(legacy.currentMessageId).toBe("msg-42");
   });
 });
 

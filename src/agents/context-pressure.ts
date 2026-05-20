@@ -84,7 +84,7 @@ export function resetPressureTracking(): void {
 
 /** Test-only: fully reset state, including clearing the post-compaction
  * suppression flag. Production code should call `resetPressureTracking()`. */
-export function _resetPressureTrackingForTests(): void {
+export function resetPressureTrackingForTestsHook(): void {
   lastEmittedPressure = null;
   suppressNextSignal = false;
 }

@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,7 +8,6 @@ import {
   resolveCommandsLightIncludePattern,
 } from "../test/vitest/vitest.commands-light-paths.mjs";
 import { isAcpxExtensionRoot } from "../test/vitest/vitest.extension-acpx-paths.mjs";
-import { isBlueBubblesExtensionRoot } from "../test/vitest/vitest.extension-bluebubbles-paths.mjs";
 import { isBrowserExtensionRoot } from "../test/vitest/vitest.extension-browser-paths.mjs";
 import { resolveSplitChannelExtensionShard } from "../test/vitest/vitest.extension-channel-split-paths.mjs";
 import { isDiffsExtensionRoot } from "../test/vitest/vitest.extension-diffs-paths.mjs";
@@ -72,7 +72,6 @@ const CRON_VITEST_CONFIG = "test/vitest/vitest.cron.config.ts";
 const DAEMON_VITEST_CONFIG = "test/vitest/vitest.daemon.config.ts";
 const E2E_VITEST_CONFIG = "test/vitest/vitest.e2e.config.ts";
 const EXTENSION_ACPX_VITEST_CONFIG = "test/vitest/vitest.extension-acpx.config.ts";
-const EXTENSION_BLUEBUBBLES_VITEST_CONFIG = "test/vitest/vitest.extension-bluebubbles.config.ts";
 const EXTENSION_BROWSER_VITEST_CONFIG = "test/vitest/vitest.extension-browser.config.ts";
 const EXTENSION_CHANNELS_VITEST_CONFIG = "test/vitest/vitest.extension-channels.config.ts";
 const EXTENSION_DIFFS_VITEST_CONFIG = "test/vitest/vitest.extension-diffs.config.ts";
@@ -170,7 +169,6 @@ const FULL_SUITE_CONFIG_WEIGHT = new Map([
   [UNIT_SECURITY_VITEST_CONFIG, 30],
   [UNIT_SUPPORT_VITEST_CONFIG, 28],
   [EXTENSION_ZALO_VITEST_CONFIG, 24],
-  [EXTENSION_BLUEBUBBLES_VITEST_CONFIG, 22],
   [EXTENSION_IRC_VITEST_CONFIG, 20],
   [EXTENSION_FEISHU_VITEST_CONFIG, 18],
   [EXTENSION_MATTERMOST_VITEST_CONFIG, 16],
@@ -252,7 +250,6 @@ const VITEST_CONFIG_BY_KIND = {
   extension: EXTENSIONS_VITEST_CONFIG,
   extensionFull: FULL_EXTENSIONS_VITEST_CONFIG,
   extensionAcpx: EXTENSION_ACPX_VITEST_CONFIG,
-  extensionBlueBubbles: EXTENSION_BLUEBUBBLES_VITEST_CONFIG,
   extensionBrowser: EXTENSION_BROWSER_VITEST_CONFIG,
   extensionChannel: EXTENSION_CHANNELS_VITEST_CONFIG,
   extensionDiffs: EXTENSION_DIFFS_VITEST_CONFIG,
@@ -335,6 +332,14 @@ const TOOLING_SOURCE_TEST_TARGETS = new Map([
   ["scripts/lib/live-docker-stage.sh", ["test/scripts/live-docker-stage.test.ts"]],
   ["scripts/lib/openclaw-test-state.mjs", ["test/scripts/openclaw-test-state.test.ts"]],
   ["scripts/lib/vitest-local-scheduling.mjs", ["test/scripts/vitest-local-scheduling.test.ts"]],
+  [
+    "scripts/mantis/build-telegram-evidence.mjs",
+    ["test/scripts/mantis-build-telegram-evidence.test.ts"],
+  ],
+  [
+    "scripts/mantis/build-telegram-desktop-proof-evidence.mjs",
+    ["test/scripts/mantis-build-telegram-desktop-proof-evidence.test.ts"],
+  ],
   ["scripts/mantis/publish-pr-evidence.mjs", ["test/scripts/mantis-publish-pr-evidence.test.ts"]],
   [
     "scripts/run-vitest.mjs",
@@ -371,9 +376,6 @@ const TOOLING_SOURCE_TEST_TARGETS = new Map([
   ["scripts/test-projects.mjs", ["test/scripts/test-projects.test.ts"]],
   ["scripts/test-projects.test-support.d.mts", ["test/scripts/test-projects.test.ts"]],
   ["scripts/test-projects.test-support.mjs", ["test/scripts/test-projects.test.ts"]],
-  ["scripts/blacksmith-testbox-state.mjs", ["test/scripts/blacksmith-testbox-state.test.ts"]],
-  ["scripts/blacksmith-testbox-runner.mjs", ["test/scripts/blacksmith-testbox-runner.test.ts"]],
-  ["scripts/testbox-sync-sanity.mjs", ["test/scripts/testbox-sync-sanity.test.ts"]],
   ["scripts/bundled-plugin-assets.mjs", ["test/scripts/bundled-plugin-assets.test.ts"]],
   ["scripts/bundle-a2ui.mjs", ["test/scripts/bundled-plugin-assets.test.ts"]],
   ["extensions/canvas/scripts/bundle-a2ui.mjs", ["extensions/canvas/scripts/bundle-a2ui.test.ts"]],
@@ -393,19 +395,18 @@ const TOOLING_TEST_TARGETS = new Map([
     ["test/scripts/mantis-publish-pr-evidence.test.ts"],
   ],
   [
+    "test/scripts/mantis-build-telegram-evidence.test.ts",
+    ["test/scripts/mantis-build-telegram-evidence.test.ts"],
+  ],
+  [
+    "test/scripts/mantis-build-telegram-desktop-proof-evidence.test.ts",
+    ["test/scripts/mantis-build-telegram-desktop-proof-evidence.test.ts"],
+  ],
+  [
     "test/scripts/plugin-prerelease-test-plan.test.ts",
     ["test/scripts/plugin-prerelease-test-plan.test.ts"],
   ],
   ["test/scripts/test-projects.test.ts", ["test/scripts/test-projects.test.ts"]],
-  [
-    "test/scripts/blacksmith-testbox-runner.test.ts",
-    ["test/scripts/blacksmith-testbox-runner.test.ts"],
-  ],
-  [
-    "test/scripts/blacksmith-testbox-state.test.ts",
-    ["test/scripts/blacksmith-testbox-state.test.ts"],
-  ],
-  ["test/scripts/testbox-sync-sanity.test.ts", ["test/scripts/testbox-sync-sanity.test.ts"]],
   [
     "test/scripts/vitest-local-scheduling.test.ts",
     ["test/scripts/vitest-local-scheduling.test.ts"],
@@ -423,9 +424,40 @@ const GROUP_VISIBLE_REPLY_PROMPT_TEST_TARGETS = [
   "src/agents/system-prompt.test.ts",
   ...GROUP_VISIBLE_REPLY_TEST_TARGETS,
 ];
+const CHANNEL_CONTRACT_REGISTRY_BACKED_TARGETS = [
+  "directory",
+  "plugin",
+  "surfaces-only",
+  "threading",
+].flatMap((suite) =>
+  "abcdefgh"
+    .split("")
+    .map(
+      (shard) =>
+        `src/channels/plugins/contracts/${suite}.registry-backed-shard-${shard}.contract.test.ts`,
+    ),
+);
+const TEST_HELPER_NORMALIZE_TEXT_TARGETS = [
+  "src/auto-reply/reply/commands-status.test.ts",
+  "src/auto-reply/status.test.ts",
+  "src/tui/components/chat-log.test.ts",
+];
 const SOURCE_TEST_TARGETS = new Map([
   ...PRECISE_SOURCE_TEST_TARGETS,
   ["src/test-utils/openclaw-test-state.ts", ["src/test-utils/openclaw-test-state.test.ts"]],
+  [
+    "src/channels/plugins/contracts/test-helpers/manifest.ts",
+    [
+      ...CHANNEL_CONTRACT_REGISTRY_BACKED_TARGETS,
+      "src/channels/plugins/contracts/registry.contract.test.ts",
+      "src/channels/plugins/contracts/session-binding.registry-backed.contract.test.ts",
+    ],
+  ],
+  [
+    "src/channels/plugins/contracts/test-helpers/registry-backed-contract-shards.ts",
+    CHANNEL_CONTRACT_REGISTRY_BACKED_TARGETS,
+  ],
+  ["test/helpers/normalize-text.ts", TEST_HELPER_NORMALIZE_TEXT_TARGETS],
   [
     "src/plugin-sdk/test-helpers/directory-ids.ts",
     [
@@ -451,6 +483,19 @@ const SOURCE_TEST_TARGETS = new Map([
   ["extensions/google-meet/src/cli.ts", ["extensions/google-meet/src/cli.test.ts"]],
   ["extensions/google-meet/src/create.ts", ["extensions/google-meet/index.test.ts"]],
   ["extensions/google-meet/src/oauth.ts", ["extensions/google-meet/src/oauth.test.ts"]],
+  [
+    "extensions/discord/src/monitor/message-handler.ts",
+    [
+      "extensions/discord/src/channel-actions.contract.test.ts",
+      "extensions/discord/src/channel.message-adapter.test.ts",
+      "extensions/discord/src/channel.test.ts",
+      "extensions/discord/src/durable-delivery.test.ts",
+      "extensions/discord/src/monitor/message-handler.bot-self-filter.test.ts",
+      "extensions/discord/src/monitor/message-handler.queue.test.ts",
+      "extensions/discord/src/monitor/provider.skill-dedupe.test.ts",
+      "extensions/discord/src/monitor/provider.test.ts",
+    ],
+  ],
   ["src/commands/doctor-memory-search.ts", ["src/commands/doctor-memory-search.test.ts"]],
   [
     "src/commitments/model-selection.runtime.ts",
@@ -588,6 +633,21 @@ function listRepoFilesRecursive(root, cwd) {
   });
 }
 
+function listGatewayFilesFromGit(cwd) {
+  const result = spawnSync("git", ["ls-files", "--", "src/gateway"], {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  if (result.status !== 0) {
+    return null;
+  }
+  return result.stdout
+    .split("\n")
+    .map((line) => normalizePathPattern(line.trim()))
+    .filter((line) => line.length > 0);
+}
+
 function isGatewayServerFullSuiteTarget(relative) {
   if (
     GATEWAY_SERVER_EXCLUDED_TEST_TARGETS.has(relative) ||
@@ -608,7 +668,7 @@ function resolveGatewayServerFullSuiteTargets(cwd) {
   if (!fs.existsSync(gatewayDir)) {
     return [];
   }
-  return listRepoFilesRecursive(gatewayDir, cwd)
+  return (listGatewayFilesFromGit(cwd) ?? listRepoFilesRecursive(gatewayDir, cwd))
     .filter(isGatewayServerFullSuiteTarget)
     .toSorted((a, b) => a.localeCompare(b));
 }
@@ -741,13 +801,154 @@ function resolveImportSpecifier(importer, specifier, fileSet) {
 
 let cachedImportGraph = null;
 let cachedImportGraphCwd = null;
+let cachedImportGraphFiles = null;
+let cachedImportGraphFilesCwd = null;
+
+function isImportableGraphFile(relative) {
+  return IMPORTABLE_FILE_EXTENSIONS.some((ext) => relative.endsWith(ext));
+}
+
+function listImportGraphFilesFromGit(cwd) {
+  const result = spawnSync("git", ["ls-files", "--", ...SOURCE_ROOTS_FOR_IMPORT_GRAPH], {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.status !== 0) {
+    return null;
+  }
+  return result.stdout
+    .split("\n")
+    .map((line) => normalizePathPattern(line.trim()))
+    .filter((line) => line.length > 0 && isImportableGraphFile(line));
+}
+
+function listImportGraphFilesForCwd(cwd) {
+  if (cachedImportGraphFiles && cachedImportGraphFilesCwd === cwd) {
+    return cachedImportGraphFiles;
+  }
+
+  cachedImportGraphFiles =
+    listImportGraphFilesFromGit(cwd) ??
+    SOURCE_ROOTS_FOR_IMPORT_GRAPH.flatMap((root) => listImportGraphFiles(cwd, root));
+  cachedImportGraphFilesCwd = cwd;
+  return cachedImportGraphFiles;
+}
+
+function stripImportableGraphExtension(relative) {
+  for (const ext of IMPORTABLE_FILE_EXTENSIONS) {
+    if (relative.endsWith(ext)) {
+      return relative.slice(0, -ext.length);
+    }
+  }
+  return relative;
+}
+
+function resolveImportGraphSearchTerm(relative) {
+  const basename = path.posix.basename(stripImportableGraphExtension(relative));
+  if (basename === "index" || basename.length < 3) {
+    return null;
+  }
+  return basename;
+}
+
+function listImportGraphGrepMatches(cwd, term) {
+  const result = spawnSync(
+    "git",
+    ["grep", "-l", "--fixed-strings", term, "--", ...SOURCE_ROOTS_FOR_IMPORT_GRAPH],
+    {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  if (result.status === 1) {
+    return [];
+  }
+  if (result.status !== 0) {
+    return null;
+  }
+  return result.stdout
+    .split("\n")
+    .map((line) => normalizePathPattern(line.trim()))
+    .filter((line) => line.length > 0 && isImportableGraphFile(line));
+}
+
+function findDirectImportersWithGitGrep(cwd, importedFile, fileSet) {
+  const term = resolveImportGraphSearchTerm(importedFile);
+  if (!term) {
+    return null;
+  }
+
+  const candidates = listImportGraphGrepMatches(cwd, term);
+  if (!candidates || candidates.length > 800) {
+    return null;
+  }
+
+  const importers = [];
+  for (const file of candidates) {
+    if (file === importedFile || !fileSet.has(file)) {
+      continue;
+    }
+    let source = "";
+    try {
+      source = fs.readFileSync(path.join(cwd, file), "utf8");
+    } catch {
+      continue;
+    }
+    for (const match of source.matchAll(IMPORT_SPECIFIER_PATTERN)) {
+      const imported = resolveImportSpecifier(file, match[1] ?? match[2] ?? "", fileSet);
+      if (imported === importedFile) {
+        importers.push(file);
+        break;
+      }
+    }
+  }
+  return importers;
+}
+
+function resolveAffectedTestsFromTargetedImportScan(changedPath, cwd) {
+  const normalized = normalizePathPattern(changedPath);
+  const files = listImportGraphFilesForCwd(cwd);
+  const fileSet = new Set(files);
+  if (!fileSet.has(normalized)) {
+    return [];
+  }
+
+  const testFiles = new Set(
+    files.filter((file) => isTestFileTarget(file) && !file.endsWith(".live.test.ts")),
+  );
+  const queue = [normalized];
+  const seen = new Set(queue);
+  const targets = [];
+
+  for (let index = 0; index < queue.length; index += 1) {
+    const current = queue[index];
+    const importers = findDirectImportersWithGitGrep(cwd, current, fileSet);
+    if (importers === null) {
+      return null;
+    }
+    for (const importer of importers) {
+      if (seen.has(importer)) {
+        continue;
+      }
+      seen.add(importer);
+      if (testFiles.has(importer)) {
+        targets.push(importer);
+      }
+      queue.push(importer);
+    }
+  }
+
+  return [...new Set(targets)].toSorted((left, right) => left.localeCompare(right));
+}
 
 function getImportGraph(cwd) {
   if (cachedImportGraph && cachedImportGraphCwd === cwd) {
     return cachedImportGraph;
   }
 
-  const files = SOURCE_ROOTS_FOR_IMPORT_GRAPH.flatMap((root) => listImportGraphFiles(cwd, root));
+  const files = listImportGraphFilesForCwd(cwd);
   const fileSet = new Set(files);
   const reverseImports = new Map();
   const testFiles = new Set(
@@ -779,6 +980,11 @@ function getImportGraph(cwd) {
 
 function resolveAffectedTestsFromImportGraph(changedPath, cwd) {
   const normalized = normalizePathPattern(changedPath);
+  const targetedTargets = resolveAffectedTestsFromTargetedImportScan(normalized, cwd);
+  if (targetedTargets !== null) {
+    return targetedTargets;
+  }
+
   const { reverseImports, testFiles } = getImportGraph(cwd);
   const queue = [normalized];
   const seen = new Set(queue);
@@ -1090,9 +1296,6 @@ function classifyTarget(arg, cwd) {
     if (isDiffsExtensionRoot(extensionRoot)) {
       return "extensionDiffs";
     }
-    if (isBlueBubblesExtensionRoot(extensionRoot)) {
-      return "extensionBlueBubbles";
-    }
     if (isBrowserExtensionRoot(extensionRoot)) {
       return "extensionBrowser";
     }
@@ -1398,7 +1601,6 @@ export function buildVitestRunPlans(
     "e2e",
     "extensionAcpx",
     "extensionDiffs",
-    "extensionBlueBubbles",
     "extensionBrowser",
     "extensionDiscord",
     "extensionFeishu",
@@ -1547,7 +1749,8 @@ function hasConservativeVitestWorkerBudget(env) {
   return workerBudget !== null && workerBudget <= 1;
 }
 
-export function resolveParallelFullSuiteConcurrency(specCount, env = process.env, hostInfo) {
+export function resolveParallelFullSuiteConcurrency(specCount, env, hostInfo) {
+  env ??= process.env;
   const override = parsePositiveInt(env.OPENCLAW_TEST_PROJECTS_PARALLEL);
   if (override !== null) {
     return Math.min(override, specCount);

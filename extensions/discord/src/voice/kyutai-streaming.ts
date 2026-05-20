@@ -120,7 +120,7 @@ export class Resample24kMonoTo48kStereo extends Transform {
     super({ highWaterMark: 1024 * 1024 });
   }
 
-  _transform(chunk: Buffer, _encoding: string, callback: TransformCallback): void {
+  override _transform(chunk: Buffer, _encoding: string, callback: TransformCallback): void {
     const input = this.leftover.length > 0 ? Buffer.concat([this.leftover, chunk]) : chunk;
 
     const sampleCount = Math.floor(input.length / 2);
@@ -161,7 +161,7 @@ export class Resample24kMonoTo48kStereo extends Transform {
     callback();
   }
 
-  _flush(callback: TransformCallback): void {
+  override _flush(callback: TransformCallback): void {
     this.leftover = Buffer.alloc(0);
     callback();
   }

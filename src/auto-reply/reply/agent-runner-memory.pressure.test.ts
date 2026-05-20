@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  _resetPressureTrackingForTests,
+  resetPressureTrackingForTestsHook,
   formatContextPressureMessage,
   resetPressureTracking,
 } from "../../agents/context-pressure.js";
@@ -15,7 +15,7 @@ vi.mock("../../infra/system-events.js", () => ({
 
 import {
   maybeInjectAgentCompactionPressureSignal,
-  _setTokenSourceForTests,
+  setTokenSourceForTestsHook,
 } from "./agent-compaction-pressure.js";
 
 function createCfg(mode: "agent" | "default" = "agent"): OpenClawConfig {
@@ -38,14 +38,14 @@ function createEntry(totalTokens: number): SessionEntry {
 // Inject a test-only token source so tests don't need an on-disk transcript.
 // The default production source reads from the session transcript file via
 // sessionId, which doesn't exist in unit tests.
-_setTokenSourceForTests(
+setTokenSourceForTestsHook(
   (entry) => ((entry as Record<string, unknown>).totalTokens as number | undefined) ?? undefined,
 );
 
 describe("agent compaction pressure signaling", () => {
   beforeEach(() => {
     enqueueSystemEventMock.mockReset();
-    _resetPressureTrackingForTests();
+    resetPressureTrackingForTestsHook();
   });
 
   it("enqueues a pressure signal at 76% when compaction.mode is agent", async () => {
@@ -169,7 +169,7 @@ describe("agent compaction pressure signaling", () => {
     // compaction_recommended signal never fired. This test installs a
     // transcript source that returns a low number and asserts that we still
     // pick up the high API-fresh number from entry.totalTokens.
-    _setTokenSourceForTests(() => 5_000); // pretend transcript is tiny
+    setTokenSourceForTestsHook(() => 5_000); // pretend transcript is tiny
     try {
       const entry = createEntry(95_000); // API-fresh says we're at 95%
       maybeInjectAgentCompactionPressureSignal({
@@ -190,7 +190,7 @@ describe("agent compaction pressure signaling", () => {
       });
     } finally {
       // Restore the default test override for subsequent tests.
-      _setTokenSourceForTests(
+      setTokenSourceForTestsHook(
         (entry) =>
           ((entry as Record<string, unknown>).totalTokens as number | undefined) ?? undefined,
       );
@@ -198,7 +198,7 @@ describe("agent compaction pressure signaling", () => {
   });
 
   it("falls back to transcript estimate when totalTokensFresh is false", async () => {
-    _setTokenSourceForTests(() => 90_000); // transcript is reliable here
+    setTokenSourceForTestsHook(() => 90_000); // transcript is reliable here
     try {
       const entry = {
         totalTokens: 5_000, // stale cumulative noise; would mislead if used
@@ -221,7 +221,7 @@ describe("agent compaction pressure signaling", () => {
         sessionKey: "agent:main:main",
       });
     } finally {
-      _setTokenSourceForTests(
+      setTokenSourceForTestsHook(
         (entry) =>
           ((entry as Record<string, unknown>).totalTokens as number | undefined) ?? undefined,
       );

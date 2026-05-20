@@ -48,6 +48,7 @@ export const CLAWHUB_INSTALL_ERROR_CODE = {
   INCOMPATIBLE_PLUGIN_API: "incompatible_plugin_api",
   INCOMPATIBLE_GATEWAY: "incompatible_gateway",
   MISSING_ARCHIVE_INTEGRITY: "missing_archive_integrity",
+  ARTIFACT_DOWNLOAD_UNAVAILABLE: "artifact_download_unavailable",
   ARCHIVE_INTEGRITY_MISMATCH: "archive_integrity_mismatch",
 } as const;
 
@@ -811,7 +812,12 @@ async function verifyClawHubArchiveFiles(params: {
       }
       actualFiles.delete(file.path);
     }
-    const unexpectedFile = [...actualFiles.keys()].toSorted()[0];
+    let unexpectedFile: string | undefined;
+    for (const file of actualFiles.keys()) {
+      if (unexpectedFile === undefined || file < unexpectedFile) {
+        unexpectedFile = file;
+      }
+    }
     if (unexpectedFile) {
       return buildClawHubInstallFailure(
         `ClawHub archive contents do not match files[] metadata for "${params.packageName}@${params.packageVersion}": unexpected file "${unexpectedFile}".`,
@@ -1142,6 +1148,12 @@ export async function installPluginFromClawHub(
             version: versionState.version,
           })
         : formatErrorMessage(error),
+      expectedClawPackSha256 &&
+        error instanceof ClawHubRequestError &&
+        error.status === 404 &&
+        error.requestPath.endsWith("/artifact/download")
+        ? CLAWHUB_INSTALL_ERROR_CODE.ARTIFACT_DOWNLOAD_UNAVAILABLE
+        : undefined,
     );
   }
   try {

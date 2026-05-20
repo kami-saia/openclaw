@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { SessionManager } from "@mariozechner/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { incrementCompactionCount } from "../../auto-reply/reply/session-updates.js";
 import type { OpenClawConfig } from "../../config/config.js";
@@ -30,7 +30,7 @@ async function loadPrepareCompaction(): Promise<void> {
     const { existsSync } = await import("node:fs");
     // Walk up from the bundled file until we find a directory containing node_modules/,
     // since the bundled output may be nested (e.g. dist/plugin-sdk/).
-    const target = "@mariozechner/pi-coding-agent/dist/core/compaction/compaction.js";
+    const target = "@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js";
     let dir = dirname(fileURLToPath(import.meta.url));
     let abs = "";
     for (let i = 0; i < 10; i++) {
@@ -55,7 +55,7 @@ async function loadPrepareCompaction(): Promise<void> {
   }
 }
 // Eager init
-const _initPromise = loadPrepareCompaction();
+const initCompactPromise = loadPrepareCompaction();
 
 const CompactToolSchema = Type.Object({
   summary: Type.String({
@@ -85,7 +85,7 @@ export function createCompactTool(options: {
   sessionKey?: string;
   config?: OpenClawConfig;
   workspaceDir?: string;
-  getSessionManager?: () => import("@mariozechner/pi-coding-agent").SessionManager | undefined;
+  getSessionManager?: () => import("@earendil-works/pi-coding-agent").SessionManager | undefined;
   /** Optional: refresh the live agent.state.messages after compaction is appended. */
   updateAgentMessagesAfterCompaction?: () => void;
 }): AnyAgentTool | null {
@@ -96,7 +96,7 @@ export function createCompactTool(options: {
   }
 
   // prepareCompaction loads async — if not ready at tool creation, that's OK.
-  // execute() awaits _initPromise before using it.
+  // execute() awaits initCompactPromise before using it.
 
   return {
     name: "compact",
@@ -106,14 +106,14 @@ export function createCompactTool(options: {
     label: "Compact conversation history",
     parameters: CompactToolSchema,
     async execute(_toolCallId, params) {
-      await _initPromise;
+      await initCompactPromise;
       if (!prepareCompaction) {
         return {
           content: [{ type: "text", text: "Error: compaction module not available." }],
           details: undefined,
         };
       }
-      const _prep = prepareCompaction;
+      const prep = prepareCompaction;
       const summary = (params as { summary?: string }).summary?.trim();
       if (!summary) {
         return {
@@ -157,7 +157,7 @@ export function createCompactTool(options: {
           keepRecentTokens: cfg?.agents?.defaults?.compaction?.keepRecentTokens ?? 4096,
         };
 
-        const preparation = _prep(pathEntries, settings);
+        const preparation = prep(pathEntries, settings);
         if (!preparation) {
           return {
             content: [

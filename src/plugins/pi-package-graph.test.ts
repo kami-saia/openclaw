@@ -1,19 +1,21 @@
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import YAML from "yaml";
 
 type RootPackageManifest = {
   dependencies?: Record<string, string>;
-  pnpm?: {
-    overrides?: Record<string, string>;
-  };
+};
+
+type PnpmWorkspaceConfig = {
+  overrides?: Record<string, string>;
 };
 
 const PI_PACKAGE_NAMES = [
-  "@mariozechner/pi-agent-core",
-  "@mariozechner/pi-ai",
-  "@mariozechner/pi-coding-agent",
-  "@mariozechner/pi-tui",
+  "@earendil-works/pi-agent-core",
+  "@earendil-works/pi-ai",
+  "@earendil-works/pi-coding-agent",
+  "@earendil-works/pi-tui",
 ] as const;
 
 function readRootManifest(): RootPackageManifest {
@@ -21,12 +23,17 @@ function readRootManifest(): RootPackageManifest {
   return JSON.parse(fs.readFileSync(manifestPath, "utf8")) as RootPackageManifest;
 }
 
+function readPnpmWorkspaceConfig(): PnpmWorkspaceConfig {
+  const workspacePath = path.resolve(process.cwd(), "pnpm-workspace.yaml");
+  return YAML.parse(fs.readFileSync(workspacePath, "utf8")) as PnpmWorkspaceConfig;
+}
+
 function isExactPinnedVersion(spec: string): boolean {
   return !spec.startsWith("^") && !spec.startsWith("~");
 }
 
 function isPiOverrideKey(key: string): boolean {
-  return key.startsWith("@mariozechner/pi-") || key.includes("@mariozechner/pi-");
+  return key.startsWith("@earendil-works/pi-") || key.includes("@earendil-works/pi-");
 }
 
 function readPiDependencySpecs() {
@@ -37,15 +44,25 @@ function readPiDependencySpecs() {
   }));
 }
 
+function collectMissingSpecNames(specs: Array<{ name: string; spec?: string }>): string[] {
+  const names: string[] = [];
+  for (const entry of specs) {
+    if (!entry.spec) {
+      names.push(entry.name);
+    }
+  }
+  return names;
+}
+
 function expectNoGraphViolations(violations: string[], message: string) {
-  expect(violations, message).toEqual([]);
+  expect(violations, message).toStrictEqual([]);
 }
 
 describe("pi package graph guardrails", () => {
   it("keeps root Pi packages aligned to the same exact version", () => {
     const specs = readPiDependencySpecs();
 
-    const missing = specs.filter((entry) => !entry.spec).map((entry) => entry.name);
+    const missing = collectMissingSpecNames(specs);
     expectNoGraphViolations(
       missing,
       `Missing required root Pi dependencies: ${missing.join(", ") || "<none>"}. Mixed or incomplete Pi root dependencies create an unsupported package graph.`,
@@ -66,13 +83,13 @@ describe("pi package graph guardrails", () => {
   });
 
   it("forbids pnpm overrides that target Pi packages", () => {
-    const manifest = readRootManifest();
-    const overrides = manifest.pnpm?.overrides ?? {};
+    const pnpmWorkspace = readPnpmWorkspaceConfig();
+    const overrides = pnpmWorkspace.overrides ?? {};
     const piOverrides = Object.keys(overrides).filter(isPiOverrideKey);
 
     expectNoGraphViolations(
       piOverrides,
-      `pnpm.overrides must not target Pi packages. Found: ${piOverrides.join(", ") || "<none>"}. Pi-specific overrides can silently create an unsupported package graph.`,
+      `pnpm-workspace.yaml overrides must not target Pi packages. Found: ${piOverrides.join(", ") || "<none>"}. Pi-specific overrides can silently create an unsupported package graph.`,
     );
   });
 });

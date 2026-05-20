@@ -1,4 +1,4 @@
-import type { OpenClawConfig } from "openclaw/plugin-sdk/config-types";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   LIVE_TRANSPORT_BASELINE_STANDARD_SCENARIO_IDS,
@@ -205,32 +205,18 @@ describe("discord live qa runtime", () => {
       { statusReactionsToolOnly: true },
     );
 
-    expect(next.messages).toMatchObject({
-      ackReaction: "👀",
-      ackReactionScope: "all",
-      groupChat: { visibleReplies: "message_tool" },
-      statusReactions: {
-        enabled: true,
-        timing: { debounceMs: 0 },
-      },
-    });
-    expect(next.channels?.discord).toMatchObject({
-      accounts: {
-        sut: {
-          allowBots: true,
-          guilds: {
-            "123456789012345678": {
-              requireMention: false,
-              channels: {
-                "223456789012345678": {
-                  requireMention: false,
-                },
-              },
-            },
-          },
-        },
-      },
-    });
+    expect(next.messages?.ackReaction).toBe("👀");
+    expect(next.messages?.ackReactionScope).toBe("all");
+    expect(next.messages?.groupChat?.visibleReplies).toBe("message_tool");
+    expect(next.messages?.statusReactions?.enabled).toBe(true);
+    expect(next.messages?.statusReactions?.timing?.debounceMs).toBe(0);
+    const discordAccount = next.channels?.discord?.accounts?.sut;
+    expect(discordAccount?.allowBots).toBe(true);
+    expect(discordAccount?.guilds?.["123456789012345678"]?.requireMention).toBe(false);
+    expect(
+      discordAccount?.guilds?.["123456789012345678"]?.channels?.["223456789012345678"]
+        ?.requireMention,
+    ).toBe(false);
   });
 
   it("normalizes observed Discord messages", () => {
@@ -290,6 +276,16 @@ describe("discord live qa runtime", () => {
         },
       }),
     ).toBe(false);
+  });
+
+  it("computes Discord RTT from trigger and reply timestamps", () => {
+    expect(
+      __testing.computeDiscordRttMs(
+        "2026-04-22T11:59:59.125Z",
+        "2026-04-22T12:00:00.875Z",
+      ),
+    ).toBe(1750);
+    expect(__testing.computeDiscordRttMs("bad", "2026-04-22T12:00:00.875Z")).toBeUndefined();
   });
 
   it("includes the Discord live scenarios", () => {
@@ -539,15 +535,12 @@ describe("discord live qa runtime", () => {
       ),
     );
 
-    await expect(
-      __testing.resolveDiscordQaVoiceChannel({
-        token: "token",
-        guildId: "123456789012345678",
-      }),
-    ).resolves.toMatchObject({
-      id: "523456789012345678",
-      name: "qa-voice",
+    const voiceChannel = await __testing.resolveDiscordQaVoiceChannel({
+      token: "token",
+      guildId: "123456789012345678",
     });
+    expect(voiceChannel.id).toBe("523456789012345678");
+    expect(voiceChannel.name).toBe("qa-voice");
   });
 
   it("normalizes missing current Discord voice state to null", async () => {
@@ -689,6 +682,8 @@ describe("discord live qa runtime", () => {
             senderIsBot: true,
             senderUsername: "sut",
             text: "secret text",
+            triggerMessageId: "423456789012345678",
+            triggerTimestamp: "2026-04-22T11:59:59.000Z",
             timestamp: "2026-04-22T12:00:00.000Z",
           },
         ],
@@ -701,7 +696,44 @@ describe("discord live qa runtime", () => {
         senderId: "323456789012345678",
         senderIsBot: true,
         senderUsername: "sut",
+        triggerMessageId: "423456789012345678",
+        triggerTimestamp: "2026-04-22T11:59:59.000Z",
         replyToMessageId: undefined,
+        timestamp: "2026-04-22T12:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("preserves observed message timing when metadata is redacted", () => {
+    expect(
+      __testing.buildObservedMessagesArtifact({
+        includeContent: false,
+        redactMetadata: true,
+        observedMessages: [
+          {
+            messageId: "523456789012345678",
+            channelId: "223456789012345678",
+            guildId: "123456789012345678",
+            senderId: "323456789012345678",
+            senderIsBot: true,
+            senderUsername: "sut",
+            scenarioId: "canary",
+            scenarioTitle: "Canary",
+            matchedScenario: true,
+            text: "secret text",
+            triggerMessageId: "423456789012345678",
+            triggerTimestamp: "2026-04-22T11:59:59.000Z",
+            timestamp: "2026-04-22T12:00:00.000Z",
+          },
+        ],
+      }),
+    ).toEqual([
+      {
+        senderIsBot: true,
+        scenarioId: "canary",
+        scenarioTitle: "Canary",
+        matchedScenario: true,
+        triggerTimestamp: "2026-04-22T11:59:59.000Z",
         timestamp: "2026-04-22T12:00:00.000Z",
       },
     ]);

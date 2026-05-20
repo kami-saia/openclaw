@@ -49,7 +49,7 @@ const DEFAULT_LIVE_PARENT_MODEL = "openai/gpt-5.4";
 type LiveAcpAgent = "claude" | "codex" | "droid" | "gemini" | "opencode";
 
 class AcpBindSkipError extends Error {
-  readonly name = "AcpBindSkipError";
+  override readonly name = "AcpBindSkipError";
 }
 
 function createSlackCurrentConversationBindingRegistry() {
@@ -98,18 +98,21 @@ function normalizeAcpAgent(raw: string | undefined): LiveAcpAgent {
 }
 
 function extractAssistantTexts(messages: unknown[]): string[] {
-  return messages
-    .map((entry) => {
-      if (!entry || typeof entry !== "object") {
-        return undefined;
-      }
-      const role = (entry as { role?: unknown }).role;
-      if (role !== "assistant") {
-        return undefined;
-      }
-      return extractFirstTextBlock(entry);
-    })
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+  const texts: string[] = [];
+  for (const entry of messages) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const role = (entry as { role?: unknown }).role;
+    if (role !== "assistant") {
+      continue;
+    }
+    const text = extractFirstTextBlock(entry);
+    if (typeof text === "string" && text.trim().length > 0) {
+      texts.push(text);
+    }
+  }
+  return texts;
 }
 
 function createAcpRecallPrompt(
@@ -972,20 +975,37 @@ describeLive("gateway live (ACP bind)", () => {
             sessionKey: spawnedSessionKey,
           });
           lastCronProbeName = cronProbe.name;
-          await sendChatAndWait({
-            client,
-            sessionKey: originalSessionKey,
-            idempotencyKey: `idem-cron-${attempt}-${randomUUID()}`,
-            message: buildLiveCronProbeMessage({
-              agent: liveAgent,
-              argsJson: cronProbe.argsJson,
-              attempt,
-              exactReply: cronProbe.name,
-            }),
-            originatingChannel: "slack",
-            originatingTo: conversationId,
-            originatingAccountId: accountId,
-          });
+          try {
+            await sendChatAndWait({
+              client,
+              sessionKey: originalSessionKey,
+              idempotencyKey: `idem-cron-${attempt}-${randomUUID()}`,
+              message: buildLiveCronProbeMessage({
+                agent: liveAgent,
+                argsJson: cronProbe.argsJson,
+                attempt,
+                exactReply: cronProbe.name,
+              }),
+              originatingChannel: "slack",
+              originatingTo: conversationId,
+              originatingAccountId: accountId,
+            });
+          } catch (error) {
+            lastCronMismatch = error instanceof Error ? error.message : String(error);
+            logLiveStep(
+              `cron mcp turn failed after attempt ${String(attempt + 1)}: ${lastCronMismatch}`,
+            );
+            if (!requireCronMcpProbe) {
+              logLiveStep(
+                `cron mcp turn ${lastCronProbeName} failed; continuing after bind/image verification`,
+              );
+              break;
+            }
+            if (attempt === ACP_CRON_MCP_PROBE_MAX_ATTEMPTS - 1) {
+              throw error;
+            }
+            continue;
+          }
           logLiveStep(`cron mcp turn completed (attempt ${String(attempt + 1)})`);
 
           let cronHistory: Awaited<ReturnType<typeof waitForAssistantText>> | null = null;

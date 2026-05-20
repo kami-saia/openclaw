@@ -1,4 +1,4 @@
-import { estimateTokens } from "@mariozechner/pi-coding-agent";
+import { estimateTokens } from "@earendil-works/pi-coding-agent";
 /**
  * Agent-controlled compaction: check context pressure and inject a system event
  * signal instead of running a memory flush turn.
@@ -17,12 +17,12 @@ import { logVerbose } from "../../globals.js";
 /**
  * Test-only injection point for the token-source function. Production code
  * always uses `estimateSessionTokensFromTranscriptDefault`. Tests call
- * `_setTokenSourceForTests()` to supply tokens directly without needing a
+ * `setTokenSourceForTestsHook()` to supply tokens directly without needing a
  * real transcript file on disk.
  */
 type TokenSource = (entry: SessionEntry) => number | undefined;
 let tokenSourceOverride: TokenSource | null = null;
-export function _setTokenSourceForTests(fn: TokenSource | null): void {
+export function setTokenSourceForTestsHook(fn: TokenSource | null): void {
   tokenSourceOverride = fn;
 }
 

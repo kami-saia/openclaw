@@ -3,7 +3,8 @@ import path from "node:path";
 import type { AgentContextInjection } from "../config/types.agent-defaults.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
-import { resolveSessionAgentIds } from "./agent-scope.js";
+import { resolveUserPath } from "../utils.js";
+import { resolveAgentConfig, resolveSessionAgentIds } from "./agent-scope.js";
 import { getOrLoadBootstrapFiles } from "./bootstrap-cache.js";
 import { applyBootstrapHookOverrides } from "./bootstrap-hooks.js";
 import { shouldIncludeHeartbeatGuidanceForSystemPrompt } from "./heartbeat-system-prompt.js";
@@ -15,7 +16,9 @@ import {
 } from "./pi-embedded-helpers.js";
 import {
   DEFAULT_HEARTBEAT_FILENAME,
+  DEFAULT_BOOTSTRAP_FILENAME,
   filterBootstrapFilesForSession,
+  isWorkspaceSetupCompleted,
   isWorkspaceBootstrapPending,
   loadWorkspaceBootstrapFiles,
   VALID_BOOTSTRAP_NAMES,
@@ -52,7 +55,15 @@ export function _resetBootstrapWarningCacheForTest(): void {
   bootstrapWarningOrder.length = 0;
 }
 
-export function resolveContextInjectionMode(config?: OpenClawConfig): AgentContextInjection {
+export function resolveContextInjectionMode(
+  config?: OpenClawConfig,
+  agentId?: string | null,
+): AgentContextInjection {
+  const agentMode =
+    config && agentId ? resolveAgentConfig(config, agentId)?.contextInjection : undefined;
+  if (agentMode === "always" || agentMode === "continuation-skip" || agentMode === "never") {
+    return agentMode;
+  }
   return config?.agents?.defaults?.contextInjection ?? "always";
 }
 
@@ -151,7 +162,7 @@ function sanitizeBootstrapFiles(
   workspaceDir: string,
   warn?: (message: string) => void,
 ): WorkspaceBootstrapFile[] {
-  const workspaceRoot = path.resolve(workspaceDir);
+  const workspaceRoot = resolveUserPath(workspaceDir);
   const seenPaths = new Set<string>();
   const sanitized: WorkspaceBootstrapFile[] = [];
   for (const file of files) {
@@ -164,7 +175,9 @@ function sanitizeBootstrapFiles(
     }
     const resolvedPath = path.isAbsolute(pathValue)
       ? path.resolve(pathValue)
-      : path.resolve(workspaceRoot, pathValue);
+      : pathValue.startsWith("~")
+        ? resolveUserPath(pathValue)
+        : path.resolve(workspaceRoot, pathValue);
     const dedupeKey = path.normalize(path.relative(workspaceRoot, resolvedPath));
     if (seenPaths.has(dedupeKey)) {
       continue;
@@ -263,6 +276,41 @@ function filterWorkspaceBootstrapExclude(
   return files.filter((file) => !exclude.has(file.name));
 }
 
+function filterCompletedWorkspaceBootstrapFile(
+  files: WorkspaceBootstrapFile[],
+  setupCompleted: boolean,
+  workspaceDir: string,
+): WorkspaceBootstrapFile[] {
+  if (!setupCompleted) {
+    return files;
+  }
+  const workspaceRoot = resolveUserPath(workspaceDir);
+  const rootBootstrapPath = path.join(workspaceRoot, DEFAULT_BOOTSTRAP_FILENAME);
+  return files.filter((file) => {
+    if (file.name !== DEFAULT_BOOTSTRAP_FILENAME) {
+      return true;
+    }
+    const pathValue = normalizeOptionalString(file.path);
+    if (!pathValue) {
+      return true;
+    }
+    const resolvedPath = path.isAbsolute(pathValue)
+      ? path.resolve(pathValue)
+      : pathValue.startsWith("~")
+        ? resolveUserPath(pathValue)
+        : path.resolve(workspaceRoot, pathValue);
+    return resolvedPath !== rootBootstrapPath;
+  });
+}
+
+async function isWorkspaceSetupCompletedForContext(workspaceDir: string): Promise<boolean> {
+  try {
+    return await isWorkspaceSetupCompleted(workspaceDir);
+  } catch {
+    return false;
+  }
+}
+
 export async function resolveBootstrapFilesForRun(params: {
   workspaceDir: string;
   config?: OpenClawConfig;
@@ -276,6 +324,7 @@ export async function resolveBootstrapFilesForRun(params: {
   const excludeHeartbeatBootstrapFile = shouldExcludeHeartbeatBootstrapFile(params);
   const excludeNames = resolveBootstrapExcludeSet(params.config);
   const sessionKey = params.sessionKey ?? params.sessionId;
+  const workspaceSetupCompleted = await isWorkspaceSetupCompletedForContext(params.workspaceDir);
   const rawFiles = params.sessionKey
     ? await getOrLoadBootstrapFiles({
         workspaceDir: params.workspaceDir,
@@ -284,7 +333,11 @@ export async function resolveBootstrapFilesForRun(params: {
     : await loadWorkspaceBootstrapFiles(params.workspaceDir);
   const bootstrapFiles = applyContextModeFilter({
     files: filterWorkspaceBootstrapExclude(
-      filterBootstrapFilesForSession(rawFiles, sessionKey),
+      filterCompletedWorkspaceBootstrapFile(
+        filterBootstrapFilesForSession(rawFiles, sessionKey),
+        workspaceSetupCompleted,
+        params.workspaceDir,
+      ),
       excludeNames,
     ),
     contextMode: params.contextMode,
@@ -299,9 +352,14 @@ export async function resolveBootstrapFilesForRun(params: {
     sessionId: params.sessionId,
     agentId: params.agentId,
   });
+  const filteredUpdated = filterCompletedWorkspaceBootstrapFile(
+    updated,
+    workspaceSetupCompleted,
+    params.workspaceDir,
+  );
   return sanitizeBootstrapFiles(
     filterHeartbeatBootstrapFile(
-      filterWorkspaceBootstrapExclude(updated, excludeNames),
+      filterWorkspaceBootstrapExclude(filteredUpdated, excludeNames),
       excludeHeartbeatBootstrapFile,
     ),
     params.workspaceDir,
@@ -331,12 +389,13 @@ export function buildBootstrapContextForFiles(
   bootstrapFiles: WorkspaceBootstrapFile[],
   params: {
     config?: OpenClawConfig;
+    agentId?: string | null;
     warn?: (message: string) => void;
   },
 ): EmbeddedContextFile[] {
   const contextFiles = buildBootstrapContextFiles(bootstrapFiles, {
-    maxChars: resolveBootstrapMaxChars(params.config),
-    totalMaxChars: resolveBootstrapTotalMaxChars(params.config),
+    maxChars: resolveBootstrapMaxChars(params.config, params.agentId),
+    totalMaxChars: resolveBootstrapTotalMaxChars(params.config, params.agentId),
     warn: params.warn,
   });
   return contextFiles;

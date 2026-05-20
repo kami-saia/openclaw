@@ -2,7 +2,7 @@
  * Integration test: agent-runner pressure-signal wiring (fork bug repro for 0f3455a4bb).
  *
  * The unit-test harness in `agent-runner-memory.pressure.test.ts` injects a
- * test-only token source via `_setTokenSourceForTests`, then asserts that
+ * test-only token source via `setTokenSourceForTestsHook`, then asserts that
  * `maybeInjectAgentCompactionPressureSignal` fires when the injected number
  * crosses the threshold. That coverage is fine but does not catch the bug
  * fixed in 0f3455a4bb: production used to estimate tokens *only* from the
@@ -23,7 +23,7 @@
  * Post-fix expectation: signal DOES fire because we read `entry.totalTokens`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { _resetPressureTrackingForTests } from "../../agents/context-pressure.js";
+import { resetPressureTrackingForTestsHook } from "../../agents/context-pressure.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { SessionEntry } from "../../config/sessions.js";
 
@@ -32,7 +32,7 @@ vi.mock("../../infra/system-events.js", () => ({
   enqueueSystemEvent: (...args: unknown[]) => enqueueSystemEventMock(...args),
 }));
 
-import { _setTokenSourceForTests } from "./agent-compaction-pressure.js";
+import { setTokenSourceForTestsHook } from "./agent-compaction-pressure.js";
 import { runMemoryFlushIfNeeded } from "./agent-runner-memory.js";
 
 function agentCompactionCfg(): OpenClawConfig {
@@ -93,15 +93,15 @@ async function callRunMemoryFlush(params: {
 describe("agent-runner integration: pressure signal wiring", () => {
   beforeEach(() => {
     enqueueSystemEventMock.mockReset();
-    _resetPressureTrackingForTests();
+    resetPressureTrackingForTestsHook();
     // Make absolutely sure the test-only token source from sibling tests is
     // NOT in effect. The whole point of this test is to exercise the
     // production wiring end-to-end.
-    _setTokenSourceForTests(null);
+    setTokenSourceForTestsHook(null);
   });
 
   afterEach(() => {
-    _setTokenSourceForTests(null);
+    setTokenSourceForTestsHook(null);
   });
 
   it("fires the [context_pressure] signal from entry.totalTokens when totalTokensFresh=true and no transcript exists", async () => {

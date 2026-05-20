@@ -33,6 +33,10 @@ import {
 } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { TtsAutoMode } from "../../config/types.tts.js";
+import {
+  forgetActiveSessionForShutdown,
+  noteActiveSessionForShutdown,
+} from "../../gateway/active-sessions-shutdown-tracker.js";
 import { getSessionBindingService } from "../../infra/outbound/session-binding-service.js";
 import { deliverSessionMaintenanceWarning } from "../../infra/session-maintenance-warning.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
@@ -49,6 +53,7 @@ import {
   normalizeOptionalString,
 } from "../../shared/string-coerce.js";
 import { normalizeSessionDeliveryFields } from "../../utils/delivery-context.shared.js";
+import { resolveCommandTurnTargetSessionKey } from "../command-turn-context.js";
 import { normalizeCommandBody } from "../commands-registry.js";
 import type { MsgContext, TemplateContext } from "../templating.js";
 import { resolveEffectiveResetTargetSessionKey } from "./acp-reset-target.js";
@@ -76,6 +81,11 @@ function loadSessionArchiveRuntime() {
   return sessionArchiveRuntimeLoader.load();
 }
 
+type ReplySessionEndReason = Extract<
+  PluginHookSessionEndReason,
+  "new" | "reset" | "idle" | "daily" | "unknown"
+>;
+
 function stripThreadIdFromDeliveryContext(
   context: SessionEntry["deliveryContext"],
 ): SessionEntry["deliveryContext"] {
@@ -94,9 +104,7 @@ function stripThreadIdFromOrigin(origin: SessionEntry["origin"]): SessionEntry["
   return Object.keys(rest).length > 0 ? rest : undefined;
 }
 
-function resolveExplicitSessionEndReason(
-  matchedResetTriggerLower?: string,
-): PluginHookSessionEndReason {
+function resolveExplicitSessionEndReason(matchedResetTriggerLower?: string): ReplySessionEndReason {
   return matchedResetTriggerLower === "/reset" ? "reset" : "new";
 }
 
@@ -127,7 +135,7 @@ function resolveStaleSessionEndReason(params: {
   entry: SessionEntry | undefined;
   freshness?: SessionFreshness;
   now: number;
-}): PluginHookSessionEndReason | undefined {
+}): ReplySessionEndReason | undefined {
   if (!params.entry || !params.freshness) {
     return undefined;
   }
@@ -243,10 +251,7 @@ export async function initSessionState(params: {
     : resolveSessionConversationBindingContext(cfg, ctx);
   // Native slash commands (Telegram/Discord/Slack) are delivered on a separate
   // "slash session" key, but should mutate the target chat session.
-  const commandTargetSessionKey =
-    ctx.CommandSource === "native"
-      ? normalizeOptionalString(ctx.CommandTargetSessionKey)
-      : undefined;
+  const commandTargetSessionKey = resolveCommandTurnTargetSessionKey(ctx);
   // Native slash/menu commands can arrive on a transport-specific "slash session"
   // while explicitly targeting an existing chat session. Honor that explicit target
   // before any binding lookup so command-side mutations land on the intended session.
@@ -546,6 +551,18 @@ export async function initSessionState(params: {
   }
 
   const baseEntry = !isNewSession && freshEntry ? entry : undefined;
+  const usageFamilyKey = previousSessionEntry
+    ? (previousSessionEntry.usageFamilyKey ?? sessionKey)
+    : baseEntry?.usageFamilyKey;
+  const usageFamilySessionIds = previousSessionEntry
+    ? Array.from(
+        new Set([
+          ...(previousSessionEntry.usageFamilySessionIds ?? []),
+          previousSessionEntry.sessionId,
+          sessionId,
+        ]),
+      )
+    : baseEntry?.usageFamilySessionIds;
   // Track the originating channel/to for announce routing (subagent announce-back).
   const originatingChannelRaw = ctx.OriginatingChannel as string | undefined;
   const isInterSession = isInterSessionInputProvenance(ctx.InputProvenance);
@@ -586,7 +603,9 @@ export async function initSessionState(params: {
   // previous interaction that happened inside a topic/thread.
   const lastThreadIdRaw = isSystemEvent
     ? baseEntry?.lastThreadId
-    : ctx.MessageThreadId || (isThread ? baseEntry?.lastThreadId : undefined);
+    : (ctx.MessageThreadId ??
+      ctx.TransportThreadId ??
+      (isThread ? baseEntry?.lastThreadId : undefined));
   const deliveryFields = isSystemEvent
     ? normalizeSessionDeliveryFields({
         channel: baseEntry?.channel,
@@ -654,6 +673,8 @@ export async function initSessionState(params: {
     reasoningLevel: persistedReasoning ?? baseEntry?.reasoningLevel,
     ttsAuto: persistedTtsAuto ?? baseEntry?.ttsAuto,
     responseUsage: baseEntry?.responseUsage,
+    usageFamilyKey,
+    usageFamilySessionIds,
     modelOverride: persistedModelOverride ?? baseEntry?.modelOverride,
     providerOverride: persistedProviderOverride ?? baseEntry?.providerOverride,
     modelOverrideSource: persistedModelOverrideSource ?? baseEntry?.modelOverrideSource,
@@ -893,6 +914,10 @@ export async function initSessionState(params: {
 
     // If replacing an existing session, fire session_end for the old one
     if (previousSessionEntry?.sessionId && previousSessionEntry.sessionId !== effectiveSessionId) {
+      // The shutdown finalizer must not re-fire session_end for a session
+      // that is being replaced here; forget unconditionally so the next drain
+      // skips this id even when no `session_end` plugin is currently attached.
+      forgetActiveSessionForShutdown(previousSessionEntry.sessionId);
       if (hookRunner.hasHooks("session_end")) {
         const payload = buildSessionEndHookPayload({
           sessionId: previousSessionEntry.sessionId,
@@ -908,6 +933,19 @@ export async function initSessionState(params: {
     }
 
     // Fire session_start for the new session
+    if (effectiveSessionId) {
+      // Track the new session so the shutdown finalizer fires a typed
+      // session_end with reason="shutdown"/"restart" if the gateway stops
+      // while this session is still active (see #57790).
+      noteActiveSessionForShutdown({
+        cfg,
+        sessionKey,
+        sessionId: effectiveSessionId,
+        storePath,
+        sessionFile: sessionEntry?.sessionFile,
+        agentId,
+      });
+    }
     if (hookRunner.hasHooks("session_start")) {
       const payload = buildSessionStartHookPayload({
         sessionId: effectiveSessionId,
