@@ -381,6 +381,41 @@ describe("appendAssistantMessageToSessionTranscript", () => {
     expect(tailAssistantText?.text).toBe("Tail delivery mirror");
   });
 
+  // FORK: regression for upstream PR #83635. The tail reader returned
+  // undefined from parseAssistantTranscriptText when the trailing row was a
+  // non-message custom row (e.g. cache-ttl), causing the gap-fill dedup in
+  // persistTextTurnTranscript to miss the just-written assistant text and
+  // double-write the reply. Fix: skip non-message rows and continue reverse
+  // streaming until a real assistant row is found.
+  it("skips trailing non-message custom rows and returns the prior assistant text", async () => {
+    writeTranscriptStore();
+
+    const assistantResult = await appendExactAssistantMessageToSessionTranscript({
+      sessionKey,
+      storePath: fixture.storePath(),
+      message: createExactAssistantMessage({ text: "Latest assistant reply" }),
+    });
+    expect(assistantResult.ok).toBe(true);
+    if (!assistantResult.ok) {
+      return;
+    }
+
+    // Manually append a non-message custom row (cache-ttl shape) AFTER the
+    // assistant message, mirroring the production transcript pattern that
+    // triggered the bug.
+    fs.appendFileSync(
+      assistantResult.sessionFile,
+      JSON.stringify({ type: "custom", subtype: "cache-ttl", ttlMs: 3_600_000 }) + "\n",
+      "utf-8",
+    );
+
+    const tailAssistantText = await readTailAssistantTextFromSessionTranscript(
+      assistantResult.sessionFile,
+    );
+    expect(tailAssistantText?.id).toBe(assistantResult.messageId);
+    expect(tailAssistantText?.text).toBe("Latest assistant reply");
+  });
+
   it("does not reuse an older matching assistant message across turns", async () => {
     writeTranscriptStore();
 
