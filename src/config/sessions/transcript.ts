@@ -193,10 +193,20 @@ export async function readTailAssistantTextFromSessionTranscript(
   }
 
   for await (const line of streamSessionTranscriptLinesReverse(sessionFile)) {
+    let parsedRow: { type?: unknown; message?: unknown } | undefined;
+    try {
+      parsedRow = JSON.parse(line) as { type?: unknown; message?: unknown };
+    } catch {
+      continue;
+    }
+    // Skip non-message entries (e.g. cache-ttl custom rows that trail the assistant).
+    if (!parsedRow || !parsedRow.message) {
+      continue;
+    }
     try {
       return parseAssistantTranscriptText(line);
     } catch {
-      continue;
+      return undefined;
     }
   }
   return undefined;
