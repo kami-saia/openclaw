@@ -169,4 +169,53 @@ describe("compact-tool session write lock (FORK regression)", () => {
     });
     expect(tool).toBeNull();
   });
+
+  it("accepts colon-containing routed sessionKeys (telegram-direct) by resolving via entry.sessionId", async () => {
+    // Telegram DM session key form: agent:main:telegram:default:direct:<userId>
+    // The raw key contains colons → fails validateSessionId. compact-tool must
+    // resolve via store entry.sessionId (sanitized) instead of passing the
+    // routed key into the file-path validator.
+    const telegramKey = "agent:main:telegram:default:direct:8757708493";
+    const sanitizedId = "telegram-direct-8757708493";
+    const entrySessionFile = path.join(tmpDir, `${sanitizedId}.jsonl`);
+    fs.writeFileSync(entrySessionFile, "{}\n", "utf-8");
+
+    mocks.loadSessionStore.mockReturnValue({
+      [telegramKey]: {
+        sessionId: sanitizedId,
+        sessionFile: entrySessionFile,
+      },
+    });
+    mocks.resolveSessionFilePath.mockImplementation((sessionId: string) => {
+      // Mirror real behavior: throw if sessionId contains colons (validator).
+      if (/[^a-z0-9._-]/i.test(sessionId)) {
+        throw new Error(`Invalid session ID: ${sessionId}`);
+      }
+      return entrySessionFile;
+    });
+
+    appendCompactionMock.mockImplementation(() => undefined);
+
+    const tool = createCompactTool({
+      sessionKey: telegramKey,
+      config: { agents: { defaults: { compaction: { mode: "agent" } } } } as never,
+      workspaceDir: tmpDir,
+      prepareCompactionOverride: mocks.prepareCompactionImpl,
+    });
+
+    const result = await tool!.execute("toolu_tg_1", { summary: "tg compaction" });
+    const textBlock = result.content.find((c) => c.type === "text");
+    expect(textBlock?.text).toMatch(/Compaction complete/);
+    // resolveSessionFilePath received the sanitized id, NOT the routed key.
+    expect(mocks.resolveSessionFilePath).toHaveBeenCalledWith(
+      sanitizedId,
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(mocks.resolveSessionFilePath).not.toHaveBeenCalledWith(
+      telegramKey,
+      expect.anything(),
+      expect.anything(),
+    );
+  });
 });

@@ -159,11 +159,30 @@ export function createCompactTool(options: {
         const store = loadSessionStore(storePath);
         const entry = store?.[sessionKey];
         const filePathOpts = resolveSessionFilePathOptions({ agentId, storePath });
-        const sessionFile = resolveSessionFilePath(
-          sessionKey,
-          entry?.sessionFile ? { sessionFile: entry.sessionFile } : undefined,
-          filePathOpts,
-        );
+        // FORK: resolveSessionFilePath's first arg is a *sanitized* sessionId
+        // (UUID-like, matches SAFE_SESSION_ID_RE), NOT the routed sessionKey.
+        // Telegram-direct keys (`agent:main:telegram:default:direct:<userId>`)
+        // contain colons and trip validateSessionId. Use entry.sessionId when
+        // available; fall back to entry.sessionFile-derived path; only use the
+        // raw key as a last resort (and in that case skip validation by
+        // passing the entry path directly).
+        let sessionFile: string;
+        if (entry?.sessionId) {
+          sessionFile = resolveSessionFilePath(
+            entry.sessionId,
+            entry?.sessionFile ? { sessionFile: entry.sessionFile } : undefined,
+            filePathOpts,
+          );
+        } else if (entry?.sessionFile) {
+          // No sessionId on the entry but we have a file path — use it directly.
+          sessionFile = path.isAbsolute(entry.sessionFile)
+            ? entry.sessionFile
+            : path.resolve(filePathOpts?.sessionsDir ?? path.dirname(storePath), entry.sessionFile);
+        } else {
+          // No store entry at all (shouldn't normally happen). Try the raw key
+          // — will throw for keys with unsafe chars, surfacing a clear error.
+          sessionFile = resolveSessionFilePath(sessionKey, undefined, filePathOpts);
+        }
         if (!fs.existsSync(sessionFile)) {
           return {
             content: [{ type: "text", text: "Error: session file not found." }],
