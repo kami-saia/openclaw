@@ -147,7 +147,7 @@ export function createOpenClawTools(
     sessionId?: string;
     /** Getter for the live SessionManager instance (for compact tool). */
     getSessionManager?: () => import("@earendil-works/pi-coding-agent").SessionManager | undefined;
-    updateAgentMessagesAfterCompaction?: () => void;
+    updateAgentMessagesAfterCompaction?: (toolCallId: string, resultText: string) => void;
     /**
      * Workspace directory to pass to spawned subagents for inheritance.
      * Defaults to workspaceDir. Use this to pass the actual agent workspace when the

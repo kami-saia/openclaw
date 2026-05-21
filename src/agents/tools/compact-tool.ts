@@ -86,8 +86,15 @@ export function createCompactTool(options: {
   config?: OpenClawConfig;
   workspaceDir?: string;
   getSessionManager?: () => import("@earendil-works/pi-coding-agent").SessionManager | undefined;
-  /** Optional: refresh the live agent.state.messages after compaction is appended. */
-  updateAgentMessagesAfterCompaction?: () => void;
+  /**
+   * Optional: refresh the live agent.state.messages after compaction is appended.
+   * Receives the in-flight tool_call_id + the tool_result text so the rebuilt
+   * messages array can include a synthetic tool_result entry — otherwise the
+   * assistant's tool_use would be orphaned (SDK only appends the real
+   * tool_result AFTER execute() returns) and transcript-repair would inject a
+   * synthetic error, killing the turn.
+   */
+  updateAgentMessagesAfterCompaction?: (toolCallId: string, resultText: string) => void;
 }): AnyAgentTool | null {
   const cfg = options.config;
   const mode = cfg?.agents?.defaults?.compaction?.mode;
@@ -105,7 +112,7 @@ export function createCompactTool(options: {
       "Call this when you receive a context pressure signal recommending compaction.",
     label: "Compact conversation history",
     parameters: CompactToolSchema,
-    async execute(_toolCallId, params) {
+    async execute(toolCallId, params) {
       await initCompactPromise;
       if (!prepareCompaction) {
         return {
@@ -180,17 +187,6 @@ export function createCompactTool(options: {
           true, // fromHook
         );
 
-        // FORK: rebuild the in-memory agent state from the freshly compacted
-        // SessionManager so the next turn doesn't keep replaying the full
-        // pre-compaction transcript. Without this, agent.state.messages keeps
-        // growing across compactions because pi-agent only refreshes when its
-        // own session.compact() runs.
-        try {
-          options.updateAgentMessagesAfterCompaction?.();
-        } catch (refreshErr) {
-          log.warn(`Failed to refresh agent messages post-compaction: ${String(refreshErr)}`);
-        }
-
         log.info(
           `Agent compaction: sessionKey=${sessionKey} tokensBefore=${tokensBefore} summaryLength=${summary.length}`,
         );
@@ -225,16 +221,26 @@ export function createCompactTool(options: {
           log.debug("Skipping daily journal append — no workspaceDir configured");
         }
 
+        const resultText =
+          `Compaction complete. tokensBefore=${tokensBefore}, summaryLength=${summary.length}. ` +
+          `Summary saved to session and memory/${dateStamp}.md. ` +
+          `Next turn will load fresh context.`;
+
+        // FORK: rebuild the in-memory agent state from the freshly compacted
+        // SessionManager so the next turn doesn't keep replaying the full
+        // pre-compaction transcript. Pass the in-flight tool_call_id + result
+        // text so the rebuilt messages include a synthetic tool_result for the
+        // active compact call — otherwise the assistant's tool_use is orphaned
+        // (SDK only appends the real tool_result after execute() returns) and
+        // transcript-repair injects a synthetic error, killing the turn.
+        try {
+          options.updateAgentMessagesAfterCompaction?.(toolCallId, resultText);
+        } catch (refreshErr) {
+          log.warn(`Failed to refresh agent messages post-compaction: ${String(refreshErr)}`);
+        }
+
         return {
-          content: [
-            {
-              type: "text",
-              text:
-                `Compaction complete. tokensBefore=${tokensBefore}, summaryLength=${summary.length}. ` +
-                `Summary saved to session and memory/${dateStamp}.md. ` +
-                `Next turn will load fresh context.`,
-            },
-          ],
+          content: [{ type: "text", text: resultText }],
           details: undefined,
         };
       } catch (err) {

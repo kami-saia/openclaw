@@ -1444,14 +1444,48 @@ export async function runEmbeddedAttempt(
             authProfileStore: params.authProfileStore,
             // FORK: Wire live SessionManager + agent-state updater into compactTool.
             getSessionManager: () => liveSessionRef.current?.sessionManager,
-            updateAgentMessagesAfterCompaction: () => {
+            updateAgentMessagesAfterCompaction: (toolCallId, resultText) => {
               const live = liveSessionRef.current;
               if (!live) {
                 return;
               }
               try {
                 const ctx = live.sessionManager.buildSessionContext();
-                live.agent.state.messages = ctx.messages;
+                // FORK: The SDK appends the assistant tool_use BEFORE execute()
+                // runs, but appends the tool_result AFTER execute() returns.
+                // We swap state mid-execute, so the rebuilt context has the
+                // compact tool_use but NOT its matching tool_result — an
+                // orphan that transcript-repair detects and replaces with a
+                // synthetic error, killing the turn. Synthesize the tool_result
+                // ourselves; when the SDK records the real one moments later
+                // it's idempotent (same toolCallId, same text).
+                const messages = [...ctx.messages];
+                const last = messages.length > 0 ? messages[messages.length - 1] : undefined;
+                const lastContent =
+                  last && typeof last === "object" && last !== null
+                    ? (last as { content?: unknown }).content
+                    : undefined;
+                const hasOrphan =
+                  last !== undefined &&
+                  (last as { role?: string }).role === "assistant" &&
+                  Array.isArray(lastContent) &&
+                  (lastContent as Array<{ type?: string; id?: string }>).some(
+                    (block) => block?.type === "tool_use" && block?.id === toolCallId,
+                  );
+                if (hasOrphan) {
+                  messages.push({
+                    role: "user",
+                    content: [
+                      {
+                        type: "tool_result",
+                        tool_use_id: toolCallId,
+                        content: resultText,
+                      },
+                    ],
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  } as any);
+                }
+                live.agent.state.messages = messages;
               } catch (err) {
                 log.warn(`compact: failed to refresh agent.state.messages: ${String(err)}`);
               }
