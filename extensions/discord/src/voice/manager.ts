@@ -450,87 +450,6 @@ export class DiscordVoiceManager {
         connectReadyTimeoutMs,
       );
       logVoiceVerbose(`join: connected to guild ${guildId} channel ${channelId}`);
-      // --- FORK: pre-warm Kyutai TTS model on VC join + play greeting ---
-      // Load model, run dummy inference to warm CUDA kernels, and play the
-      // warmup audio ("hey") as a "picking up the phone" greeting.
-      import("./kyutai-streaming.js")
-        .then(async ({ kyutaiPrewarmWithAudio }) => {
-          let result = await kyutaiPrewarmWithAudio();
-          if (!result) {
-            logger.warn("discord voice: prewarm failed (sidecar not up?), retrying in 3s...");
-            await new Promise((r) => setTimeout(r, 3000));
-            result = await kyutaiPrewarmWithAudio();
-          }
-          if (result) {
-            logger.warn("discord voice: kyutai TTS model pre-warmed, playing greeting");
-            // Play the warmup audio through the VC
-            const voiceEntry = this.sessions.get(guildId);
-            if (voiceEntry) {
-              this.enqueuePlayback(voiceEntry, async () => {
-                const voiceSdk = loadDiscordVoiceSdk();
-                const childProcess = await import("node:child_process");
-                const { Readable } = await import("node:stream");
-                const GREETING_SILENCE_PAD = Buffer.alloc(24000); // 500ms
-                const pcmReadable = new Readable({ read() {} });
-                pcmReadable.push(GREETING_SILENCE_PAD);
-                pcmReadable.push(result);
-                pcmReadable.push(GREETING_SILENCE_PAD);
-                pcmReadable.push(null);
-                const ffmpeg = childProcess.spawn(
-                  "ffmpeg",
-                  [
-                    "-f",
-                    "s16le",
-                    "-ar",
-                    "24000",
-                    "-ac",
-                    "1",
-                    "-i",
-                    "pipe:0",
-                    "-c:a",
-                    "libopus",
-                    "-ar",
-                    "48000",
-                    "-ac",
-                    "2",
-                    "-f",
-                    "ogg",
-                    "pipe:1",
-                  ],
-                  { stdio: ["pipe", "pipe", "pipe"] },
-                );
-                pcmReadable.pipe(ffmpeg.stdin);
-                const resource = voiceSdk.createAudioResource(ffmpeg.stdout, {
-                  inputType: voiceSdk.StreamType.OggOpus,
-                });
-                voiceEntry.player.play(resource);
-                await voiceSdk
-                  .entersState(
-                    voiceEntry.player,
-                    voiceSdk.AudioPlayerStatus.Playing,
-                    PLAYBACK_READY_TIMEOUT_MS,
-                  )
-                  .catch(() => undefined);
-                await voiceSdk
-                  .entersState(
-                    voiceEntry.player,
-                    voiceSdk.AudioPlayerStatus.Idle,
-                    SPEAKING_READY_TIMEOUT_MS,
-                  )
-                  .catch(() => undefined);
-                logger.warn("discord voice: greeting playback done");
-              });
-            }
-          } else {
-            logger.warn("discord voice: prewarm failed after retry — first response will be slow");
-          }
-        })
-        .catch((err) =>
-          logger.warn(
-            `discord voice: prewarm error: ${err instanceof Error ? err.message : String(err)}`,
-          ),
-        );
-      // --- END FORK ---
     } catch (err) {
       logger.warn(
         `discord voice: join failed before ready: guild ${guildId} channel ${channelId} timeout=${connectReadyTimeoutMs}ms error=${formatErrorMessage(err)}`,
@@ -773,9 +692,6 @@ export class DiscordVoiceManager {
     entry.stop();
     this.sessions.delete(guildId);
     logVoiceVerbose(`leave: disconnected from guild ${guildId} channel ${entry.channelId}`);
-    // --- FORK: release Kyutai TTS model on VC leave (idle timeout also handles this) ---
-    import("./kyutai-streaming.js").then(({ kyutaiRelease }) => kyutaiRelease()).catch(() => {}); // best-effort
-    // --- END FORK ---
     return {
       ok: true,
       message: `Left ${formatMention({ channelId: entry.channelId })}.`,
