@@ -95,6 +95,14 @@ export function createCompactTool(options: {
    * synthetic error, killing the turn.
    */
   updateAgentMessagesAfterCompaction?: (toolCallId: string, resultText: string) => void;
+  /**
+   * FORK: Wrap session-file writes (appendCompaction + agent-state refresh) in
+   * the embedded attempt's session write lock so the fence/fingerprint stays
+   * coherent. Without this the compact tool writes outside the lock → fence
+   * mismatch → EmbeddedAttemptSessionTakeoverError aborts the turn before the
+   * SDK persists the toolResult.
+   */
+  withSessionWriteLock?: <T>(run: () => Promise<T> | T) => Promise<T>;
 }): AnyAgentTool | null {
   const cfg = options.config;
   const mode = cfg?.agents?.defaults?.compaction?.mode;
@@ -179,13 +187,25 @@ export function createCompactTool(options: {
 
         const { firstKeptEntryId, tokensBefore } = preparation;
 
-        sessionManager.appendCompaction(
-          summary,
-          firstKeptEntryId,
-          tokensBefore,
-          undefined, // details
-          true, // fromHook
-        );
+        // FORK: appendCompaction mutates the session JSONL on disk. The
+        // embedded attempt runner installs a session-file fingerprint fence
+        // around the prompt window; any write outside `withSessionWriteLock`
+        // trips the fence → EmbeddedAttemptSessionTakeoverError aborts the
+        // entire turn before the SDK persists this tool’s real toolResult.
+        // Wrap the file mutation AND the in-memory agent-state swap in the
+        // lock so the fingerprint is refreshed atomically.
+        const wrap =
+          options.withSessionWriteLock ?? (async <T>(run: () => Promise<T> | T) => await run());
+
+        await wrap(async () => {
+          sessionManager.appendCompaction(
+            summary,
+            firstKeptEntryId,
+            tokensBefore,
+            undefined, // details
+            true, // fromHook
+          );
+        });
 
         log.info(
           `Agent compaction: sessionKey=${sessionKey} tokensBefore=${tokensBefore} summaryLength=${summary.length}`,
@@ -234,7 +254,9 @@ export function createCompactTool(options: {
         // (SDK only appends the real tool_result after execute() returns) and
         // transcript-repair injects a synthetic error, killing the turn.
         try {
-          options.updateAgentMessagesAfterCompaction?.(toolCallId, resultText);
+          await wrap(async () => {
+            options.updateAgentMessagesAfterCompaction?.(toolCallId, resultText);
+          });
         } catch (refreshErr) {
           log.warn(`Failed to refresh agent messages post-compaction: ${String(refreshErr)}`);
         }

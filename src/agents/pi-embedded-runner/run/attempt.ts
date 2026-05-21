@@ -1444,6 +1444,13 @@ export async function runEmbeddedAttempt(
             authProfileStore: params.authProfileStore,
             // FORK: Wire live SessionManager + agent-state updater into compactTool.
             getSessionManager: () => liveSessionRef.current?.sessionManager,
+            // FORK: provide the embedded attempt session write lock so the
+            // compact tool's appendCompaction + agent-state swap run inside
+            // the same fence the runner uses; otherwise the file fingerprint
+            // mismatch trips EmbeddedAttemptSessionTakeoverError and aborts
+            // the turn before the SDK persists the compact toolResult.
+            withSessionWriteLock: (operation) =>
+              sessionLockController.withSessionWriteLock(operation),
             updateAgentMessagesAfterCompaction: (toolCallId, resultText) => {
               const live = liveSessionRef.current;
               if (!live) {

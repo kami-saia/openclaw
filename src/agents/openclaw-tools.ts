@@ -148,6 +148,8 @@ export function createOpenClawTools(
     /** Getter for the live SessionManager instance (for compact tool). */
     getSessionManager?: () => import("@earendil-works/pi-coding-agent").SessionManager | undefined;
     updateAgentMessagesAfterCompaction?: (toolCallId: string, resultText: string) => void;
+    /** FORK: wrap compact-tool session writes in the embedded attempt write lock. */
+    withSessionWriteLock?: <T>(run: () => Promise<T> | T) => Promise<T>;
     /**
      * Workspace directory to pass to spawned subagents for inheritance.
      * Defaults to workspaceDir. Use this to pass the actual agent workspace when the
@@ -316,6 +318,7 @@ export function createOpenClawTools(
     workspaceDir,
     getSessionManager: options?.getSessionManager,
     updateAgentMessagesAfterCompaction: options?.updateAgentMessagesAfterCompaction,
+    withSessionWriteLock: options?.withSessionWriteLock,
   });
   const heartbeatTool = options?.enableHeartbeatTool ? createHeartbeatResponseTool() : null;
   options?.recordToolPrepStage?.("openclaw-tools:message-tool");
