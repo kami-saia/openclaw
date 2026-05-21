@@ -1451,41 +1451,37 @@ export async function runEmbeddedAttempt(
               }
               try {
                 const ctx = live.sessionManager.buildSessionContext();
-                // FORK: The SDK appends the assistant tool_use BEFORE execute()
-                // runs, but appends the tool_result AFTER execute() returns.
+                // FORK: The SDK appends the assistant toolCall BEFORE execute()
+                // runs, but appends the toolResult AFTER execute() returns.
                 // We swap state mid-execute, so the rebuilt context has the
-                // compact tool_use but NOT its matching tool_result — an
+                // compact toolCall but NOT its matching toolResult — an
                 // orphan that transcript-repair detects and replaces with a
-                // synthetic error, killing the turn. Synthesize the tool_result
-                // ourselves; when the SDK records the real one moments later
-                // it's idempotent (same toolCallId, same text).
-                const messages = [...ctx.messages];
+                // synthetic error, killing the turn. Synthesize the toolResult
+                // ourselves using pi-agent-core's AgentMessage shape
+                // ({role:"toolResult",...}); when the SDK records the real one
+                // moments later it should be idempotent on toolCallId.
+                const messages = [...(ctx.messages as unknown as Array<Record<string, unknown>>)];
                 const last = messages.length > 0 ? messages[messages.length - 1] : undefined;
                 const lastContent =
-                  last && typeof last === "object" && last !== null
-                    ? (last as { content?: unknown }).content
-                    : undefined;
+                  last && Array.isArray(last.content)
+                    ? (last.content as Array<Record<string, unknown>>)
+                    : [];
                 const hasOrphan =
-                  last !== undefined &&
-                  (last as { role?: string }).role === "assistant" &&
-                  Array.isArray(lastContent) &&
-                  (lastContent as Array<{ type?: string; id?: string }>).some(
-                    (block) => block?.type === "tool_use" && block?.id === toolCallId,
-                  );
+                  !!last &&
+                  last.role === "assistant" &&
+                  lastContent.some((b) => b?.type === "toolCall" && b?.id === toolCallId);
                 if (hasOrphan) {
                   messages.push({
-                    role: "user",
-                    content: [
-                      {
-                        type: "tool_result",
-                        tool_use_id: toolCallId,
-                        content: resultText,
-                      },
-                    ],
-                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  } as any);
+                    role: "toolResult",
+                    toolCallId,
+                    toolName: "compact",
+                    content: [{ type: "text", text: resultText }],
+                    isError: false,
+                    timestamp: Date.now(),
+                  });
                 }
-                live.agent.state.messages = messages;
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                live.agent.state.messages = messages as any;
               } catch (err) {
                 log.warn(`compact: failed to refresh agent.state.messages: ${String(err)}`);
               }
