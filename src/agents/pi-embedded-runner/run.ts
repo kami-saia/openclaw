@@ -88,6 +88,7 @@ import {
   parseImageSizeError,
   pickFallbackThinkingLevel,
 } from "../pi-embedded-helpers.js";
+import { resolveEffectiveCompactionMode } from "../pi-settings.js";
 import { resolveProcessToolScopeKey } from "../pi-tools.js";
 import { resolveProviderIdForAuth } from "../provider-auth-aliases.js";
 import { runAgentCleanupStep } from "../run-cleanup-timeout.js";
@@ -1708,112 +1709,123 @@ export async function runEmbeddedPiAgent(
                 `[timeout-compaction] already attempted timeout compaction ${timeoutCompactionAttempts} time(s); falling through to failover rotation`,
               );
             } else if (tokenUsedRatio > 0.65) {
-              const timeoutDiagId = createCompactionDiagId();
-              timeoutCompactionAttempts++;
-              log.warn(
-                `[timeout-compaction] LLM timed out with high prompt token usage (${Math.round(tokenUsedRatio * 100)}%); ` +
-                  `attempting compaction before retry (attempt ${timeoutCompactionAttempts}/${MAX_TIMEOUT_COMPACTION_ATTEMPTS}) diagId=${timeoutDiagId}`,
-              );
-              let timeoutCompactResult: Awaited<ReturnType<typeof contextEngine.compact>>;
-              await runOwnsCompactionBeforeHook("timeout recovery");
-              try {
-                const timeoutCompactionRuntimeContext = {
-                  ...buildEmbeddedCompactionRuntimeContext({
-                    sessionKey: params.sessionKey,
-                    messageChannel: params.messageChannel,
-                    messageProvider: params.messageProvider,
-                    agentAccountId: params.agentAccountId,
-                    currentChannelId: params.currentChannelId,
-                    currentThreadTs: params.currentThreadTs,
-                    currentMessageId: params.currentMessageId,
-                    authProfileId: lastProfileId,
-                    workspaceDir: resolvedWorkspace,
-                    agentDir,
-                    config: params.config,
-                    skillsSnapshot: params.skillsSnapshot,
-                    senderIsOwner: params.senderIsOwner,
-                    senderId: params.senderId,
-                    provider,
-                    modelId,
-                    modelFallbacksOverride: params.modelFallbacksOverride,
-                    thinkLevel,
-                    reasoningLevel: params.reasoningLevel,
-                    bashElevated: params.bashElevated,
-                    extraSystemPrompt: params.extraSystemPrompt,
-                    sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
-                    ownerNumbers: params.ownerNumbers,
-                    activeProcessSessions: listActiveProcessSessionReferences({
-                      scopeKey: resolveProcessToolScopeKey({
-                        sessionKey: params.sandboxSessionKey?.trim() || params.sessionKey,
-                        sessionId: activeSessionId,
-                        agentId: sessionAgentId,
+              // FORK: in agent compaction mode the agent owns compaction.
+              // Skip reactive timeout-recovery compaction so it does not run
+              // behind the agent's back; surface the failure instead so the
+              // agent can decide (typically via pressure signal + manual
+              // `compact` tool).
+              if (resolveEffectiveCompactionMode(params.config) === "agent") {
+                log.warn(
+                  `[agent-mode] skipping reactive timeout-recovery compaction (tokenUsedRatio=${Math.round(tokenUsedRatio * 100)}%) for ${provider}/${modelId}; agent owns compaction`,
+                );
+              } else {
+                const timeoutDiagId = createCompactionDiagId();
+                timeoutCompactionAttempts++;
+                log.warn(
+                  `[timeout-compaction] LLM timed out with high prompt token usage (${Math.round(tokenUsedRatio * 100)}%); ` +
+                    `attempting compaction before retry (attempt ${timeoutCompactionAttempts}/${MAX_TIMEOUT_COMPACTION_ATTEMPTS}) diagId=${timeoutDiagId}`,
+                );
+                let timeoutCompactResult: Awaited<ReturnType<typeof contextEngine.compact>>;
+                await runOwnsCompactionBeforeHook("timeout recovery");
+                try {
+                  const timeoutCompactionRuntimeContext = {
+                    ...buildEmbeddedCompactionRuntimeContext({
+                      sessionKey: params.sessionKey,
+                      messageChannel: params.messageChannel,
+                      messageProvider: params.messageProvider,
+                      agentAccountId: params.agentAccountId,
+                      currentChannelId: params.currentChannelId,
+                      currentThreadTs: params.currentThreadTs,
+                      currentMessageId: params.currentMessageId,
+                      authProfileId: lastProfileId,
+                      workspaceDir: resolvedWorkspace,
+                      agentDir,
+                      config: params.config,
+                      skillsSnapshot: params.skillsSnapshot,
+                      senderIsOwner: params.senderIsOwner,
+                      senderId: params.senderId,
+                      provider,
+                      modelId,
+                      modelFallbacksOverride: params.modelFallbacksOverride,
+                      thinkLevel,
+                      reasoningLevel: params.reasoningLevel,
+                      bashElevated: params.bashElevated,
+                      extraSystemPrompt: params.extraSystemPrompt,
+                      sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
+                      ownerNumbers: params.ownerNumbers,
+                      activeProcessSessions: listActiveProcessSessionReferences({
+                        scopeKey: resolveProcessToolScopeKey({
+                          sessionKey: params.sandboxSessionKey?.trim() || params.sessionKey,
+                          sessionId: activeSessionId,
+                          agentId: sessionAgentId,
+                        }),
                       }),
                     }),
-                  }),
-                  ...resolveContextEngineCapabilities({
-                    config: params.config,
-                    sessionKey: params.sessionKey,
-                    agentId: sessionAgentId,
-                    contextEnginePluginId,
-                    purpose: "context-engine.timeout-compaction",
-                  }),
-                  onCompactionHookMessages,
-                  ...(attempt.promptCache ? { promptCache: attempt.promptCache } : {}),
-                  runId: params.runId,
-                  trigger: "timeout_recovery",
-                  diagId: timeoutDiagId,
-                  attempt: timeoutCompactionAttempts,
-                  maxAttempts: MAX_TIMEOUT_COMPACTION_ATTEMPTS,
-                };
-                timeoutCompactResult = await contextEngine.compact({
-                  sessionId: activeSessionId,
-                  sessionKey: params.sessionKey,
-                  sessionFile: activeSessionFile,
-                  tokenBudget: ctxInfo.tokens,
-                  force: true,
-                  compactionTarget: "budget",
-                  runtimeContext: timeoutCompactionRuntimeContext,
-                });
-              } catch (compactErr) {
-                log.warn(
-                  `[timeout-compaction] contextEngine.compact() threw during timeout recovery for ${provider}/${modelId}: ${String(compactErr)}`,
-                );
-                timeoutCompactResult = {
-                  ok: false,
-                  compacted: false,
-                  reason: String(compactErr),
-                };
-              }
-              if (timeoutCompactResult.compacted) {
-                adoptCompactionTranscript(timeoutCompactResult);
-              }
-              await runOwnsCompactionAfterHook("timeout recovery", timeoutCompactResult);
-              if (timeoutCompactResult.compacted) {
-                autoCompactionCount += 1;
-                if (
-                  typeof timeoutCompactResult.result?.tokensAfter === "number" &&
-                  Number.isFinite(timeoutCompactResult.result.tokensAfter) &&
-                  timeoutCompactResult.result.tokensAfter > 0
-                ) {
-                  lastCompactionTokensAfter = Math.floor(timeoutCompactResult.result.tokensAfter);
-                }
-                if (contextEngine.info.ownsCompaction === true) {
-                  await runPostCompactionSideEffects({
-                    config: params.config,
+                    ...resolveContextEngineCapabilities({
+                      config: params.config,
+                      sessionKey: params.sessionKey,
+                      agentId: sessionAgentId,
+                      contextEnginePluginId,
+                      purpose: "context-engine.timeout-compaction",
+                    }),
+                    onCompactionHookMessages,
+                    ...(attempt.promptCache ? { promptCache: attempt.promptCache } : {}),
+                    runId: params.runId,
+                    trigger: "timeout_recovery",
+                    diagId: timeoutDiagId,
+                    attempt: timeoutCompactionAttempts,
+                    maxAttempts: MAX_TIMEOUT_COMPACTION_ATTEMPTS,
+                  };
+                  timeoutCompactResult = await contextEngine.compact({
+                    sessionId: activeSessionId,
                     sessionKey: params.sessionKey,
                     sessionFile: activeSessionFile,
+                    tokenBudget: ctxInfo.tokens,
+                    force: true,
+                    compactionTarget: "budget",
+                    runtimeContext: timeoutCompactionRuntimeContext,
                   });
+                } catch (compactErr) {
+                  log.warn(
+                    `[timeout-compaction] contextEngine.compact() threw during timeout recovery for ${provider}/${modelId}: ${String(compactErr)}`,
+                  );
+                  timeoutCompactResult = {
+                    ok: false,
+                    compacted: false,
+                    reason: String(compactErr),
+                  };
                 }
-                log.info(
-                  `[timeout-compaction] compaction succeeded for ${provider}/${modelId}; retrying prompt`,
-                );
-                postCompactionGuard.armPostCompaction();
-                continue;
-              } else {
-                log.warn(
-                  `[timeout-compaction] compaction did not reduce context for ${provider}/${modelId}; falling through to normal handling`,
-                );
-              }
+                if (timeoutCompactResult.compacted) {
+                  adoptCompactionTranscript(timeoutCompactResult);
+                }
+                await runOwnsCompactionAfterHook("timeout recovery", timeoutCompactResult);
+                if (timeoutCompactResult.compacted) {
+                  autoCompactionCount += 1;
+                  if (
+                    typeof timeoutCompactResult.result?.tokensAfter === "number" &&
+                    Number.isFinite(timeoutCompactResult.result.tokensAfter) &&
+                    timeoutCompactResult.result.tokensAfter > 0
+                  ) {
+                    lastCompactionTokensAfter = Math.floor(timeoutCompactResult.result.tokensAfter);
+                  }
+                  if (contextEngine.info.ownsCompaction === true) {
+                    await runPostCompactionSideEffects({
+                      config: params.config,
+                      sessionKey: params.sessionKey,
+                      sessionFile: activeSessionFile,
+                    });
+                  }
+                  log.info(
+                    `[timeout-compaction] compaction succeeded for ${provider}/${modelId}; retrying prompt`,
+                  );
+                  postCompactionGuard.armPostCompaction();
+                  continue;
+                } else {
+                  log.warn(
+                    `[timeout-compaction] compaction did not reduce context for ${provider}/${modelId}; falling through to normal handling`,
+                  );
+                }
+              } // end agent-mode else branch (FORK)
             }
           }
 
@@ -1839,286 +1851,297 @@ export async function runEmbeddedPiAgent(
             : null;
 
           if (contextOverflowError) {
-            const overflowDiagId = createCompactionDiagId();
-            const errorText = contextOverflowError.text;
-            const msgCount = attempt.messagesSnapshot?.length ?? 0;
-            const observedOverflowTokens = extractObservedOverflowTokenCount(errorText);
-            log.warn(
-              `[context-overflow-diag] sessionKey=${params.sessionKey ?? params.sessionId} ` +
-                `provider=${provider}/${modelId} source=${contextOverflowError.source} ` +
-                `messages=${msgCount} sessionFile=${activeSessionFile} ` +
-                `diagId=${overflowDiagId} compactionAttempts=${overflowCompactionAttempts} ` +
-                `observedTokens=${observedOverflowTokens ?? "unknown"} ` +
-                `error=${errorText.slice(0, 200)}`,
-            );
-            const isCompactionFailure = isCompactionFailureError(errorText);
-            const hadAttemptLevelCompaction = attemptCompactionCount > 0;
-            // If this attempt already compacted (SDK auto-compaction), avoid immediately
-            // running another explicit compaction for the same overflow trigger.
-            if (
-              !isCompactionFailure &&
-              hadAttemptLevelCompaction &&
-              overflowCompactionAttempts < MAX_OVERFLOW_COMPACTION_ATTEMPTS
-            ) {
-              overflowCompactionAttempts++;
+            // FORK: in agent compaction mode the agent owns compaction.
+            // Skip reactive overflow compaction and let the overflow error
+            // propagate normally so the agent can react via pressure signal +
+            // manual `compact` tool.
+            if (resolveEffectiveCompactionMode(params.config) === "agent") {
               log.warn(
-                `context overflow persisted after in-attempt compaction (attempt ${overflowCompactionAttempts}/${MAX_OVERFLOW_COMPACTION_ATTEMPTS}); retrying prompt without additional compaction for ${provider}/${modelId}`,
+                `[agent-mode] skipping reactive overflow compaction for ${provider}/${modelId}; agent owns compaction. ` +
+                  `Overflow error will propagate: ${contextOverflowError.text.slice(0, 200)}`,
               );
-              if (preflightRecovery?.source === "mid-turn") {
-                continueFromCurrentTranscript();
-              }
-              continue;
-            }
-            // Attempt explicit overflow compaction only when this attempt did not
-            // already auto-compact.
-            if (
-              !isCompactionFailure &&
-              !hadAttemptLevelCompaction &&
-              overflowCompactionAttempts < MAX_OVERFLOW_COMPACTION_ATTEMPTS
-            ) {
-              if (log.isEnabled("debug")) {
-                log.debug(
-                  `[compaction-diag] decision diagId=${overflowDiagId} branch=compact ` +
-                    `isCompactionFailure=${isCompactionFailure} hasOversizedToolResults=unknown ` +
-                    `attempt=${overflowCompactionAttempts + 1} maxAttempts=${MAX_OVERFLOW_COMPACTION_ATTEMPTS}`,
+            } else {
+              const overflowDiagId = createCompactionDiagId();
+              const errorText = contextOverflowError.text;
+              const msgCount = attempt.messagesSnapshot?.length ?? 0;
+              const observedOverflowTokens = extractObservedOverflowTokenCount(errorText);
+              log.warn(
+                `[context-overflow-diag] sessionKey=${params.sessionKey ?? params.sessionId} ` +
+                  `provider=${provider}/${modelId} source=${contextOverflowError.source} ` +
+                  `messages=${msgCount} sessionFile=${activeSessionFile} ` +
+                  `diagId=${overflowDiagId} compactionAttempts=${overflowCompactionAttempts} ` +
+                  `observedTokens=${observedOverflowTokens ?? "unknown"} ` +
+                  `error=${errorText.slice(0, 200)}`,
+              );
+              const isCompactionFailure = isCompactionFailureError(errorText);
+              const hadAttemptLevelCompaction = attemptCompactionCount > 0;
+              // If this attempt already compacted (SDK auto-compaction), avoid immediately
+              // running another explicit compaction for the same overflow trigger.
+              if (
+                !isCompactionFailure &&
+                hadAttemptLevelCompaction &&
+                overflowCompactionAttempts < MAX_OVERFLOW_COMPACTION_ATTEMPTS
+              ) {
+                overflowCompactionAttempts++;
+                log.warn(
+                  `context overflow persisted after in-attempt compaction (attempt ${overflowCompactionAttempts}/${MAX_OVERFLOW_COMPACTION_ATTEMPTS}); retrying prompt without additional compaction for ${provider}/${modelId}`,
                 );
+                if (preflightRecovery?.source === "mid-turn") {
+                  continueFromCurrentTranscript();
+                }
+                continue;
               }
-              overflowCompactionAttempts++;
-              log.warn(
-                `context overflow detected (attempt ${overflowCompactionAttempts}/${MAX_OVERFLOW_COMPACTION_ATTEMPTS}); attempting auto-compaction for ${provider}/${modelId}`,
-              );
-              let compactResult: Awaited<ReturnType<typeof contextEngine.compact>>;
-              await runOwnsCompactionBeforeHook("overflow recovery");
-              try {
-                const overflowCompactionRuntimeContext = {
-                  ...buildEmbeddedCompactionRuntimeContext({
-                    sessionKey: params.sessionKey,
-                    messageChannel: params.messageChannel,
-                    messageProvider: params.messageProvider,
-                    agentAccountId: params.agentAccountId,
-                    currentChannelId: params.currentChannelId,
-                    currentThreadTs: params.currentThreadTs,
-                    currentMessageId: params.currentMessageId,
-                    authProfileId: lastProfileId,
-                    workspaceDir: resolvedWorkspace,
-                    agentDir,
-                    config: params.config,
-                    skillsSnapshot: params.skillsSnapshot,
-                    senderIsOwner: params.senderIsOwner,
-                    senderId: params.senderId,
-                    provider,
-                    modelId,
-                    thinkLevel,
-                    reasoningLevel: params.reasoningLevel,
-                    bashElevated: params.bashElevated,
-                    extraSystemPrompt: params.extraSystemPrompt,
-                    sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
-                    ownerNumbers: params.ownerNumbers,
-                    activeProcessSessions: listActiveProcessSessionReferences({
-                      scopeKey: resolveProcessToolScopeKey({
-                        sessionKey: params.sandboxSessionKey?.trim() || params.sessionKey,
-                        sessionId: activeSessionId,
-                        agentId: sessionAgentId,
+              // Attempt explicit overflow compaction only when this attempt did not
+              // already auto-compact.
+              if (
+                !isCompactionFailure &&
+                !hadAttemptLevelCompaction &&
+                overflowCompactionAttempts < MAX_OVERFLOW_COMPACTION_ATTEMPTS
+              ) {
+                if (log.isEnabled("debug")) {
+                  log.debug(
+                    `[compaction-diag] decision diagId=${overflowDiagId} branch=compact ` +
+                      `isCompactionFailure=${isCompactionFailure} hasOversizedToolResults=unknown ` +
+                      `attempt=${overflowCompactionAttempts + 1} maxAttempts=${MAX_OVERFLOW_COMPACTION_ATTEMPTS}`,
+                  );
+                }
+                overflowCompactionAttempts++;
+                log.warn(
+                  `context overflow detected (attempt ${overflowCompactionAttempts}/${MAX_OVERFLOW_COMPACTION_ATTEMPTS}); attempting auto-compaction for ${provider}/${modelId}`,
+                );
+                let compactResult: Awaited<ReturnType<typeof contextEngine.compact>>;
+                await runOwnsCompactionBeforeHook("overflow recovery");
+                try {
+                  const overflowCompactionRuntimeContext = {
+                    ...buildEmbeddedCompactionRuntimeContext({
+                      sessionKey: params.sessionKey,
+                      messageChannel: params.messageChannel,
+                      messageProvider: params.messageProvider,
+                      agentAccountId: params.agentAccountId,
+                      currentChannelId: params.currentChannelId,
+                      currentThreadTs: params.currentThreadTs,
+                      currentMessageId: params.currentMessageId,
+                      authProfileId: lastProfileId,
+                      workspaceDir: resolvedWorkspace,
+                      agentDir,
+                      config: params.config,
+                      skillsSnapshot: params.skillsSnapshot,
+                      senderIsOwner: params.senderIsOwner,
+                      senderId: params.senderId,
+                      provider,
+                      modelId,
+                      thinkLevel,
+                      reasoningLevel: params.reasoningLevel,
+                      bashElevated: params.bashElevated,
+                      extraSystemPrompt: params.extraSystemPrompt,
+                      sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
+                      ownerNumbers: params.ownerNumbers,
+                      activeProcessSessions: listActiveProcessSessionReferences({
+                        scopeKey: resolveProcessToolScopeKey({
+                          sessionKey: params.sandboxSessionKey?.trim() || params.sessionKey,
+                          sessionId: activeSessionId,
+                          agentId: sessionAgentId,
+                        }),
                       }),
                     }),
-                  }),
-                  ...resolveContextEngineCapabilities({
-                    config: params.config,
-                    sessionKey: params.sessionKey,
-                    agentId: sessionAgentId,
-                    contextEnginePluginId,
-                    purpose: "context-engine.overflow-compaction",
-                  }),
-                  onCompactionHookMessages,
-                  ...(attempt.promptCache ? { promptCache: attempt.promptCache } : {}),
-                  runId: params.runId,
-                  trigger: "overflow",
-                  ...(observedOverflowTokens !== undefined
-                    ? { currentTokenCount: observedOverflowTokens }
-                    : {}),
-                  diagId: overflowDiagId,
-                  attempt: overflowCompactionAttempts,
-                  maxAttempts: MAX_OVERFLOW_COMPACTION_ATTEMPTS,
-                };
-                compactResult = await contextEngine.compact({
-                  sessionId: activeSessionId,
-                  sessionKey: params.sessionKey,
-                  sessionFile: activeSessionFile,
-                  tokenBudget: ctxInfo.tokens,
-                  ...(observedOverflowTokens !== undefined
-                    ? { currentTokenCount: observedOverflowTokens }
-                    : {}),
-                  force: true,
-                  compactionTarget: "budget",
-                  runtimeContext: overflowCompactionRuntimeContext,
-                });
-                if (compactResult.ok && compactResult.compacted) {
-                  adoptCompactionTranscript(compactResult);
-                  await runContextEngineMaintenance({
-                    contextEngine,
+                    ...resolveContextEngineCapabilities({
+                      config: params.config,
+                      sessionKey: params.sessionKey,
+                      agentId: sessionAgentId,
+                      contextEnginePluginId,
+                      purpose: "context-engine.overflow-compaction",
+                    }),
+                    onCompactionHookMessages,
+                    ...(attempt.promptCache ? { promptCache: attempt.promptCache } : {}),
+                    runId: params.runId,
+                    trigger: "overflow",
+                    ...(observedOverflowTokens !== undefined
+                      ? { currentTokenCount: observedOverflowTokens }
+                      : {}),
+                    diagId: overflowDiagId,
+                    attempt: overflowCompactionAttempts,
+                    maxAttempts: MAX_OVERFLOW_COMPACTION_ATTEMPTS,
+                  };
+                  compactResult = await contextEngine.compact({
                     sessionId: activeSessionId,
                     sessionKey: params.sessionKey,
                     sessionFile: activeSessionFile,
-                    reason: "compaction",
+                    tokenBudget: ctxInfo.tokens,
+                    ...(observedOverflowTokens !== undefined
+                      ? { currentTokenCount: observedOverflowTokens }
+                      : {}),
+                    force: true,
+                    compactionTarget: "budget",
                     runtimeContext: overflowCompactionRuntimeContext,
-                    config: params.config,
-                    agentId: sessionAgentId,
                   });
+                  if (compactResult.ok && compactResult.compacted) {
+                    adoptCompactionTranscript(compactResult);
+                    await runContextEngineMaintenance({
+                      contextEngine,
+                      sessionId: activeSessionId,
+                      sessionKey: params.sessionKey,
+                      sessionFile: activeSessionFile,
+                      reason: "compaction",
+                      runtimeContext: overflowCompactionRuntimeContext,
+                      config: params.config,
+                      agentId: sessionAgentId,
+                    });
+                  }
+                } catch (compactErr) {
+                  log.warn(
+                    `contextEngine.compact() threw during overflow recovery for ${provider}/${modelId}: ${String(compactErr)}`,
+                  );
+                  compactResult = {
+                    ok: false,
+                    compacted: false,
+                    reason: String(compactErr),
+                  };
                 }
-              } catch (compactErr) {
+                await runOwnsCompactionAfterHook("overflow recovery", compactResult);
+                if (compactResult.compacted) {
+                  adoptCompactionTranscript(compactResult);
+                  if (
+                    typeof compactResult.result?.tokensAfter === "number" &&
+                    Number.isFinite(compactResult.result.tokensAfter) &&
+                    compactResult.result.tokensAfter > 0
+                  ) {
+                    lastCompactionTokensAfter = Math.floor(compactResult.result.tokensAfter);
+                  }
+                  if (preflightRecovery?.route === "compact_then_truncate") {
+                    const truncResult = await truncateOversizedToolResultsInSession({
+                      sessionFile: activeSessionFile,
+                      contextWindowTokens: ctxInfo.tokens,
+                      maxCharsOverride: resolveLiveToolResultMaxChars({
+                        contextWindowTokens: ctxInfo.tokens,
+                        cfg: params.config,
+                        agentId: sessionAgentId,
+                      }),
+                      sessionId: activeSessionId,
+                      sessionKey: params.sessionKey,
+                      config: params.config,
+                    });
+                    if (truncResult.truncated) {
+                      log.info(
+                        `[context-overflow-precheck] post-compaction tool-result truncation succeeded for ` +
+                          `${provider}/${modelId}; truncated ${truncResult.truncatedCount} tool result(s)`,
+                      );
+                    } else {
+                      log.warn(
+                        `[context-overflow-precheck] post-compaction tool-result truncation did not help for ` +
+                          `${provider}/${modelId}: ${truncResult.reason ?? "unknown"}`,
+                      );
+                    }
+                  }
+                  autoCompactionCount += 1;
+                  log.info(`auto-compaction succeeded for ${provider}/${modelId}; retrying prompt`);
+                  postCompactionGuard.armPostCompaction();
+                  if (preflightRecovery?.source === "mid-turn") {
+                    continueFromCurrentTranscript();
+                  } else if (
+                    params.currentMessageId !== undefined &&
+                    params.currentMessageId === lastPersistedCurrentMessageId
+                  ) {
+                    // The first attempt reached Pi far enough to persist this user turn.
+                    // Retrying the original prompt would replay it, so resume from the
+                    // compacted transcript and suppress the next user append.
+                    nextAttemptPromptOverride = MID_TURN_PRECHECK_CONTINUATION_PROMPT;
+                    suppressNextUserMessagePersistence = true;
+                  }
+                  continue;
+                }
                 log.warn(
-                  `contextEngine.compact() threw during overflow recovery for ${provider}/${modelId}: ${String(compactErr)}`,
+                  `auto-compaction failed for ${provider}/${modelId}: ${compactResult.reason ?? "nothing to compact"}`,
                 );
-                compactResult = {
-                  ok: false,
-                  compacted: false,
-                  reason: String(compactErr),
-                };
               }
-              await runOwnsCompactionAfterHook("overflow recovery", compactResult);
-              if (compactResult.compacted) {
-                adoptCompactionTranscript(compactResult);
-                if (
-                  typeof compactResult.result?.tokensAfter === "number" &&
-                  Number.isFinite(compactResult.result.tokensAfter) &&
-                  compactResult.result.tokensAfter > 0
-                ) {
-                  lastCompactionTokensAfter = Math.floor(compactResult.result.tokensAfter);
-                }
-                if (preflightRecovery?.route === "compact_then_truncate") {
+              if (!toolResultTruncationAttempted) {
+                const contextWindowTokens = ctxInfo.tokens;
+                const toolResultMaxChars = resolveLiveToolResultMaxChars({
+                  contextWindowTokens,
+                  cfg: params.config,
+                  agentId: sessionAgentId,
+                });
+                const hasOversized = attempt.messagesSnapshot
+                  ? sessionLikelyHasOversizedToolResults({
+                      messages: attempt.messagesSnapshot,
+                      contextWindowTokens,
+                      maxCharsOverride: toolResultMaxChars,
+                    })
+                  : false;
+
+                if (hasOversized) {
+                  toolResultTruncationAttempted = true;
+                  log.warn(
+                    `[context-overflow-recovery] Attempting tool result truncation for ${provider}/${modelId} ` +
+                      `(contextWindow=${contextWindowTokens} tokens)`,
+                  );
                   const truncResult = await truncateOversizedToolResultsInSession({
                     sessionFile: activeSessionFile,
-                    contextWindowTokens: ctxInfo.tokens,
-                    maxCharsOverride: resolveLiveToolResultMaxChars({
-                      contextWindowTokens: ctxInfo.tokens,
-                      cfg: params.config,
-                      agentId: sessionAgentId,
-                    }),
+                    contextWindowTokens,
+                    maxCharsOverride: toolResultMaxChars,
                     sessionId: activeSessionId,
                     sessionKey: params.sessionKey,
                     config: params.config,
                   });
                   if (truncResult.truncated) {
                     log.info(
-                      `[context-overflow-precheck] post-compaction tool-result truncation succeeded for ` +
-                        `${provider}/${modelId}; truncated ${truncResult.truncatedCount} tool result(s)`,
+                      `[context-overflow-recovery] Truncated ${truncResult.truncatedCount} tool result(s); retrying prompt`,
                     );
-                  } else {
-                    log.warn(
-                      `[context-overflow-precheck] post-compaction tool-result truncation did not help for ` +
-                        `${provider}/${modelId}: ${truncResult.reason ?? "unknown"}`,
-                    );
+                    if (preflightRecovery?.source === "mid-turn") {
+                      continueFromCurrentTranscript();
+                    }
+                    continue;
                   }
-                }
-                autoCompactionCount += 1;
-                log.info(`auto-compaction succeeded for ${provider}/${modelId}; retrying prompt`);
-                postCompactionGuard.armPostCompaction();
-                if (preflightRecovery?.source === "mid-turn") {
-                  continueFromCurrentTranscript();
-                } else if (
-                  params.currentMessageId !== undefined &&
-                  params.currentMessageId === lastPersistedCurrentMessageId
-                ) {
-                  // The first attempt reached Pi far enough to persist this user turn.
-                  // Retrying the original prompt would replay it, so resume from the
-                  // compacted transcript and suppress the next user append.
-                  nextAttemptPromptOverride = MID_TURN_PRECHECK_CONTINUATION_PROMPT;
-                  suppressNextUserMessagePersistence = true;
-                }
-                continue;
-              }
-              log.warn(
-                `auto-compaction failed for ${provider}/${modelId}: ${compactResult.reason ?? "nothing to compact"}`,
-              );
-            }
-            if (!toolResultTruncationAttempted) {
-              const contextWindowTokens = ctxInfo.tokens;
-              const toolResultMaxChars = resolveLiveToolResultMaxChars({
-                contextWindowTokens,
-                cfg: params.config,
-                agentId: sessionAgentId,
-              });
-              const hasOversized = attempt.messagesSnapshot
-                ? sessionLikelyHasOversizedToolResults({
-                    messages: attempt.messagesSnapshot,
-                    contextWindowTokens,
-                    maxCharsOverride: toolResultMaxChars,
-                  })
-                : false;
-
-              if (hasOversized) {
-                toolResultTruncationAttempted = true;
-                log.warn(
-                  `[context-overflow-recovery] Attempting tool result truncation for ${provider}/${modelId} ` +
-                    `(contextWindow=${contextWindowTokens} tokens)`,
-                );
-                const truncResult = await truncateOversizedToolResultsInSession({
-                  sessionFile: activeSessionFile,
-                  contextWindowTokens,
-                  maxCharsOverride: toolResultMaxChars,
-                  sessionId: activeSessionId,
-                  sessionKey: params.sessionKey,
-                  config: params.config,
-                });
-                if (truncResult.truncated) {
-                  log.info(
-                    `[context-overflow-recovery] Truncated ${truncResult.truncatedCount} tool result(s); retrying prompt`,
+                  log.warn(
+                    `[context-overflow-recovery] Tool result truncation did not help: ${truncResult.reason ?? "unknown"}`,
                   );
-                  if (preflightRecovery?.source === "mid-turn") {
-                    continueFromCurrentTranscript();
-                  }
-                  continue;
                 }
-                log.warn(
-                  `[context-overflow-recovery] Tool result truncation did not help: ${truncResult.reason ?? "unknown"}`,
+              }
+              if (
+                (isCompactionFailure ||
+                  overflowCompactionAttempts >= MAX_OVERFLOW_COMPACTION_ATTEMPTS) &&
+                log.isEnabled("debug")
+              ) {
+                log.debug(
+                  `[compaction-diag] decision diagId=${overflowDiagId} branch=give_up ` +
+                    `isCompactionFailure=${isCompactionFailure} hasOversizedToolResults=unknown ` +
+                    `attempt=${overflowCompactionAttempts} maxAttempts=${MAX_OVERFLOW_COMPACTION_ATTEMPTS}`,
                 );
               }
-            }
-            if (
-              (isCompactionFailure ||
-                overflowCompactionAttempts >= MAX_OVERFLOW_COMPACTION_ATTEMPTS) &&
-              log.isEnabled("debug")
-            ) {
-              log.debug(
-                `[compaction-diag] decision diagId=${overflowDiagId} branch=give_up ` +
-                  `isCompactionFailure=${isCompactionFailure} hasOversizedToolResults=unknown ` +
-                  `attempt=${overflowCompactionAttempts} maxAttempts=${MAX_OVERFLOW_COMPACTION_ATTEMPTS}`,
-              );
-            }
-            const kind = isCompactionFailure ? "compaction_failure" : "context_overflow";
-            attempt.setTerminalLifecycleMeta?.({
-              replayInvalid: resolveReplayInvalidForAttempt(),
-              livenessState: "blocked",
-            });
-            return {
-              payloads: [
-                {
-                  text:
-                    "Context overflow: prompt too large for the model. " +
-                    "Try /reset (or /new) to start a fresh session, or use a larger-context model.",
-                  isError: true,
-                },
-              ],
-              meta: {
-                durationMs: Date.now() - started,
-                agentMeta: buildErrorAgentMeta({
-                  sessionId: sessionIdUsed,
-                  sessionFile: activeSessionFile,
-                  provider,
-                  model: model.id,
-                  contextTokens: ctxInfo.tokens,
-                  usageAccumulator,
-                  lastRunPromptUsage,
-                  lastAssistant: sessionLastAssistant,
-                  lastTurnTotal,
-                }),
-                systemPromptReport: attempt.systemPromptReport,
-                finalPromptText: attempt.finalPromptText,
+              const kind = isCompactionFailure ? "compaction_failure" : "context_overflow";
+              attempt.setTerminalLifecycleMeta?.({
                 replayInvalid: resolveReplayInvalidForAttempt(),
                 livenessState: "blocked",
-                error: { kind, message: errorText },
-              },
-            };
+              });
+              return {
+                payloads: [
+                  {
+                    text:
+                      "Context overflow: prompt too large for the model. " +
+                      "Try /reset (or /new) to start a fresh session, or use a larger-context model.",
+                    isError: true,
+                  },
+                ],
+                meta: {
+                  durationMs: Date.now() - started,
+                  agentMeta: buildErrorAgentMeta({
+                    sessionId: sessionIdUsed,
+                    sessionFile: activeSessionFile,
+                    provider,
+                    model: model.id,
+                    contextTokens: ctxInfo.tokens,
+                    usageAccumulator,
+                    lastRunPromptUsage,
+                    lastAssistant: sessionLastAssistant,
+                    lastTurnTotal,
+                  }),
+                  systemPromptReport: attempt.systemPromptReport,
+                  finalPromptText: attempt.finalPromptText,
+                  replayInvalid: resolveReplayInvalidForAttempt(),
+                  livenessState: "blocked",
+                  error: { kind, message: errorText },
+                },
+              };
+            } // end agent-mode else branch (FORK)
           }
 
           if (promptErrorSource === "hook:before_agent_run" && !aborted) {
