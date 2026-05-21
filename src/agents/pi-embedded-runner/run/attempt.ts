@@ -1489,6 +1489,17 @@ export async function runEmbeddedAttempt(
                 }
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 live.agent.state.messages = messages as any;
+                // FORK: Reset prePromptMessageCount to the new array length so
+                // findCurrentAttemptAssistantMessage's slice(prePromptMessageCount)
+                // doesn't run past the end. The captured value was the *pre-
+                // compaction* length (e.g. 199); after the in-memory rebuild,
+                // the array is much shorter (e.g. 30), making slice(199) return
+                // []. That caused lastCallUsage to come back undefined, which
+                // hits the stale-usage branch in persistSessionUsageUpdate and
+                // (with preserveFreshTotalTokensOnStaleUsage=true) preserves
+                // the pre-compaction totalTokens forever. Dashboard then shows
+                // 96% even though context is fresh after compaction.
+                prePromptMessageCount = messages.length;
               } catch (err) {
                 log.warn(`compact: failed to refresh agent.state.messages: ${String(err)}`);
               }
