@@ -103,6 +103,13 @@ export function createCompactTool(options: {
    * SDK persists the toolResult.
    */
   withSessionWriteLock?: <T>(run: () => Promise<T> | T) => Promise<T>;
+  /**
+   * FORK (test-only): override the SDK prepareCompaction loader. Production
+   * paths use the dynamic import above; vitest cannot intercept the file://
+   * URL load, so tests inject the implementation directly.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  prepareCompactionOverride?: (pathEntries: any[], settings: any) => any;
 }): AnyAgentTool | null {
   const cfg = options.config;
   const mode = cfg?.agents?.defaults?.compaction?.mode;
@@ -122,13 +129,13 @@ export function createCompactTool(options: {
     parameters: CompactToolSchema,
     async execute(toolCallId, params) {
       await initCompactPromise;
-      if (!prepareCompaction) {
+      const prep = options.prepareCompactionOverride ?? prepareCompaction;
+      if (!prep) {
         return {
           content: [{ type: "text", text: "Error: compaction module not available." }],
           details: undefined,
         };
       }
-      const prep = prepareCompaction;
       const summary = (params as { summary?: string }).summary?.trim();
       if (!summary) {
         return {
