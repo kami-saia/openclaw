@@ -313,7 +313,12 @@ export function createOpenClawTools(
         senderIsOwner: options?.senderIsOwner,
       });
   const compactTool = createCompactTool({
-    sessionKey: options?.agentSessionKey,
+    // FORK: prefer the live run session key over the sandbox/policy key.
+    // Telegram-direct peer keys (agent:main:telegram:default:direct:<id>) come
+    // through as `agentSessionKey` but the actual session file is stored under
+    // the routed key (e.g. agent:main:main). compact-tool needs the routed key
+    // to look up the store entry and resolve the session file path.
+    sessionKey: options?.runSessionKey ?? options?.agentSessionKey,
     config: options?.config,
     workspaceDir,
     getSessionManager: options?.getSessionManager,
