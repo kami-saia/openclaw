@@ -245,6 +245,18 @@ export function createCompactTool(options: {
           storePath,
         });
 
+        // FORK: invalidate cached totalTokens so the next pressure check
+        // doesn't re-fire the same recommendation against pre-compaction
+        // state. agent-runner.ts does this for auto-compaction, but the
+        // agent-tool path also needs it — otherwise the API-reported
+        // totalTokens stays stale until the next assistant turn refreshes
+        // lastCallUsage, and pressure signals can re-fire within seconds.
+        if (entry) {
+          const e = entry as Record<string, unknown>;
+          e.totalTokensFresh = false;
+          delete e.totalTokens;
+        }
+
         // Append to daily memory file
         const nowMs = Date.now();
         const timezone = resolveUserTimezone(cfg?.agents?.defaults?.userTimezone);
