@@ -7,7 +7,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { createServer as createNetServer } from "node:net";
+import { createConnection as createNetConnection, createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -65,6 +65,7 @@ import {
   resolveRequestedSuites,
   resolveRunnerMatrix,
   resolveStaticFileContentType,
+  startStaticFileServer,
   shouldExerciseManagedGatewayLifecycleAfterInstall,
   shouldRunPackagedUpgradeStatusProbe,
   shouldRunWindowsInstalledBrowserOverrideImportSmoke,
@@ -370,6 +371,16 @@ describe("scripts/openclaw-cross-os-release-checks", () => {
     ]);
   });
 
+  it("keeps the Windows packaged-upgrade fallback install out of npm lifecycle scripts", () => {
+    const source = readFileSync("scripts/openclaw-cross-os-release-checks.ts", "utf8");
+    const fallbackInstallSource = source.slice(
+      source.indexOf('runTimedLanePhase(lane, "update-fallback-install"'),
+      source.indexOf('runTimedLanePhase(lane, "update-status"'),
+    );
+
+    expect(fallbackInstallSource).toContain("ignoreScripts: true");
+  });
+
   it("keeps packaged-upgrade release updates out of service restart flow", () => {
     const args = buildPackagedUpgradeUpdateArgs("http://127.0.0.1:49152/openclaw-current.tgz");
     expect(args.slice(0, 6)).toEqual([
@@ -657,6 +668,76 @@ describe("scripts/openclaw-cross-os-release-checks", () => {
     expect(resolveStaticFileContentType("scripts/install.sh")).toBe("text/plain; charset=utf-8");
     expect(resolveStaticFileContentType("scripts/install.ps1")).toBe("text/plain; charset=utf-8");
     expect(resolveStaticFileContentType("openclaw-2026.4.14.tgz")).toBe("application/octet-stream");
+  });
+
+  it("streams release artifacts from the static file server", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "openclaw-cross-os-static-server-"));
+    const filePath = join(dir, "openclaw-2026.4.14.tgz");
+    const logPath = join(dir, "server.log");
+    let server: Awaited<ReturnType<typeof startStaticFileServer>> | undefined;
+
+    try {
+      const payload = Buffer.from(`artifact-head\n${"x".repeat(1024 * 1024)}\nartifact-tail`);
+      writeFileSync(filePath, payload);
+
+      server = await startStaticFileServer({ filePath, logPath });
+      const response = await fetch(server.url);
+      const body = Buffer.from(await response.arrayBuffer());
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-length")).toBe(String(payload.length));
+      expect(response.headers.get("content-type")).toBe("application/octet-stream");
+      expect(body.equals(payload)).toBe(true);
+      expect(readFileSync(logPath, "utf8")).toContain(`GET /${filePath.split(/[/\\]/u).at(-1)}`);
+    } finally {
+      await server?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("closes static release artifact sockets left by aborted clients", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "openclaw-cross-os-static-server-close-"));
+    const filePath = join(dir, "openclaw-2026.4.14.tgz");
+    const logPath = join(dir, "server.log");
+    let server: Awaited<ReturnType<typeof startStaticFileServer>> | undefined;
+
+    try {
+      writeFileSync(filePath, Buffer.alloc(1024 * 1024, "x"));
+      server = await startStaticFileServer({ filePath, logPath });
+      const url = new URL(server.url);
+      const socket = createNetConnection(Number(url.port), url.hostname);
+      await new Promise<void>((resolve, reject) => {
+        socket.once("connect", resolve);
+        socket.once("error", reject);
+      });
+      socket.write(`GET ${url.pathname} HTTP/1.1\r\nHost: ${url.host}\r\n\r\n`);
+      await Promise.race([
+        server.close(),
+        delay(1_000).then(() => {
+          throw new Error("close timed out");
+        }),
+      ]);
+      await Promise.race([
+        new Promise<void>((resolve) => socket.once("close", resolve)),
+        delay(1_000).then(() => {
+          throw new Error("socket close timed out");
+        }),
+      ]);
+    } finally {
+      await server?.close().catch(() => {});
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not preload static release artifacts before serving them", () => {
+    const source = readFileSync("scripts/openclaw-cross-os-release-checks.ts", "utf8");
+    const serverSource = source.slice(
+      source.indexOf("export async function startStaticFileServer"),
+      source.indexOf("export function resolveStaticFileContentType"),
+    );
+
+    expect(serverSource).toContain("createReadStream(params.filePath)");
+    expect(serverSource).not.toContain("readFileSync(params.filePath)");
   });
 
   it("uses the published installer URLs for native installer lanes", () => {

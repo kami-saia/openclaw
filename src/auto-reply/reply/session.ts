@@ -148,7 +148,9 @@ function resolveStaleSessionEndReason(params: {
   freshness?: SessionFreshness;
 }): ReplySessionEndReason | undefined {
   const stale = params.freshness?.staleReason;
-  if (!params.entry || !stale || stale === "never") return undefined;
+  if (!params.entry || !stale || stale === "never") {
+    return undefined;
+  }
   return stale;
 }
 
@@ -812,6 +814,10 @@ export async function initSessionState(params: {
     // Clear stale context hash so the first flush in the new session is not
     // incorrectly skipped due to a hash match with the old transcript (#30115).
     sessionEntry.memoryFlushContextHash = undefined;
+    sessionEntry.startedAt = undefined;
+    sessionEntry.endedAt = undefined;
+    sessionEntry.runtimeMs = undefined;
+    sessionEntry.status = undefined;
     // Clear stale token metrics from previous session so /status doesn't
     // display the old session's context usage after /new or /reset.
     sessionEntry.totalTokens = undefined;

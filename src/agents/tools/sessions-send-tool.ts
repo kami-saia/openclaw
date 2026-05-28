@@ -1,10 +1,16 @@
 import crypto from "node:crypto";
 import { Type } from "typebox";
 import { parseSessionThreadInfoFast } from "../../config/sessions/thread-info.js";
+import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { callGateway } from "../../gateway/call.js";
 import { formatErrorMessage } from "../../infra/errors.js";
-import { normalizeAgentId, resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
+import {
+  isSubagentSessionKey,
+  normalizeAgentId,
+  resolveAgentIdFromSessionKey,
+  toAgentStoreSessionKey,
+} from "../../routing/session-key.js";
 import { annotateInterSessionPromptText } from "../../sessions/input-provenance.js";
 import { SESSION_LABEL_MAX_LENGTH } from "../../sessions/session-label.js";
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
@@ -12,6 +18,7 @@ import {
   type GatewayMessageChannel,
   INTERNAL_MESSAGE_CHANNEL,
 } from "../../utils/message-channel.js";
+import { listAgentIds } from "../agent-scope.js";
 import { resolveNestedAgentLaneForSession } from "../lanes.js";
 import type { EmbeddedPiQueueMessageOptions } from "../pi-embedded-runner/run-state.js";
 import {
@@ -19,6 +26,7 @@ import {
   queueEmbeddedPiMessageWithOutcomeAsync,
   resolveActiveEmbeddedRunSessionId,
 } from "../pi-embedded-runner/runs.js";
+import { type AgentWaitResult } from "../run-wait.js";
 import {
   describeSessionsSendTool,
   SESSIONS_SEND_TOOL_DISPLAY_SUMMARY,
@@ -53,6 +61,107 @@ type GatewayCaller = typeof callGateway;
 function resolveRunScopedFallbackSessionKey(sessionKey: string): string | undefined {
   const match = /^(agent:[^:]+:.+):run:[^:]+$/.exec(sessionKey.trim());
   return match?.[1];
+}
+
+function resolveConfiguredAgentMainSessionKey(params: {
+  cfg: OpenClawConfig;
+  agentId: string;
+  mainKey: string;
+}): string | undefined {
+  const agentId = normalizeAgentId(params.agentId);
+  if (!listAgentIds(params.cfg).includes(agentId)) {
+    return undefined;
+  }
+  return toAgentStoreSessionKey({
+    agentId,
+    requestKey: "main",
+    mainKey: params.mainKey,
+  });
+}
+
+function isConfiguredAgentMainSessionKey(params: {
+  cfg: OpenClawConfig;
+  sessionKey: string;
+  mainKey: string;
+}): boolean {
+  const agentId = resolveAgentIdFromSessionKey(params.sessionKey);
+  return (
+    params.sessionKey ===
+    resolveConfiguredAgentMainSessionKey({
+      cfg: params.cfg,
+      agentId,
+      mainKey: params.mainKey,
+    })
+  );
+}
+
+async function ensureConfiguredAgentMainSession(params: {
+  cfg: OpenClawConfig;
+  callGateway: GatewayCaller;
+  sessionKey: string;
+  mainKey: string;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (
+    !isConfiguredAgentMainSessionKey({
+      cfg: params.cfg,
+      sessionKey: params.sessionKey,
+      mainKey: params.mainKey,
+    })
+  ) {
+    return { ok: true };
+  }
+
+  try {
+    await params.callGateway({
+      method: "sessions.resolve",
+      params: { key: params.sessionKey },
+      timeoutMs: 10_000,
+    });
+    return { ok: true };
+  } catch {
+    try {
+      await params.callGateway({
+        method: "sessions.create",
+        params: {
+          key: params.sessionKey,
+          agentId: resolveAgentIdFromSessionKey(params.sessionKey),
+        },
+        timeoutMs: 10_000,
+      });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: formatErrorMessage(err) };
+    }
+  }
+}
+
+type SessionsSendRouteEntry = Pick<SessionEntry, "acp" | "parentSessionKey" | "spawnedBy">;
+
+function isRequesterParentOfNativeSubagentSession(params: {
+  entry: SessionsSendRouteEntry | null | undefined;
+  requesterSessionKey: string | null | undefined;
+  targetSessionKey: string;
+}): boolean {
+  if (!params.entry || params.entry.acp || !isSubagentSessionKey(params.targetSessionKey)) {
+    return false;
+  }
+  const requester = normalizeOptionalString(params.requesterSessionKey);
+  if (!requester) {
+    return false;
+  }
+  const spawnedBy = normalizeOptionalString(params.entry.spawnedBy);
+  const parentSessionKey = normalizeOptionalString(params.entry.parentSessionKey);
+  return requester === spawnedBy || requester === parentSessionKey;
+}
+
+function isTerminalAgentWaitTimeout(result: AgentWaitResult): boolean {
+  return result.endedAt !== undefined || Boolean(result.stopReason || result.livenessState);
+}
+
+function isPendingErrorAgentWaitTimeout(result: AgentWaitResult): boolean {
+  return (
+    result.pendingError === true && typeof result.error === "string" && result.error.trim() !== ""
+  );
 }
 
 async function startAgentRun(params: {

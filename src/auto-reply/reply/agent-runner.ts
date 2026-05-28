@@ -2172,6 +2172,8 @@ export async function runReplyAgent(params: {
         await updateSessionStoreEntry({
           storePath,
           sessionKey,
+          skipMaintenance: true,
+          takeCacheOwnership: true,
           update: async () => ({
             pendingFinalDelivery: true,
             pendingFinalDeliveryText: resolvedPendingText,
