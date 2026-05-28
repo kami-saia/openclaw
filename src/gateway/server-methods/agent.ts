@@ -1621,7 +1621,7 @@ export const agentHandlers: GatewayRequestHandlers = {
             previousSessionId,
             previousSessionFile: previousSessionId ? entry?.sessionFile : undefined,
             previousEndReason: previousSessionId
-              ? (freshness?.staleReason ??
+              ? (((reason) => (reason === "never" ? undefined : reason))(freshness?.staleReason) ??
                 (usableRequestedSessionId && entry?.sessionId !== usableRequestedSessionId
                   ? "new"
                   : "unknown"))

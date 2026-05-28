@@ -1537,6 +1537,9 @@ export async function runEmbeddedAttempt(
       });
     };
     const corePluginToolStages = createEmbeddedRunStageTracker();
+    // FORK: hoisted out of the try-block below so the compact callback closure
+    // in createOpenClawCodingTools (built before the try) can reach it.
+    let prePromptMessageCount = 0;
     const toolsAllowWithForcedRuntimeTools = mergeForcedEmbeddedAttemptToolsAllow(
       params.toolsAllow,
       {
@@ -2709,7 +2712,7 @@ export async function runEmbeddedAttempt(
         activeSession.agent.convertToLlm = async (messages) =>
           await baseConvertToLlm(normalizeMessagesForLlmBoundary(messages));
       }
-      let prePromptMessageCount = activeSession.messages.length;
+      prePromptMessageCount = activeSession.messages.length;
       let contextEngineAfterTurnCheckpoint: number | null = null;
       let unwindowedContextEngineMessagesForPrecheck: AgentMessage[] | undefined;
       let contextEnginePromptAuthority: NonNullable<AssembleResult["promptAuthority"]> =

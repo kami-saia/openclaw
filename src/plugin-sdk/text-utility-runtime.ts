@@ -8,7 +8,6 @@ export {
   displayPath,
   displayString,
   ensureDir,
-  escapeRegExp,
   normalizeE164,
   pathExists,
   resolveConfigDir,
@@ -21,5 +20,6 @@ export {
   sliceUtf16Safe,
   truncateUtf16Safe,
 } from "../utils.js";
+export { escapeRegExp } from "../shared/regexp.js";
 export { fetchWithTimeout } from "../utils/fetch-timeout.js";
 export { withTimeout } from "../utils/with-timeout.js";

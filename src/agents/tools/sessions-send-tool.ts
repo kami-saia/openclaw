@@ -13,6 +13,12 @@ import {
   INTERNAL_MESSAGE_CHANNEL,
 } from "../../utils/message-channel.js";
 import { resolveNestedAgentLaneForSession } from "../lanes.js";
+import type { EmbeddedPiQueueMessageOptions } from "../pi-embedded-runner/run-state.js";
+import {
+  formatEmbeddedPiQueueFailureSummary,
+  queueEmbeddedPiMessageWithOutcomeAsync,
+  resolveActiveEmbeddedRunSessionId,
+} from "../pi-embedded-runner/runs.js";
 import {
   describeSessionsSendTool,
   SESSIONS_SEND_TOOL_DISPLAY_SUMMARY,
@@ -39,6 +45,15 @@ const SessionsSendToolSchema = Type.Object({
 });
 
 type GatewayCaller = typeof callGateway;
+
+// FORK: upstream lifts this into a top-level helper inside the renamed
+// embedded-agent-runner subtree; we keep pi-embedded-runner names and inline
+// the helper so the active-run queue fallback can resolve the parent session
+// key from a run-scoped key.
+function resolveRunScopedFallbackSessionKey(sessionKey: string): string | undefined {
+  const match = /^(agent:[^:]+:.+):run:[^:]+$/.exec(sessionKey.trim());
+  return match?.[1];
+}
 
 async function startAgentRun(params: {
   callGateway: GatewayCaller;
@@ -292,6 +307,12 @@ export function createSessionsSendTool(opts?: {
       }
       const resolvedKey = visibleSession.key;
       const displayKey = visibleSession.displayKey;
+      const timeoutSeconds =
+        typeof params.timeoutSeconds === "number" && Number.isFinite(params.timeoutSeconds)
+          ? Math.max(0, Math.floor(params.timeoutSeconds))
+          : 30;
+      const timeoutMs = timeoutSeconds * 1000;
+      const announceTimeoutMs = timeoutSeconds === 0 ? 30_000 : timeoutMs;
       const idempotencyKey = crypto.randomUUID();
       let runId: string = idempotencyKey;
       if (parseSessionThreadInfoFast(resolvedKey).threadId) {

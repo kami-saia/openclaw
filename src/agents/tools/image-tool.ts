@@ -32,7 +32,6 @@ import type { ProviderRuntimeModel } from "../../plugins/provider-runtime-model.
 import { resolveUserPath } from "../../utils.js";
 import type { AuthProfileStore } from "../auth-profiles/types.js";
 import { isMinimaxVlmProvider } from "../minimax-vlm.js";
-import { sanitizeToolResultImages } from "../tool-images.js";
 import {
   resolveImageFallbackCandidates,
   resolveImageFallbackDefaultProvider,
@@ -42,6 +41,7 @@ import {
   bundledStaticCatalogProviderUsesRuntimeAugment,
   resolveBundledStaticCatalogModel,
 } from "../pi-embedded-runner/model.static-catalog.js";
+import { sanitizeToolResultImages } from "../tool-images.js";
 import {
   coerceImageAssistantText,
   coerceImageModelConfig,
@@ -791,7 +791,7 @@ export function createImageTool(options?: {
         };
       }
 
-      const { prompt: promptRaw, modelOverride: _modelOverride } = resolvePromptAndModelOverride(
+      const { prompt: promptRaw, modelOverride } = resolvePromptAndModelOverride(
         record,
         DEFAULT_PROMPT,
       );

@@ -147,7 +147,9 @@ function resolveStaleSessionEndReason(params: {
   entry: SessionEntry | undefined;
   freshness?: SessionFreshness;
 }): ReplySessionEndReason | undefined {
-  return params.entry ? params.freshness?.staleReason : undefined;
+  const stale = params.freshness?.staleReason;
+  if (!params.entry || !stale || stale === "never") return undefined;
+  return stale;
 }
 
 function hasProviderOwnedSession(entry: SessionEntry | undefined): boolean {
@@ -650,7 +652,7 @@ export async function initSessionState(params: {
       const oldRoute = `${priorChannel}${priorTo ? `:${priorTo}` : ""}`;
       enqueueSystemEvent(
         `[delivery_context_changed: route=${newRoute} previous=${oldRoute}. Plain replies now go to ${newRoute}; use the \`message\` tool to send elsewhere. The next user reply will flip routing back.]`,
-        { sessionKey, trusted: true },
+        { sessionKey },
       );
     }
   }
