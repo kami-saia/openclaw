@@ -274,7 +274,20 @@ export function createReplyOperation(params: {
 
   if (params.upstreamAbortSignal) {
     if (params.upstreamAbortSignal.aborted) {
-      abortInternally(params.upstreamAbortSignal.reason);
+      // A reply operation only ever exists because a fresh inbound action
+      // demanded one (new user message, queued follow-up, restart-triggered
+      // re-run). If the upstream signal is already aborted at construction
+      // time, that abort belongs to a previous lifecycle (e.g. a long-lived
+      // channel runtime signal whose AbortController was tripped by an earlier
+      // turn that died silently). Inheriting that stale aborted state would
+      // kill the new run instantly before the upstream LLM call is even
+      // dispatched, which is the bug we're guarding against. Do NOT inherit a
+      // pre-aborted upstream signal; subsequent live aborts on it would
+      // require a non-aborted signal anyway, so there is nothing useful to
+      // forward here.
+      //
+      // NOTE: This is deliberately one-sided. We still wire live aborts when
+      // the signal becomes aborted *after* the operation is created.
     } else {
       params.upstreamAbortSignal.addEventListener(
         "abort",

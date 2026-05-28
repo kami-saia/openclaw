@@ -196,4 +196,44 @@ describe("reply run registry", () => {
     expect(compactingOperation.result).toEqual({ kind: "aborted", code: "aborted_for_restart" });
     expect(runningOperation.result).toBeNull();
   });
+
+  it("ignores a pre-aborted upstream signal so new turns are not born aborted", () => {
+    // Simulates a long-lived channel-runtime AbortSignal whose controller was
+    // tripped by an earlier turn that died silently. A fresh inbound message
+    // creates a new reply operation; that operation must NOT inherit the
+    // already-aborted state, otherwise the upstream LLM call is killed
+    // before it is dispatched (symptom: stopReason=aborted, usage all zeros,
+    // error "This operation was aborted | This operation was aborted").
+    const staleController = new AbortController();
+    staleController.abort(new Error("prior turn died"));
+    expect(staleController.signal.aborted).toBe(true);
+
+    const operation = createReplyOperation({
+      sessionKey: "agent:main:main",
+      sessionId: "session-fresh",
+      resetTriggered: false,
+      upstreamAbortSignal: staleController.signal,
+    });
+
+    expect(operation.abortSignal.aborted).toBe(false);
+    expect(operation.result).toBeNull();
+
+    operation.complete();
+  });
+
+  it("still forwards live aborts on a healthy upstream signal", () => {
+    const upstream = new AbortController();
+    const operation = createReplyOperation({
+      sessionKey: "agent:main:main",
+      sessionId: "session-live",
+      resetTriggered: false,
+      upstreamAbortSignal: upstream.signal,
+    });
+
+    expect(operation.abortSignal.aborted).toBe(false);
+    upstream.abort(new Error("user requested stop mid-run"));
+    expect(operation.abortSignal.aborted).toBe(true);
+
+    operation.complete();
+  });
 });

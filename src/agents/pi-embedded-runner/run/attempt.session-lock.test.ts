@@ -156,7 +156,7 @@ describe("embedded attempt session lock lifecycle", () => {
     expect(events).toEqual(["acquire-1", "release", "events-drained", "acquire-2", "release"]);
   });
 
-  it("rejects post-prompt writes when another owner advances the session file", async () => {
+  it("accepts pure appends from concurrent legitimate writers during the released window", async () => {
     const sessionFile = await createTempSessionFile();
     const release = vi.fn(async () => {});
     const acquireSessionWriteLock = vi.fn(async () => ({ release }));
@@ -166,7 +166,90 @@ describe("embedded attempt session lock lifecycle", () => {
     });
 
     await controller.releaseForPrompt();
-    await fs.appendFile(sessionFile, '{"type":"message","id":"takeover"}\n', "utf8");
+    // Simulate an outbound delivery-mirror append that takes the same write
+    // lock cleanly during the released window: only adds new bytes at the
+    // end of the file, never modifies existing content.
+    await fs.appendFile(
+      sessionFile,
+      '{"type":"message","id":"mirror","message":{"model":"delivery-mirror"}}\n',
+      "utf8",
+    );
+
+    await expect(controller.withSessionWriteLock(() => "post-mirror")).resolves.toBe("post-mirror");
+    expect(controller.hasSessionTakeover()).toBe(false);
+
+    const cleanupLock = await controller.acquireForCleanup();
+    await cleanupLock.release();
+  });
+
+  it("still detects takeovers when existing bytes are rewritten in place", async () => {
+    const sessionFile = await createTempSessionFile();
+    // Pre-fill with enough bytes so an in-place edit at the start is observable
+    // even when total size is preserved.
+    const padding = `${"x".repeat(64)}\n`;
+    await fs.appendFile(sessionFile, padding, "utf8");
+    const release = vi.fn(async () => {});
+    const acquireSessionWriteLock = vi.fn(async () => ({ release }));
+    const controller = await createEmbeddedAttemptSessionLockController({
+      acquireSessionWriteLock,
+      lockOptions: { ...lockOptions, sessionFile },
+    });
+
+    await controller.releaseForPrompt();
+    // Rewrite the file in place with content of identical size: the
+    // stat-based fingerprint may match on size but the tail digest must catch
+    // the bytewise change.
+    const buffer = await fs.readFile(sessionFile);
+    const tampered = Buffer.from(buffer);
+    tampered[0] = tampered[0] === 0x7b ? 0x7d : 0x7b; // flip '{' <-> '}'
+    await fs.writeFile(sessionFile, tampered);
+
+    await expect(controller.withSessionWriteLock(() => "late-write")).rejects.toBeInstanceOf(
+      EmbeddedAttemptSessionTakeoverError,
+    );
+    expect(controller.hasSessionTakeover()).toBe(true);
+
+    const cleanupLock = await controller.acquireForCleanup();
+    await cleanupLock.release();
+  });
+
+  it("still detects takeovers when the session file inode is replaced", async () => {
+    const sessionFile = await createTempSessionFile();
+    const release = vi.fn(async () => {});
+    const acquireSessionWriteLock = vi.fn(async () => ({ release }));
+    const controller = await createEmbeddedAttemptSessionLockController({
+      acquireSessionWriteLock,
+      lockOptions: { ...lockOptions, sessionFile },
+    });
+
+    await controller.releaseForPrompt();
+    // Replace the file (new inode) rather than append. Write *different* bytes
+    // so the inode-replace truly tampers with what the prior fingerprint saw.
+    await fs.rm(sessionFile);
+    await fs.writeFile(sessionFile, '{"type":"hostile-replacement"}\n', "utf8");
+
+    await expect(controller.withSessionWriteLock(() => "late-write")).rejects.toBeInstanceOf(
+      EmbeddedAttemptSessionTakeoverError,
+    );
+    expect(controller.hasSessionTakeover()).toBe(true);
+
+    const cleanupLock = await controller.acquireForCleanup();
+    await cleanupLock.release();
+  });
+
+  it("rejects post-prompt writes when another owner truncates the session file", async () => {
+    const sessionFile = await createTempSessionFile();
+    const release = vi.fn(async () => {});
+    const acquireSessionWriteLock = vi.fn(async () => ({ release }));
+    const controller = await createEmbeddedAttemptSessionLockController({
+      acquireSessionWriteLock,
+      lockOptions: { ...lockOptions, sessionFile },
+    });
+
+    await controller.releaseForPrompt();
+    // Truncate the file so it shrinks below the original size: this is not a
+    // legitimate append and must be treated as a takeover.
+    await fs.writeFile(sessionFile, "", "utf8");
 
     await expect(controller.withSessionWriteLock(() => "late-write")).rejects.toBeInstanceOf(
       EmbeddedAttemptSessionTakeoverError,

@@ -1,7 +1,15 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { isSessionWriteLockTimeoutError } from "../../session-write-lock-error.js";
 import type { acquireSessionWriteLock } from "../../session-write-lock.js";
+
+// Maximum number of bytes of the original file tail we hash for the append-only
+// fence verification. 4 KiB is large enough to catch any in-place edit that
+// rewrites the trailing line of a JSONL transcript (assistant messages, even
+// large delivery-mirror entries, easily fit), and small enough that the read
+// is negligible compared with the surrounding I/O work.
+const SESSION_FENCE_TAIL_BYTES = 4096;
 
 type SessionLock = Awaited<ReturnType<typeof acquireSessionWriteLock>>;
 type AcquireSessionWriteLock = typeof acquireSessionWriteLock;
@@ -106,6 +114,10 @@ type SessionFileFingerprint =
       size: bigint;
       mtimeNs: bigint;
       ctimeNs: bigint;
+      /** SHA-256 of the trailing SESSION_FENCE_TAIL_BYTES of the file at fence time. */
+      tailDigest: string;
+      /** Number of bytes the tailDigest actually covers (<= size). */
+      tailLength: bigint;
     };
 
 function sameSessionFileFingerprint(
@@ -123,13 +135,124 @@ function sameSessionFileFingerprint(
     left.ino === right.ino &&
     left.size === right.size &&
     left.mtimeNs === right.mtimeNs &&
-    left.ctimeNs === right.ctimeNs
+    left.ctimeNs === right.ctimeNs &&
+    left.tailDigest === right.tailDigest &&
+    left.tailLength === right.tailLength
   );
+}
+
+/**
+ * Returns true when `current` looks like a pure append of new bytes to the
+ * file described by `prior`: same dev/ino, size grew (or stayed equal), and
+ * the bytes that used to live at the tail of the file are still byte-for-byte
+ * intact at the same offsets.
+ *
+ * The gateway's own outbound delivery path (`appendAssistantMessageToSession
+ * Transcript` -> `appendSessionTranscriptMessage`) acquires the session write
+ * lock during the released window, appends a `delivery-mirror` assistant
+ * message, then releases the lock. That changes size/mtime/ctime but never
+ * touches existing bytes, so it must NOT be treated as a takeover.
+ */
+function isPureAppendExtension(
+  prior: SessionFileFingerprint | undefined,
+  current: SessionFileFingerprint,
+  currentTailOfPriorRegion: { digest: string; length: bigint } | undefined,
+): boolean {
+  if (!prior || !prior.exists || !current.exists) {
+    return false;
+  }
+  if (prior.dev !== current.dev || prior.ino !== current.ino) {
+    return false;
+  }
+  if (current.size < prior.size) {
+    return false;
+  }
+  if (!currentTailOfPriorRegion) {
+    return false;
+  }
+  // If the prior file had zero bytes there is nothing to verify -- any
+  // post-release state, including a freshly-recreated file at the same inode
+  // number (inode reuse after rm+create is common on Linux), would trivially
+  // satisfy a zero-length tail check. Force the strict fingerprint path in
+  // that case.
+  if (prior.tailLength === 0n) {
+    return false;
+  }
+  return (
+    currentTailOfPriorRegion.length === prior.tailLength &&
+    currentTailOfPriorRegion.digest === prior.tailDigest
+  );
+}
+
+async function readSessionFileTailDigest(
+  sessionFile: string,
+  size: bigint,
+): Promise<{ digest: string; length: bigint }> {
+  const tailLength =
+    size < BigInt(SESSION_FENCE_TAIL_BYTES) ? size : BigInt(SESSION_FENCE_TAIL_BYTES);
+  if (tailLength === 0n) {
+    return { digest: createHash("sha256").digest("hex"), length: 0n };
+  }
+  const handle = await fs.open(sessionFile, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(Number(tailLength));
+    const position = size - tailLength;
+    await handle.read(buffer, 0, buffer.length, Number(position));
+    return {
+      digest: createHash("sha256").update(buffer).digest("hex"),
+      length: tailLength,
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Hash the bytes of `sessionFile` from offset `(priorSize - priorTailLength)`
+ * for `priorTailLength` bytes. Used to verify that the bytes that previously
+ * formed the tail of the file are still intact after a size change.
+ */
+async function readSessionFileRegionDigest(
+  sessionFile: string,
+  priorSize: bigint,
+  priorTailLength: bigint,
+): Promise<{ digest: string; length: bigint } | undefined> {
+  if (priorTailLength === 0n) {
+    return { digest: createHash("sha256").digest("hex"), length: 0n };
+  }
+  if (priorSize < priorTailLength) {
+    return undefined;
+  }
+  const position = priorSize - priorTailLength;
+  let handle;
+  try {
+    handle = await fs.open(sessionFile, "r");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return undefined;
+    }
+    throw err;
+  }
+  try {
+    const length = Number(priorTailLength);
+    const buffer = Buffer.allocUnsafe(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, Number(position));
+    if (BigInt(bytesRead) !== priorTailLength) {
+      return undefined;
+    }
+    return {
+      digest: createHash("sha256").update(buffer).digest("hex"),
+      length: priorTailLength,
+    };
+  } finally {
+    await handle.close();
+  }
 }
 
 async function readSessionFileFingerprint(sessionFile: string): Promise<SessionFileFingerprint> {
   try {
     const stat = await fs.stat(sessionFile, { bigint: true });
+    const tail = await readSessionFileTailDigest(sessionFile, stat.size);
     return {
       exists: true,
       dev: stat.dev,
@@ -137,6 +260,8 @@ async function readSessionFileFingerprint(sessionFile: string): Promise<SessionF
       size: stat.size,
       mtimeNs: stat.mtimeNs,
       ctimeNs: stat.ctimeNs,
+      tailDigest: tail.digest,
+      tailLength: tail.length,
     };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
@@ -282,10 +407,30 @@ export async function createEmbeddedAttemptSessionLockController(params: {
       return;
     }
     const current = await readSessionFileFingerprint(params.lockOptions.sessionFile);
-    if (!sameSessionFileFingerprint(fenceFingerprint, current)) {
-      takeoverDetected = true;
-      throw new EmbeddedAttemptSessionTakeoverError(params.lockOptions.sessionFile);
+    if (sameSessionFileFingerprint(fenceFingerprint, current)) {
+      return;
     }
+    // The stat-level fingerprint differs. Before declaring a takeover, check
+    // whether the divergence is consistent with a pure append by another
+    // legitimate writer that held the session write lock cleanly during the
+    // released window (notably the outbound delivery-mirror path in
+    // `appendAssistantMessageToSessionTranscript`). If the file is the same
+    // inode, only grew, and the bytes that previously formed its tail are
+    // still intact at the same offsets, we accept the change and refresh the
+    // fence fingerprint forward.
+    if (fenceFingerprint?.exists && current.exists) {
+      const region = await readSessionFileRegionDigest(
+        params.lockOptions.sessionFile,
+        fenceFingerprint.size,
+        fenceFingerprint.tailLength,
+      );
+      if (isPureAppendExtension(fenceFingerprint, current, region)) {
+        fenceFingerprint = current;
+        return;
+      }
+    }
+    takeoverDetected = true;
+    throw new EmbeddedAttemptSessionTakeoverError(params.lockOptions.sessionFile);
   }
 
   async function refreshSessionFileFence(): Promise<void> {
@@ -338,6 +483,18 @@ export async function createEmbeddedAttemptSessionLockController(params: {
         await waitForSessionEventQueue(cleanupParams.session);
       }
       if (takeoverDetected) {
+        // Even though a takeover was detected, we may still be holding the
+        // initial lock acquired in the constructor (this happens when the
+        // attempt never reached `releaseForPrompt`, e.g. because the prompt
+        // was skipped due to an early abort or precheck error). Returning
+        // `noopLock` without releasing `heldLock` here is exactly the leak
+        // that left orphaned `.jsonl.lock` files held by the gateway PID
+        // until the 5-minute watchdog reclaimed them.
+        if (heldLock) {
+          const orphaned = heldLock;
+          heldLock = undefined;
+          return orphaned;
+        }
         return noopLock;
       }
       try {
