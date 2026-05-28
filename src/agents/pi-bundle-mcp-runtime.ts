@@ -265,11 +265,6 @@ export function createSessionMcpRuntime(params: {
     cfg: params.cfg,
     logDiagnostics: true,
   });
-  if (Object.keys(loaded.mcpServers).length === 0 && params.cfg?.mcp?.servers) {
-    logWarn(
-      `bundle-mcp: config has mcp.servers [${Object.keys(params.cfg.mcp.servers).join(", ")}] but loaded.mcpServers is empty — possible config resolution issue`,
-    );
-  }
   const createdAt = Date.now();
   let lastUsedAt = createdAt;
   let activeLeases = 0;
@@ -394,17 +389,7 @@ export function createSessionMcpRuntime(params: {
     try {
       const nextCatalog = await catalogInFlight;
       failIfDisposed();
-      // Only cache if all configured servers connected successfully.
-      // If some failed, leave catalog uncached so the next call retries.
-      const configuredCount = Object.keys(loaded.mcpServers).length;
-      const connectedCount = Object.keys(nextCatalog.servers).length;
-      if (connectedCount >= configuredCount) {
-        catalog = nextCatalog;
-      } else if (configuredCount > 0) {
-        logWarn(
-          `bundle-mcp: only ${connectedCount}/${configuredCount} servers connected; catalog will retry on next call`,
-        );
-      }
+      catalog = nextCatalog;
       return nextCatalog;
     } finally {
       catalogInFlight = undefined;
@@ -446,34 +431,10 @@ export function createSessionMcpRuntime(params: {
       if (!session) {
         throw new Error(`bundle-mcp server "${serverName}" is not connected`);
       }
-      try {
-        return (await session.client.callTool({
-          name: toolName,
-          arguments: isMcpConfigRecord(input) ? input : {},
-        })) as CallToolResult;
-      } catch (error) {
-        // If the call failed due to transport/connection issues (process died,
-        // pipe closed, etc.), invalidate the cached catalog and dispose the
-        // stale session so the next tool call reconnects automatically.
-        const msg = String(error);
-        const isTransportError =
-          msg.includes("Not connected") ||
-          msg.includes("closed") ||
-          msg.includes("EPIPE") ||
-          msg.includes("ECONNRESET") ||
-          msg.includes("ECONNREFUSED") ||
-          msg.includes("transport") ||
-          msg.includes("Connection was closed");
-        if (isTransportError && !disposed) {
-          logWarn(
-            `bundle-mcp: server "${serverName}" call failed with transport error, invalidating catalog for reconnect: ${redactErrorUrls(error)}`,
-          );
-          catalog = null;
-          await disposeSession(session).catch(() => {});
-          sessions.delete(serverName);
-        }
-        throw error;
-      }
+      return (await session.client.callTool({
+        name: toolName,
+        arguments: isMcpConfigRecord(input) ? input : {},
+      })) as CallToolResult;
     },
     async dispose() {
       if (disposed) {
@@ -497,18 +458,7 @@ function createSessionMcpRuntimeManager(
     idleSweepIntervalMs?: number;
   } = {},
 ): SessionMcpRuntimeManager {
-  // FORK (reference-counted shared runtimes):
-  // Multiple sessions sharing the same workspaceDir + configFingerprint share a
-  // single MCP runtime. This avoids spawning duplicate stdio processes and (for
-  // model-backed servers like TTS/Whisper) loading models multiple times.
-  //
-  //   runtimesByKey         : runtimeKey -> shared SessionMcpRuntime
-  //   runtimeKeyBySessionId : sessionId  -> runtimeKey (refcount, set membership)
-  //
-  // Upstream's per-session disposal/eviction APIs still work: when the LAST
-  // session referencing a shared runtime is removed, the runtime is disposed.
-  const runtimesByKey = new Map<string, SessionMcpRuntime>();
-  const runtimeKeyBySessionId = new Map<string, string>();
+  const runtimesBySessionId = new Map<string, SessionMcpRuntime>();
   const sessionIdBySessionKey = new Map<string, string>();
   const idleTtlMsBySessionId = new Map<string, number>();
   const createRuntime = opts.createRuntime ?? createSessionMcpRuntime;
@@ -533,49 +483,21 @@ function createSessionMcpRuntimeManager(
     }
   };
 
-  const sessionsForRuntimeKey = (runtimeKey: string): string[] => {
-    const result: string[] = [];
-    for (const [sessionId, key] of runtimeKeyBySessionId.entries()) {
-      if (key === runtimeKey) {
-        result.push(sessionId);
-      }
-    }
-    return result;
-  };
-
-  const minIdleTtlForRuntimeKey = (runtimeKey: string): number => {
-    const sessions = sessionsForRuntimeKey(runtimeKey);
-    if (sessions.length === 0) {
-      return DEFAULT_SESSION_MCP_RUNTIME_IDLE_TTL_MS;
-    }
-    let min = Number.POSITIVE_INFINITY;
-    for (const sessionId of sessions) {
-      const ttl = idleTtlMsBySessionId.get(sessionId) ?? DEFAULT_SESSION_MCP_RUNTIME_IDLE_TTL_MS;
-      if (ttl < min) {
-        min = ttl;
-      }
-    }
-    return Number.isFinite(min) ? min : DEFAULT_SESSION_MCP_RUNTIME_IDLE_TTL_MS;
-  };
-
   const sweepIdleRuntimes = async (): Promise<number> => {
     const nowMs = now();
     const expired: SessionMcpRuntime[] = [];
-    for (const [runtimeKey, runtime] of Array.from(runtimesByKey.entries())) {
-      const idleTtlMs = minIdleTtlForRuntimeKey(runtimeKey);
+    for (const [sessionId, runtime] of runtimesBySessionId.entries()) {
+      const idleTtlMs =
+        idleTtlMsBySessionId.get(sessionId) ?? DEFAULT_SESSION_MCP_RUNTIME_IDLE_TTL_MS;
       if (idleTtlMs <= 0 || (runtime.activeLeases ?? 0) > 0) {
         continue;
       }
       if (nowMs - runtime.lastUsedAt < idleTtlMs) {
         continue;
       }
-      runtimesByKey.delete(runtimeKey);
-      // Drop all sessions associated with the evicted runtime.
-      for (const sessionId of sessionsForRuntimeKey(runtimeKey)) {
-        runtimeKeyBySessionId.delete(sessionId);
-        idleTtlMsBySessionId.delete(sessionId);
-        forgetSessionKeysForSessionId(sessionId);
-      }
+      runtimesBySessionId.delete(sessionId);
+      idleTtlMsBySessionId.delete(sessionId);
+      forgetSessionKeysForSessionId(sessionId);
       expired.push(runtime);
     }
     await Promise.allSettled(expired.map((runtime) => runtime.dispose()));
@@ -615,8 +537,7 @@ function createSessionMcpRuntimeManager(
   return {
     async getOrCreate(params) {
       const idleTtlMs = resolveSessionMcpRuntimeIdleTtlMs(params.cfg);
-      const existingKeyForSession = runtimeKeyBySessionId.get(params.sessionId);
-      if (existingKeyForSession && runtimesByKey.has(existingKeyForSession)) {
+      if (runtimesBySessionId.has(params.sessionId)) {
         idleTtlMsBySessionId.set(params.sessionId, idleTtlMs);
       }
       await sweepIdleRuntimes();
@@ -631,35 +552,32 @@ function createSessionMcpRuntimeManager(
         cfg: params.cfg,
         logDiagnostics: false,
       });
-      // FORK: share a single MCP runtime across all sessions with the same
-      // workspace + config. Stateless servers (TTS, Whisper) don't need
-      // per-session isolation and spawning duplicates wastes VRAM + startup time.
-      const runtimeKey = `${params.workspaceDir}::${nextFingerprint}`;
-      const existing = runtimesByKey.get(runtimeKey);
+      const existing = runtimesBySessionId.get(params.sessionId);
       if (existing) {
-        if (existing.configFingerprint !== nextFingerprint) {
-          runtimesByKey.delete(runtimeKey);
+        if (
+          existing.workspaceDir !== params.workspaceDir ||
+          existing.configFingerprint !== nextFingerprint
+        ) {
+          runtimesBySessionId.delete(params.sessionId);
           await existing.dispose();
         } else {
           existing.markUsed();
-          runtimeKeyBySessionId.set(params.sessionId, runtimeKey);
           idleTtlMsBySessionId.set(params.sessionId, idleTtlMs);
           return existing;
         }
       }
-      const inFlight = createInFlight.get(runtimeKey);
+      const inFlight = createInFlight.get(params.sessionId);
       if (inFlight) {
         if (
           inFlight.workspaceDir === params.workspaceDir &&
           inFlight.configFingerprint === nextFingerprint
         ) {
-          runtimeKeyBySessionId.set(params.sessionId, runtimeKey);
-          idleTtlMsBySessionId.set(params.sessionId, idleTtlMs);
           return inFlight.promise;
         }
-        createInFlight.delete(runtimeKey);
+        createInFlight.delete(params.sessionId);
         const staleRuntime = await inFlight.promise.catch(() => undefined);
-        runtimesByKey.delete(runtimeKey);
+        runtimesBySessionId.delete(params.sessionId);
+        idleTtlMsBySessionId.delete(params.sessionId);
         await staleRuntime?.dispose();
       }
       const created = Promise.resolve(
@@ -672,12 +590,11 @@ function createSessionMcpRuntimeManager(
         }),
       ).then((runtime) => {
         runtime.markUsed();
-        runtimesByKey.set(runtimeKey, runtime);
-        runtimeKeyBySessionId.set(params.sessionId, runtimeKey);
+        runtimesBySessionId.set(params.sessionId, runtime);
         idleTtlMsBySessionId.set(params.sessionId, idleTtlMs);
         return runtime;
       });
-      createInFlight.set(runtimeKey, {
+      createInFlight.set(params.sessionId, {
         promise: created,
         workspaceDir: params.workspaceDir,
         configFingerprint: nextFingerprint,
@@ -685,7 +602,7 @@ function createSessionMcpRuntimeManager(
       try {
         return await created;
       } finally {
-        createInFlight.delete(runtimeKey);
+        createInFlight.delete(params.sessionId);
       }
     },
     bindSessionKey(sessionKey, sessionId) {
@@ -695,44 +612,27 @@ function createSessionMcpRuntimeManager(
       return sessionIdBySessionKey.get(sessionKey);
     },
     async disposeSession(sessionId) {
-      // FORK: refcounted shared runtimes. Drop this session's reference; only
-      // dispose the underlying runtime when the last reference is released.
-      forgetSessionKeysForSessionId(sessionId);
+      const inFlight = createInFlight.get(sessionId);
+      createInFlight.delete(sessionId);
+      let runtime = runtimesBySessionId.get(sessionId);
+      if (!runtime && inFlight) {
+        runtime = await inFlight.promise.catch(() => undefined);
+      }
+      runtimesBySessionId.delete(sessionId);
       idleTtlMsBySessionId.delete(sessionId);
-      const runtimeKey = runtimeKeyBySessionId.get(sessionId);
-      runtimeKeyBySessionId.delete(sessionId);
-      if (!runtimeKey) {
-        // No mapping yet; dispose any in-flight build keyed by sessionId.
-        const inFlight = createInFlight.get(sessionId);
-        if (inFlight) {
-          createInFlight.delete(sessionId);
-          const runtime = await inFlight.promise.catch(() => undefined);
-          await runtime?.dispose();
-        }
+      if (!runtime) {
+        forgetSessionKeysForSessionId(sessionId);
         return;
       }
-      // Are there other sessions still referencing this shared runtime?
-      const otherRefs = sessionsForRuntimeKey(runtimeKey);
-      if (otherRefs.length > 0) {
-        return;
-      }
-      const runtime = runtimesByKey.get(runtimeKey);
-      runtimesByKey.delete(runtimeKey);
-      const inFlight = createInFlight.get(runtimeKey);
-      createInFlight.delete(runtimeKey);
-      const inFlightRuntime = inFlight ? await inFlight.promise.catch(() => undefined) : undefined;
-      const target = runtime ?? inFlightRuntime;
-      if (target) {
-        await target.dispose();
-      }
+      forgetSessionKeysForSessionId(sessionId);
+      await runtime.dispose();
     },
     async disposeAll() {
       clearIdleSweepTimer();
       const inFlightRuntimes = Array.from(createInFlight.values());
       createInFlight.clear();
-      const runtimes = Array.from(runtimesByKey.values());
-      runtimesByKey.clear();
-      runtimeKeyBySessionId.clear();
+      const runtimes = Array.from(runtimesBySessionId.values());
+      runtimesBySessionId.clear();
       sessionIdBySessionKey.clear();
       idleTtlMsBySessionId.clear();
       const lateRuntimes = await Promise.all(
@@ -748,7 +648,7 @@ function createSessionMcpRuntimeManager(
     },
     sweepIdleRuntimes,
     listSessionIds() {
-      return Array.from(runtimeKeyBySessionId.keys());
+      return Array.from(runtimesBySessionId.keys());
     },
   };
 }

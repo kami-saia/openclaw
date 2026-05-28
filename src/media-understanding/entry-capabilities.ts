@@ -11,8 +11,8 @@ function isMediaCapability(value: unknown): value is MediaUnderstandingCapabilit
   return typeof value === "string" && (MEDIA_CAPABILITIES as readonly string[]).includes(value);
 }
 
-function resolveEntryType(entry: MediaUnderstandingModelConfig): "provider" | "cli" | "mcp" {
-  return entry.type ?? (entry.server ? "mcp" : entry.command ? "cli" : "provider");
+function resolveEntryType(entry: MediaUnderstandingModelConfig): "provider" | "cli" {
+  return entry.type ?? (entry.command ? "cli" : "provider");
 }
 
 export function resolveConfiguredMediaEntryCapabilities(

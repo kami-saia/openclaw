@@ -39,7 +39,7 @@ type MediaUnderstandingDecisionOutcome =
 export type MediaUnderstandingModelDecision = {
   provider?: string;
   model?: string;
-  type: "provider" | "cli" | "mcp";
+  type: "provider" | "cli";
   outcome: "success" | "skipped" | "failed";
   reason?: string;
 };

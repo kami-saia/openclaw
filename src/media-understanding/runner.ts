@@ -48,7 +48,6 @@ import {
   buildModelDecision,
   formatDecisionSummary,
   runCliEntry,
-  runMcpEntry,
   runProviderEntry,
 } from "./runner.entries.js";
 import type {
@@ -889,11 +888,11 @@ async function runAttachmentEntries(params: {
   const { entries, capability } = params;
   const attempts: MediaUnderstandingModelDecision[] = [];
   for (const entry of entries) {
-    const entryType = entry.type ?? (entry.server ? "mcp" : entry.command ? "cli" : "provider");
+    const entryType = entry.type ?? (entry.command ? "cli" : "provider");
     try {
       const result =
-        entryType === "mcp"
-          ? await runMcpEntry({
+        entryType === "cli"
+          ? await runCliEntry({
               capability,
               entry,
               cfg: params.cfg,
@@ -902,28 +901,18 @@ async function runAttachmentEntries(params: {
               cache: params.cache,
               config: params.config,
             })
-          : entryType === "cli"
-            ? await runCliEntry({
-                capability,
-                entry,
-                cfg: params.cfg,
-                ctx: params.ctx,
-                attachmentIndex: params.attachmentIndex,
-                cache: params.cache,
-                config: params.config,
-              })
-            : await runProviderEntry({
-                capability,
-                entry,
-                cfg: params.cfg,
-                ctx: params.ctx,
-                attachmentIndex: params.attachmentIndex,
-                cache: params.cache,
-                agentDir: params.agentDir,
-                workspaceDir: params.workspaceDir,
-                providerRegistry: params.providerRegistry,
-                config: params.config,
-              });
+          : await runProviderEntry({
+              capability,
+              entry,
+              cfg: params.cfg,
+              ctx: params.ctx,
+              attachmentIndex: params.attachmentIndex,
+              cache: params.cache,
+              agentDir: params.agentDir,
+              workspaceDir: params.workspaceDir,
+              providerRegistry: params.providerRegistry,
+              config: params.config,
+            });
       if (result) {
         const decision = buildModelDecision({ entry, entryType, outcome: "success" });
         if (result.provider) {

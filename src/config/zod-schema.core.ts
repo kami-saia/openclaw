@@ -731,8 +731,6 @@ export const CliBackendSchema = z
   .object({
     command: z.string(),
     args: z.array(z.string()).optional(),
-    server: z.string().optional(),
-    tool: z.string().optional(),
     output: z.union([z.literal("json"), z.literal("text"), z.literal("jsonl")]).optional(),
     resumeOutput: z.union([z.literal("json"), z.literal("text"), z.literal("jsonl")]).optional(),
     jsonlDialect: z.literal("claude-stream-json").optional(),
@@ -951,11 +949,9 @@ const MediaUnderstandingModelSchema = z
     provider: z.string().optional(),
     model: z.string().optional(),
     capabilities: MediaUnderstandingCapabilitiesSchema,
-    type: z.union([z.literal("provider"), z.literal("cli"), z.literal("mcp")]).optional(),
+    type: z.union([z.literal("provider"), z.literal("cli")]).optional(),
     command: z.string().optional(),
     args: z.array(z.string()).optional(),
-    server: z.string().optional(),
-    tool: z.string().optional(),
     maxChars: z.number().int().positive().optional(),
     maxBytes: z.number().int().positive().optional(),
     ...MediaUnderstandingRuntimeFields,
@@ -1012,8 +1008,6 @@ const LinkModelSchema = z
     type: z.literal("cli").optional(),
     command: z.string().min(1),
     args: z.array(z.string()).optional(),
-    server: z.string().optional(),
-    tool: z.string().optional(),
     timeoutSeconds: z.number().int().positive().optional(),
   })
   .strict();
