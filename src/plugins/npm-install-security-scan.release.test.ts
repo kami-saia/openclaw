@@ -25,8 +25,11 @@ const execFileAsync = promisify(execFile);
 const REQUIRED_REVIEWED_PUBLISHABLE_CRITICAL_FINDINGS = new Set([
   "@openclaw/acpx:dangerous-exec:src/codex-auth-bridge.ts",
   "@openclaw/acpx:dangerous-exec:src/runtime-internals/mcp-proxy.mjs",
+  "@openclaw/codex:dangerous-exec:src/app-server/sandbox-exec-server/http.ts",
+  "@openclaw/codex:dangerous-exec:src/app-server/sandbox-exec-server/processes.ts",
   "@openclaw/codex:dangerous-exec:src/app-server/transport-stdio.ts",
   "@openclaw/codex:dangerous-exec:src/node-cli-sessions.ts",
+  "@openclaw/discord:dangerous-exec:src/voice/audio.ts",
   "@openclaw/google-meet:dangerous-exec:src/node-host.ts",
   "@openclaw/google-meet:dangerous-exec:src/realtime.ts",
   "@openclaw/matrix:dangerous-exec:src/matrix/deps.ts",
@@ -281,7 +284,7 @@ describe("publishable plugin npm package install security scan", () => {
     });
   });
 
-  test.each(publishablePluginPackages)(
+  test.concurrent.each(publishablePluginPackages)(
     "keeps $packageName files clear of unexpected critical hits",
     async (plugin) => {
       const result = await scanPublishablePluginPackage(plugin);

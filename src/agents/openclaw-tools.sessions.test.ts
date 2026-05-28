@@ -28,10 +28,11 @@ vi.mock("../config/config.js", () => ({
 
 import "./test-helpers/fast-openclaw-tools-sessions.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
-import { __testing as agentStepTesting } from "./tools/agent-step.js";
+import { testing as embeddedRunsTesting, setActiveEmbeddedRun } from "./pi-embedded-runner/runs.js";
+import { testing as agentStepTesting } from "./tools/agent-step.js";
 import { createSessionsHistoryTool } from "./tools/sessions-history-tool.js";
 import { createSessionsListTool } from "./tools/sessions-list-tool.js";
-import { __testing as sessionsResolutionTesting } from "./tools/sessions-resolution.js";
+import { testing as sessionsResolutionTesting } from "./tools/sessions-resolution.js";
 import { createSessionsSendTool } from "./tools/sessions-send-tool.js";
 
 const TEST_CONFIG = {
@@ -145,6 +146,9 @@ function createOpenClawTools(options?: {
 describe("sessions tools", () => {
   beforeEach(() => {
     callGatewayMock.mockClear();
+    embeddedRunsTesting.resetActiveEmbeddedRuns();
+    loadSessionEntryByKeyMock.mockReset();
+    loadSessionEntryByKeyMock.mockReturnValue(undefined);
     installMessagingTestRegistry();
     agentStepTesting.setDepsForTest({
       agentCommandFromIngress: async () => ({
@@ -520,6 +524,13 @@ describe("sessions tools", () => {
           type: "thinking",
           thinking: "y".repeat(7000),
           thinkingSignature: "sig".repeat(4000),
+          openclawReasoningReplay: {
+            v: 1,
+            source: "openai-responses",
+            provider: "openai-codex",
+            api: "openai-codex-responses",
+            model: "gpt-5.5",
+          },
         },
       ],
       details: {
@@ -573,6 +584,7 @@ describe("sessions tools", () => {
             text?: string;
             thinking?: string;
             thinkingSignature?: string;
+            openclawReasoningReplay?: unknown;
           }>;
         }
       | undefined;
@@ -583,6 +595,7 @@ describe("sessions tools", () => {
     expect((textBlock?.text ?? "").length <= 4015).toBe(true);
     const thinkingBlock = first?.content?.find((block) => block.type === "thinking");
     expect(thinkingBlock?.thinkingSignature).toBeUndefined();
+    expect(thinkingBlock?.openclawReasoningReplay).toBeUndefined();
   });
 
   it("sessions_history enforces a hard byte cap even when a single message is huge", async () => {

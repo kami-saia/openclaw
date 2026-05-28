@@ -6,6 +6,13 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { emitFailoverEvent } from "../infra/diagnostic-events.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
+import { getCurrentPluginMetadataSnapshot } from "../plugins/current-plugin-metadata-snapshot.js";
+import { resolvePluginControlPlaneFingerprint } from "../plugins/plugin-control-plane-context.js";
+import { isPluginProvidersLoadInFlight } from "../plugins/providers.runtime.js";
+import {
+  getActivePluginRegistryWorkspaceDirFromState,
+  getPluginRegistryState,
+} from "../plugins/runtime-state.js";
 import { isCommandLaneTaskTimeoutError } from "../process/command-queue.js";
 import { createLazyImportLoader } from "../shared/lazy-promise.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
@@ -19,6 +26,7 @@ import {
   coerceToFailoverError,
   describeFailoverError,
   isFailoverError,
+  isNonProviderRuntimeCoordinationError,
   isTimeoutError,
 } from "./failover-error.js";
 import {
@@ -133,6 +141,20 @@ function shouldRethrowAbort(err: unknown): boolean {
   return isFallbackAbortError(err) && !isTimeoutError(err);
 }
 
+function isTerminalAbort(signal: AbortSignal | undefined): boolean {
+  if (!signal?.aborted) {
+    return false;
+  }
+  const reason = signal.reason;
+  if (!(reason instanceof Error)) {
+    return false;
+  }
+  if (reason.name === "TimeoutError") {
+    return true;
+  }
+  return reason.name === "ClientDisconnectError";
+}
+
 function createModelCandidateCollector(allowlist: Set<string> | null | undefined): {
   candidates: ModelCandidate[];
   addExplicitCandidate: (candidate: ModelCandidate) => void;
@@ -210,6 +232,8 @@ type ModelFallbackAuthRuntime = typeof import("./model-fallback-auth.runtime.js"
 const modelFallbackAuthRuntimeLoader = createLazyImportLoader<ModelFallbackAuthRuntime>(
   () => import("./model-fallback-auth.runtime.js"),
 );
+const MAX_FALLBACK_CANDIDATE_CACHE_ENTRIES = 256;
+const fallbackCandidateCache = new Map<string, ModelCandidate[]>();
 
 async function loadModelFallbackAuthRuntime() {
   return await modelFallbackAuthRuntimeLoader.load();
@@ -235,6 +259,7 @@ async function runFallbackCandidate<T>(params: {
   model: string;
   options?: ModelFallbackRunOptions;
   attribution?: FailoverAttribution;
+  abortSignal?: AbortSignal;
 }): Promise<{ ok: true; result: T } | { ok: false; error: unknown }> {
   try {
     const result = params.options
@@ -246,6 +271,12 @@ async function runFallbackCandidate<T>(params: {
     };
   } catch (err) {
     if (isCommandLaneTaskTimeoutError(err)) {
+      throw err;
+    }
+    if (isNonProviderRuntimeCoordinationError(err)) {
+      throw err;
+    }
+    if (isTerminalAbort(params.abortSignal)) {
       throw err;
     }
     // Normalize abort-wrapped rate-limit errors (e.g. Google Vertex RESOURCE_EXHAUSTED)
@@ -273,6 +304,7 @@ async function runFallbackAttempt<T>(params: {
   attempt: number;
   total: number;
   attribution?: FailoverAttribution;
+  abortSignal?: AbortSignal;
 }): Promise<{ success: ModelFallbackRunResult<T> } | { error: unknown }> {
   const runResult = await runFallbackCandidate({
     run: params.run,
@@ -280,6 +312,7 @@ async function runFallbackAttempt<T>(params: {
     model: params.model,
     options: params.options,
     attribution: params.attribution,
+    abortSignal: params.abortSignal,
   });
   if (runResult.ok) {
     const classification = await params.classifyResult?.({
@@ -295,6 +328,9 @@ async function runFallbackAttempt<T>(params: {
       attribution: params.attribution,
     });
     if (classifiedError) {
+      if (isTerminalAbort(params.abortSignal)) {
+        throw classifiedError;
+      }
       return { error: classifiedError };
     }
     return {
@@ -373,19 +409,36 @@ async function assertModelFallbackCandidateHarnessAvailable(
   if (isCliAgentRuntime(agentRuntime, params.cfg)) {
     return;
   }
+  if (
+    agentRuntime === "auto" ||
+    agentRuntime === "pi" ||
+    (agentRuntime === "codex" && agentRuntimeSource === "implicit")
+  ) {
+    return;
+  }
   await params.prepareAgentHarnessRuntime?.({
     provider: params.provider,
     model: params.model,
     agentHarnessRuntimeOverride,
   });
-  if (
-    agentRuntime !== "auto" &&
-    agentRuntime !== "pi" &&
-    !(agentRuntime === "codex" && agentRuntimeSource === "implicit") &&
-    !getRegisteredAgentHarness(agentRuntime)
-  ) {
+  if (!getRegisteredAgentHarness(agentRuntime)) {
     throw new MissingAgentHarnessError(agentRuntime);
   }
+}
+
+function resolveCandidateAttemptError(
+  described: ReturnType<typeof describeFailoverError>,
+  candidate: ModelCandidate,
+): string {
+  if (
+    described.rawError &&
+    (!described.provider ||
+      (described.provider === candidate.provider &&
+        (!described.model || described.model === candidate.model)))
+  ) {
+    return described.rawError;
+  }
+  return described.message;
 }
 
 function recordFailedCandidateAttempt(params: {
@@ -405,10 +458,11 @@ function recordFailedCandidateAttempt(params: {
   fallbackConfigured: boolean;
 }): ModelFallbackStepFields | undefined {
   const described = describeFailoverError(params.error);
+  const error = resolveCandidateAttemptError(described, params.candidate);
   params.attempts.push({
     provider: params.candidate.provider,
     model: params.candidate.model,
-    error: described.rawError ?? described.message,
+    error,
     reason: described.reason ?? "unknown",
     status: described.status,
     code: described.code,
@@ -426,7 +480,7 @@ function recordFailedCandidateAttempt(params: {
     reason: described.reason,
     status: described.status,
     code: described.code,
-    error: described.rawError ?? described.message,
+    error,
     nextCandidate: params.nextCandidate,
     isPrimary: params.isPrimary,
     requestedModelMatched: params.requestedModelMatched,
@@ -443,7 +497,7 @@ function appendFailedCandidateAttempt(params: {
   params.attempts.push({
     provider: params.candidate.provider,
     model: params.candidate.model,
-    error: described.rawError ?? described.message,
+    error: resolveCandidateAttemptError(described, params.candidate),
     reason: described.reason ?? "unknown",
     status: described.status,
     code: described.code,
@@ -545,7 +599,7 @@ function resolveFallbackSoonestCooldownExpiry(params: {
   return soonest;
 }
 
-function resolveImageFallbackCandidates(
+export function resolveImageFallbackCandidates(
   params: {
     cfg: OpenClawConfig | undefined;
     defaultProvider: string;
@@ -602,7 +656,7 @@ function resolveImageFallbackCandidates(
   return candidates;
 }
 
-function resolveImageFallbackDefaultProvider(cfg: OpenClawConfig | undefined): string {
+export function resolveImageFallbackDefaultProvider(cfg: OpenClawConfig | undefined): string {
   const configuredPrimary = resolveAgentModelPrimaryValue(cfg?.agents?.defaults?.imageModel);
   if (configuredPrimary?.trim()) {
     const aliasIndex = buildModelAliasIndex({
@@ -621,7 +675,7 @@ function resolveImageFallbackDefaultProvider(cfg: OpenClawConfig | undefined): s
   return DEFAULT_PROVIDER;
 }
 
-export const __testing = {
+export const testing = {
   resolveFallbackCandidates,
   resolveImageFallbackCandidates,
   resolveCooldownDecision,
@@ -629,6 +683,116 @@ export const __testing = {
 } as const;
 
 function resolveFallbackCandidates(
+  params: {
+    cfg: OpenClawConfig | undefined;
+    provider: string;
+    model: string;
+    /** Optional explicit fallbacks list; when provided (even empty), replaces agents.defaults.model.fallbacks. */
+    fallbacksOverride?: string[];
+  } & ModelManifestNormalizationContext,
+): ModelCandidate[] {
+  const cacheKey = resolveFallbackCandidateCacheKey(params);
+  if (cacheKey) {
+    const cached = fallbackCandidateCache.get(cacheKey);
+    if (cached) {
+      return cached.map(cloneModelCandidate);
+    }
+  }
+  const candidates = resolveFallbackCandidatesUncached(params);
+  if (cacheKey) {
+    fallbackCandidateCache.set(cacheKey, candidates.map(cloneModelCandidate));
+    while (fallbackCandidateCache.size > MAX_FALLBACK_CANDIDATE_CACHE_ENTRIES) {
+      const oldest = fallbackCandidateCache.keys().next();
+      if (oldest.done) {
+        break;
+      }
+      fallbackCandidateCache.delete(oldest.value);
+    }
+  }
+  return candidates;
+}
+
+function cloneModelCandidate(candidate: ModelCandidate): ModelCandidate {
+  return {
+    provider: candidate.provider,
+    model: candidate.model,
+  };
+}
+
+function resolveFallbackCandidateCacheKey(
+  params: {
+    cfg: OpenClawConfig | undefined;
+    provider: string;
+    model: string;
+    fallbacksOverride?: string[];
+  } & ModelManifestNormalizationContext,
+): string | null {
+  if (params.manifestPlugins) {
+    return null;
+  }
+  const workspaceDir = getActivePluginRegistryWorkspaceDirFromState();
+  const env = process.env;
+  const pluginMetadata = getCurrentPluginMetadataSnapshot({
+    env,
+    workspaceDir,
+    allowWorkspaceScopedSnapshot: true,
+  });
+  const providerLoadMetadata = getCurrentPluginMetadataSnapshot({
+    config: params.cfg,
+    env,
+    workspaceDir,
+    allowWorkspaceScopedSnapshot: true,
+  });
+  if (
+    isPluginProvidersLoadInFlight({
+      config: params.cfg,
+      workspaceDir,
+      env,
+      ...(providerLoadMetadata ? { pluginMetadataSnapshot: providerLoadMetadata } : {}),
+      activate: false,
+      bundledProviderAllowlistCompat: true,
+      bundledProviderVitestCompat: true,
+    })
+  ) {
+    return null;
+  }
+  const registryState = getPluginRegistryState();
+  return JSON.stringify({
+    provider: params.provider,
+    model: params.model,
+    fallbacksOverride: params.fallbacksOverride,
+    agentsDefaultsModel: params.cfg?.agents?.defaults?.model,
+    agentsDefaultsModels: params.cfg?.agents?.defaults?.models,
+    modelProviders: resolveFallbackCandidateModelProviderCacheParts(params.cfg),
+    pluginControlPlane: resolvePluginControlPlaneFingerprint({
+      config: params.cfg,
+      env,
+      workspaceDir,
+    }),
+    pluginMetadataFingerprint: pluginMetadata?.configFingerprint ?? null,
+    pluginRegistryKey: registryState?.key ?? null,
+    pluginRegistryVersion: registryState?.activeVersion ?? null,
+    pluginWorkspaceDir: workspaceDir ?? null,
+  });
+}
+
+function resolveFallbackCandidateModelProviderCacheParts(cfg: OpenClawConfig | undefined): unknown {
+  const providers = cfg?.models?.providers;
+  if (!providers) {
+    return undefined;
+  }
+  return Object.entries(providers).map(([providerId, providerConfig]) => ({
+    providerId,
+    api: typeof providerConfig?.api === "string" ? providerConfig.api : undefined,
+    models: Array.isArray(providerConfig?.models)
+      ? providerConfig.models
+          .map((entry) => (typeof entry?.id === "string" ? entry.id : undefined))
+          .filter((id): id is string => id !== undefined)
+      : [],
+  }));
+}
+
+function resolveFallbackCandidatesUncached(
   params: {
     cfg: OpenClawConfig | undefined;
     provider: string;
@@ -798,7 +962,7 @@ function shouldProbePrimaryDuringCooldown(params: {
 }
 
 /** @internal – exposed for unit tests only */
-export const _probeThrottleInternals = {
+export const probeThrottleInternals = {
   lastProbeAttempt,
   MIN_PROBE_INTERVAL_MS,
   PROBE_MARGIN_MS,
@@ -925,6 +1089,7 @@ export async function runWithModelFallback<T>(
     onFallbackStep?: ModelFallbackStepHandler;
     classifyResult?: ModelFallbackResultClassifier<T>;
     skipAuthProfileRuntime?: boolean;
+    abortSignal?: AbortSignal;
   } & ModelManifestNormalizationContext,
 ): Promise<ModelFallbackRunResult<T>> {
   const candidates = resolveFallbackCandidates({
@@ -1167,6 +1332,7 @@ export async function runWithModelFallback<T>(
       attempt: i + 1,
       total: candidates.length,
       attribution: { sessionId: params.sessionId, lane: params.lane },
+      abortSignal: params.abortSignal,
     });
     if ("success" in attemptRun) {
       if (i > 0 || attempts.length > 0 || attemptedDuringCooldown) {
@@ -1197,6 +1363,14 @@ export async function runWithModelFallback<T>(
     }
     const err = attemptRun.error;
     {
+      // Local runtime coordination errors (session write-lock timeout, embedded
+      // attempt session takeover) are not provider/model failures. Aborting
+      // here prevents the fallback chain from consuming candidates retrying
+      // the same local condition and surfacing a misleading "All models
+      // failed" summary. See #83510.
+      if (isNonProviderRuntimeCoordinationError(err)) {
+        throw err;
+      }
       if (transientProbeProviderForAttempt) {
         const probeFailureReason = describeFailoverError(err).reason;
         if (!shouldPreserveTransientCooldownProbeSlot(probeFailureReason)) {
@@ -1382,3 +1556,4 @@ export async function runWithImageModelFallback<T>(params: {
     cfg: params.cfg,
   });
 }
+export { testing as __testing };

@@ -141,6 +141,7 @@ function buildContextPruningFactory(params: {
 export function buildEmbeddedExtensionFactories(params: {
   cfg: OpenClawConfig | undefined;
   sessionManager: SessionManager;
+  workspaceDir?: string;
   provider: string;
   modelId: string;
   model: ProviderRuntimeModel | undefined;
@@ -169,6 +170,8 @@ export function buildEmbeddedExtensionFactories(params: {
       model: params.model,
       compactionMode: compactionCfg?.mode,
       recentTurnsPreserve: compactionCfg?.recentTurnsPreserve,
+      workspaceDir: params.workspaceDir,
+      postCompactionSections: compactionCfg?.postCompactionSections,
       provider: compactionCfg?.provider,
     });
     factories.push(compactionSafeguardExtension);

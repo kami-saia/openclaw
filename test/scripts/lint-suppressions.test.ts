@@ -15,6 +15,8 @@ type SuppressionEntry = {
   rule: string;
 };
 
+let productionLintSuppressionsCache: SuppressionEntry[] | null = null;
+
 function isProductionCodeFile(relativePath: string): boolean {
   const basename = path.posix.basename(relativePath);
   if (!CODE_EXTENSIONS.has(path.extname(relativePath))) {
@@ -72,6 +74,9 @@ function walkCodeFiles(dir: string, files: string[] = []): string[] {
 }
 
 function collectProductionLintSuppressions(): SuppressionEntry[] {
+  if (productionLintSuppressionsCache) {
+    return [...productionLintSuppressionsCache];
+  }
   const entries: SuppressionEntry[] = [];
   const files = ROOTS.flatMap((root) => walkCodeFiles(path.join(repoRoot, root))).toSorted();
   for (const relativePath of files) {
@@ -87,7 +92,8 @@ function collectProductionLintSuppressions(): SuppressionEntry[] {
       });
     }
   }
-  return entries;
+  productionLintSuppressionsCache = entries;
+  return [...entries];
 }
 
 function summarizeSuppressions(entries: readonly SuppressionEntry[]): string[] {
@@ -168,6 +174,7 @@ describe("production lint suppressions", () => {
       "src/test-utils/bundled-plugin-public-surface.ts|typescript/no-unnecessary-type-parameters|2",
       "src/test-utils/vitest-mock-fn.ts|typescript/no-explicit-any|1",
       "src/utils.ts|typescript/no-unnecessary-type-parameters|1",
+      "src/version.ts|eslint/no-underscore-dangle|1",
       "ui/src/ui/views/overview-log-tail.ts|no-control-regex|1",
     ]);
   });
