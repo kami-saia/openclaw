@@ -5,7 +5,6 @@ import {
   resolveAgentConfig,
   resolveSessionAgentId,
 } from "../../agents/agent-scope.js";
-import { resetPressureTracking } from "../../agents/context-pressure.js";
 import { resolveContextTokensForModel } from "../../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import { resolveModelAuthMode } from "../../agents/model-auth.js";
@@ -1949,6 +1948,7 @@ export async function runReplyAgent(params: {
         });
       }
 
+      const { resetPressureTracking } = await import("../../agents/context-pressure.js");
       resetPressureTracking();
 
       // --- FORK: reset totalTokens after compaction so pressure signal recalculates ---

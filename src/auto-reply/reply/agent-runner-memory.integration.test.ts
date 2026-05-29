@@ -32,7 +32,7 @@ vi.mock("../../infra/system-events.js", () => ({
   enqueueSystemEvent: (...args: unknown[]) => enqueueSystemEventMock(...args),
 }));
 
-import { setTokenSourceForTestsHook } from "./agent-compaction-pressure.js";
+import { setTokenSourceForTestsHook } from "./agent-compaction-pressure.runtime.js";
 import { runMemoryFlushIfNeeded } from "./agent-runner-memory.js";
 
 function agentCompactionCfg(): OpenClawConfig {

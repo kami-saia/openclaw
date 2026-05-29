@@ -1432,7 +1432,9 @@ describe("initSessionState reset policy", () => {
       sessionKey: existingSessionId,
     });
 
-    const cfg = { session: { store: storePath } } as OpenClawConfig;
+    const cfg = {
+      session: { store: storePath, reset: { mode: "daily" } },
+    } as OpenClawConfig;
     const result = await initSessionState({
       ctx: { Body: "hello", SessionKey: sessionKey },
       cfg,
@@ -1456,6 +1458,34 @@ describe("initSessionState reset policy", () => {
     expect(peekSystemEvents(existingSessionId)).toStrictEqual([]);
   });
 
+  it("does NOT reset by default (fork default reset mode is never)", async () => {
+    // FORK: upstream defaults DEFAULT_RESET_MODE to "daily"; our fork sets it to
+    // "never" (src/config/sessions/reset-policy.ts). With no reset config, a stale
+    // session that upstream would roll over at the 4am boundary is preserved.
+    vi.setSystemTime(new Date(2026, 0, 18, 5, 0, 0));
+    const root = await makeCaseDir("openclaw-reset-never-default-");
+    const storePath = path.join(root, "sessions.json");
+    const sessionKey = "agent:main:whatsapp:dm:s-never";
+    const existingSessionId = "never-default-session";
+
+    await writeSessionStoreFast(storePath, {
+      [sessionKey]: {
+        sessionId: existingSessionId,
+        updatedAt: new Date(2026, 0, 18, 3, 0, 0).getTime(),
+      },
+    });
+
+    const cfg = { session: { store: storePath } } as OpenClawConfig;
+    const result = await initSessionState({
+      ctx: { Body: "hello", SessionKey: sessionKey },
+      cfg,
+      commandAuthorized: true,
+    });
+
+    expect(result.isNewSession).toBe(false);
+    expect(result.sessionId).toBe(existingSessionId);
+  });
+
   it("treats sessions as stale before the daily reset when updated before yesterday's boundary", async () => {
     vi.setSystemTime(new Date(2026, 0, 18, 3, 0, 0));
     const root = await makeCaseDir("openclaw-reset-daily-edge-");
@@ -1470,7 +1500,9 @@ describe("initSessionState reset policy", () => {
       },
     });
 
-    const cfg = { session: { store: storePath } } as OpenClawConfig;
+    const cfg = {
+      session: { store: storePath, reset: { mode: "daily" } },
+    } as OpenClawConfig;
     const result = await initSessionState({
       ctx: { Body: "hello", SessionKey: sessionKey },
       cfg,
@@ -1816,7 +1848,11 @@ describe("initSessionState reset policy", () => {
     expect(result.sessionId).toBe(existingSessionId);
   });
 
-  it("defaults to daily resets when only resetByType is configured", async () => {
+  it("falls through to the never default when only resetByType is configured", async () => {
+    // FORK: upstream's default reset mode is "daily"; our fork sets it to "never"
+    // (see src/config/sessions/reset-policy.ts DEFAULT_RESET_MODE). A session type
+    // with no matching resetByType entry falls through to the global default, so a
+    // dm session here gets "never" and is NOT rolled over.
     vi.setSystemTime(new Date(2026, 0, 18, 5, 0, 0));
     const root = await makeCaseDir("openclaw-reset-type-default-");
     const storePath = path.join(root, "sessions.json");
@@ -1842,8 +1878,8 @@ describe("initSessionState reset policy", () => {
       commandAuthorized: true,
     });
 
-    expect(result.isNewSession).toBe(true);
-    expect(result.sessionId).not.toBe(existingSessionId);
+    expect(result.isNewSession).toBe(false);
+    expect(result.sessionId).toBe(existingSessionId);
   });
 
   it("keeps legacy idleMinutes behavior without reset config", async () => {
@@ -2769,7 +2805,9 @@ describe("initSessionState preserves behavior overrides across /new and /reset",
       });
       await fs.writeFile(transcriptPath, '{"type":"message"}\n', "utf8");
 
-      const cfg = { session: { store: storePath } } as OpenClawConfig;
+      const cfg = {
+        session: { store: storePath, reset: { mode: "daily" } },
+      } as OpenClawConfig;
       const result = await initSessionState({
         ctx: {
           Body: "hello",

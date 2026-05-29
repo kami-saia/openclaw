@@ -16,7 +16,7 @@ vi.mock("../../infra/system-events.js", () => ({
 import {
   maybeInjectAgentCompactionPressureSignal,
   setTokenSourceForTestsHook,
-} from "./agent-compaction-pressure.js";
+} from "./agent-compaction-pressure.runtime.js";
 
 function createCfg(mode: "agent" | "default" = "agent"): OpenClawConfig {
   return {

@@ -45,7 +45,6 @@ import {
 import type { TemplateContext } from "../templating.js";
 import type { VerboseLevel } from "../thinking.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
-import { maybeInjectAgentCompactionPressureSignal } from "./agent-compaction-pressure.js";
 import {
   buildEmbeddedRunExecutionParams,
   resolveModelFallbackOptions,
@@ -928,9 +927,16 @@ export async function runMemoryFlushIfNeeded(params: {
   replyOperation: ReplyOperation;
   onVisibleErrorPayloads?: (payloads: ReplyPayload[]) => void;
 }): Promise<SessionEntry | undefined> {
-  // Agent-controlled compaction: inject pressure signal regardless of memory plugin
+  // FORK: agent-controlled compaction. When enabled, inject a context-pressure
+  // system event instead of running a memory-flush turn (works regardless of
+  // whether a memory plugin is configured).
   const compactionMode = params.cfg?.agents?.defaults?.compaction?.mode;
   if (compactionMode === "agent") {
+    // Dynamic import isolates agent-compaction-pressure (and its context-pressure
+    // dependency) from this module's chunk graph; a static edge perturbs tsdown
+    // chunk-init ordering and breaks unrelated runtime chunks. See 2026-05-28 merge note.
+    const { maybeInjectAgentCompactionPressureSignal } =
+      await import("./agent-compaction-pressure.runtime.js");
     return maybeInjectAgentCompactionPressureSignal({
       cfg: params.cfg,
       sessionEntry: params.sessionEntry,
@@ -940,7 +946,6 @@ export async function runMemoryFlushIfNeeded(params: {
     });
   }
 
-  // Non-agent compaction paths require a memory flush plan
   const memoryFlushPlan = resolveMemoryFlushPlan({ cfg: params.cfg });
   if (!memoryFlushPlan) {
     return params.sessionEntry;
@@ -1317,5 +1322,3 @@ export async function runMemoryFlushIfNeeded(params: {
 
   return activeSessionEntry;
 }
-
-export { maybeInjectAgentCompactionPressureSignal } from "./agent-compaction-pressure.js";
