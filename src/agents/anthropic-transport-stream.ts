@@ -57,6 +57,8 @@ const CLAUDE_CODE_TOOL_LOOKUP = new Map(
 type AnthropicTransportModel = Model<"anthropic-messages"> & {
   headers?: Record<string, string>;
   provider: string;
+  /** Runtime params passthrough (from ModelDefinitionConfig.params). */
+  params?: Record<string, unknown>;
 };
 
 type AnthropicTransportOptions = AnthropicOptions &
@@ -118,6 +120,10 @@ type MutableAssistantOutput = {
 
 const EMPTY_ANTHROPIC_MESSAGES_FALLBACK_TEXT = ".";
 
+function isClaudeOpus48Model(modelId: string): boolean {
+  return modelId.includes("opus-4-8") || modelId.includes("opus-4.8");
+}
+
 function isClaudeOpus47Model(modelId: string): boolean {
   return modelId.includes("opus-4-7") || modelId.includes("opus-4.7");
 }
@@ -126,13 +132,38 @@ function isClaudeOpus46Model(modelId: string): boolean {
   return modelId.includes("opus-4-6") || modelId.includes("opus-4.6");
 }
 
-function supportsAdaptiveThinking(modelId: string): boolean {
+/**
+ * Reads an explicit per-model thinking-shape override from config
+ * (`params.thinkingApi`). Returns "adaptive" | "enabled" | undefined.
+ * Config wins over the hardcoded id heuristic so new Claude releases
+ * work without a code change.
+ */
+function configuredThinkingApi(
+  model: Pick<AnthropicTransportModel, "params">,
+): "adaptive" | "enabled" | undefined {
+  const raw = model.params?.thinkingApi;
+  if (raw === "adaptive" || raw === "enabled") {
+    return raw;
+  }
+  return undefined;
+}
+
+function supportsAdaptiveThinkingById(modelId: string): boolean {
   return (
+    isClaudeOpus48Model(modelId) ||
     isClaudeOpus47Model(modelId) ||
     isClaudeOpus46Model(modelId) ||
     modelId.includes("sonnet-4-6") ||
     modelId.includes("sonnet-4.6")
   );
+}
+
+function supportsAdaptiveThinking(model: AnthropicTransportModel): boolean {
+  const configured = configuredThinkingApi(model);
+  if (configured) {
+    return configured === "adaptive";
+  }
+  return supportsAdaptiveThinkingById(model.id);
 }
 
 function mapThinkingLevelToEffort(level: ThinkingLevel, modelId: string): AnthropicAdaptiveEffort {
@@ -143,7 +174,7 @@ function mapThinkingLevelToEffort(level: ThinkingLevel, modelId: string): Anthro
     case "medium":
       return "medium";
     case "xhigh":
-      if (isClaudeOpus47Model(modelId)) {
+      if (isClaudeOpus48Model(modelId) || isClaudeOpus47Model(modelId)) {
         return "xhigh";
       }
       return isClaudeOpus46Model(modelId) ? "max" : "high";
@@ -699,7 +730,7 @@ function createAnthropicTransportClient(params: {
 }) {
   const { model, context, apiKey, options } = params;
   const needsInterleavedBeta =
-    (options?.interleavedThinking ?? true) && !supportsAdaptiveThinking(model.id);
+    (options?.interleavedThinking ?? true) && !supportsAdaptiveThinking(model);
   // Kimi's Anthropic thinking SSE is already well-formed for this parser, but
   // the OpenAI SDK compatibility sanitizer can stall before the text block.
   const fetch =
@@ -841,7 +872,7 @@ function buildAnthropicParams(
   }
   if (model.reasoning) {
     if (options?.thinkingEnabled) {
-      if (supportsAdaptiveThinking(model.id)) {
+      if (supportsAdaptiveThinking(model)) {
         params.thinking = { type: "adaptive" };
         if (options.effort) {
           params.output_config = { effort: options.effort };
@@ -903,7 +934,7 @@ function resolveAnthropicTransportOptions(
     resolved.thinkingEnabled = false;
     return resolved;
   }
-  if (supportsAdaptiveThinking(model.id)) {
+  if (supportsAdaptiveThinking(model)) {
     resolved.thinkingEnabled = true;
     resolved.effort = mapThinkingLevelToEffort(options.reasoning, model.id) as NonNullable<
       AnthropicOptions["effort"]

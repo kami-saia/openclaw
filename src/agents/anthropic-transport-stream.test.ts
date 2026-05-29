@@ -13,7 +13,9 @@ vi.mock("./provider-transport-fetch.js", () => ({
 
 let createAnthropicMessagesTransportStreamFn: typeof import("./anthropic-transport-stream.js").createAnthropicMessagesTransportStreamFn;
 
-type AnthropicMessagesModel = Model<"anthropic-messages">;
+type AnthropicMessagesModel = Model<"anthropic-messages"> & {
+  params?: Record<string, unknown>;
+};
 type AnthropicStreamFn = ReturnType<typeof createAnthropicMessagesTransportStreamFn>;
 type AnthropicStreamContext = Parameters<AnthropicStreamFn>[1];
 type AnthropicStreamOptions = Parameters<AnthropicStreamFn>[2];
@@ -118,6 +120,7 @@ function makeAnthropicTransportModel(
     maxTokens?: number;
     headers?: Record<string, string>;
     requestTransport?: RequestTransportConfig;
+    params?: Record<string, unknown>;
   } = {},
 ): AnthropicMessagesModel {
   return attachModelProviderRequestTransport(
@@ -133,6 +136,7 @@ function makeAnthropicTransportModel(
       contextWindow: 200000,
       maxTokens: params.maxTokens ?? 8192,
       ...(params.headers ? { headers: params.headers } : {}),
+      ...(params.params ? { params: params.params } : {}),
     } satisfies AnthropicMessagesModel,
     params.requestTransport ?? {
       proxy: {
@@ -1692,5 +1696,78 @@ describe("anthropic transport stream", () => {
     const payload = latestAnthropicRequest().payload;
     expect(payload.thinking).toEqual({ type: "adaptive" });
     expect(payload.output_config).toEqual({ effort: "xhigh" });
+  });
+
+  it("maps xhigh thinking effort for Claude Opus 4.8 transport runs", async () => {
+    const model = makeAnthropicTransportModel({
+      id: "claude-opus-4-8",
+      name: "Claude Opus 4.8",
+      maxTokens: 8192,
+    });
+
+    await runTransportStream(
+      model,
+      {
+        messages: [{ role: "user", content: "Think extra hard." }],
+      } as AnthropicStreamContext,
+      {
+        apiKey: "sk-ant-api",
+        reasoning: "xhigh",
+      } as AnthropicStreamOptions,
+    );
+
+    const payload = latestAnthropicRequest().payload;
+    expect(payload.thinking).toEqual({ type: "adaptive" });
+    expect(payload.output_config).toEqual({ effort: "xhigh" });
+  });
+
+  it("honors explicit params.thinkingApi=adaptive for an unknown model id", async () => {
+    const model = makeAnthropicTransportModel({
+      id: "claude-future-9-9",
+      name: "Claude Future 9.9",
+      maxTokens: 8192,
+      params: { thinkingApi: "adaptive" },
+    });
+
+    await runTransportStream(
+      model,
+      {
+        messages: [{ role: "user", content: "Think." }],
+      } as AnthropicStreamContext,
+      {
+        apiKey: "sk-ant-api",
+        reasoning: "high",
+      } as AnthropicStreamOptions,
+    );
+
+    const payload = latestAnthropicRequest().payload;
+    expect(payload.thinking).toEqual({ type: "adaptive" });
+    expect("budget_tokens" in (payload.thinking as Record<string, unknown>)).toBe(false);
+  });
+
+  it("honors explicit params.thinkingApi=enabled to force legacy shape on a Claude id", async () => {
+    const model = makeAnthropicTransportModel({
+      id: "claude-opus-4-8",
+      name: "Claude Opus 4.8",
+      maxTokens: 8192,
+      params: { thinkingApi: "enabled" },
+    });
+
+    await runTransportStream(
+      model,
+      {
+        messages: [{ role: "user", content: "Think." }],
+      } as AnthropicStreamContext,
+      {
+        apiKey: "sk-ant-api",
+        reasoning: "high",
+      } as AnthropicStreamOptions,
+    );
+
+    const payload = latestAnthropicRequest().payload;
+    const thinking = payload.thinking as Record<string, unknown>;
+    expect(thinking.type).toBe("enabled");
+    expect(typeof thinking.budget_tokens).toBe("number");
+    expect(payload.output_config).toBeUndefined();
   });
 });
