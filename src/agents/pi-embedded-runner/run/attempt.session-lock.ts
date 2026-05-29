@@ -180,6 +180,14 @@ function sameSessionFileFingerprint(
   if (!left.exists || !right.exists) {
     return true;
   }
+  // FORK: tolerate append-only growth on the same inode. Inbound user messages
+  // arriving while the LLM was thinking (chat dispatcher appends to the jsonl)
+  // would otherwise trip the fence and abort the turn the user is waiting on.
+  // Concurrent embedded runners are still prevented by the file lock; any
+  // non-append rewrite (compaction temp+rename) changes the inode and trips.
+  if (left.dev === right.dev && left.ino === right.ino && right.size >= left.size) {
+    return true;
+  }
   return (
     left.dev === right.dev &&
     left.ino === right.ino &&
