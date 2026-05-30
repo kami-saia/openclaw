@@ -208,6 +208,26 @@ async function withStubbedStateDir<T>(
   }
 }
 
+// FORK: restore test helpers dropped during the v2026.5.28 merge resolution.
+function requireRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`expected ${label}`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireDetails(result: { details?: unknown }, label = "result details") {
+  return requireRecord(result.details, label);
+}
+
+function requireSessions(details: Record<string, unknown>) {
+  const sessions = details.sessions;
+  if (!Array.isArray(sessions)) {
+    throw new Error("expected details.sessions");
+  }
+  return sessions.map((session, index) => requireRecord(session, `session ${index}`));
+}
+
 describe("sanitizeTextContent", () => {
   it("strips minimax tool call XML and downgraded markers", () => {
     const input =
