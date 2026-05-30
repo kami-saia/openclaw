@@ -345,6 +345,8 @@ import {
   type EmbeddedAttemptSessionFileOwner,
   createEmbeddedAttemptSessionLockController,
   installPromptSubmissionLockRelease,
+  installSessionEventWriteLock,
+  installSessionExternalHookWriteLock,
 } from "./attempt.session-lock.js";
 import {
   createYieldAbortedResponse,

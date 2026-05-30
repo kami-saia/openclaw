@@ -157,6 +157,10 @@ export function createCompactTool(options: {
         const pathEntries = sessionManager.getBranch();
 
         const settings = {
+          // FORK: upstream v2026.5.28 added a required `enabled` flag to
+          // CompactionSettings. The compact tool is an explicit, user/agent-
+          // invoked compaction, so it is always enabled.
+          enabled: true,
           reserveTokens: cfg?.agents?.defaults?.compaction?.reserveTokens ?? 0,
           keepRecentTokens: cfg?.agents?.defaults?.compaction?.keepRecentTokens ?? 4096,
         };
