@@ -6,7 +6,7 @@ read_when:
 title: "System prompt"
 ---
 
-OpenClaw builds a custom system prompt for every agent run. The prompt is **OpenClaw-owned** and does not use the pi-coding-agent default prompt.
+OpenClaw builds a custom system prompt for every agent run. The prompt is **OpenClaw-owned** and does not use a runtime default prompt.
 
 The prompt is assembled by OpenClaw and injected into each agent run.
 
@@ -257,6 +257,10 @@ When eligible skills exist, OpenClaw injects a compact **available skills list**
 prompt instructs the model to use `read` to load the SKILL.md at the listed
 location (workspace, managed, or bundled). If no skills are eligible, the
 Skills section is omitted.
+
+The location can point at a nested skill, such as
+`skills/personal/foo/SKILL.md`. Nesting is only organizational; the prompt still
+uses the flat skill name from `SKILL.md` frontmatter.
 
 Eligibility includes skill metadata gates, runtime environment/config checks,
 and the effective agent skill allowlist when `agents.defaults.skills` or
