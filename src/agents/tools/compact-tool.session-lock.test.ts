@@ -33,7 +33,7 @@ vi.mock("../../auto-reply/reply/session-updates.js", () => ({
   incrementCompactionCount: mocks.incrementCompactionCount,
 }));
 
-vi.mock("@earendil-works/pi-coding-agent", () => ({
+vi.mock("../sessions/index.js", () => ({
   SessionManager: { open: mocks.SessionManagerOpen },
 }));
 

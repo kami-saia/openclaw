@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { prepareCompaction, SessionManager } from "../sessions/index.js";
 import { incrementCompactionCount } from "../../auto-reply/reply/session-updates.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import {
@@ -17,45 +17,9 @@ import type { AnyAgentTool } from "./common.js";
 
 const log = createSubsystemLogger("agent-compaction");
 
-// Dynamic import of SDK compaction internals (no type declarations available).
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let prepareCompaction: ((pathEntries: any[], settings: any) => any) | undefined;
-
-async function loadPrepareCompaction(): Promise<void> {
-  try {
-    // SDK internal - not in package.json exports map. Use import.meta to find
-    // our own dist dir, walk up to node_modules. Convert to file:// URL to bypass exports.
-    const { resolve, dirname } = await import("node:path");
-    const { pathToFileURL, fileURLToPath } = await import("node:url");
-    const { existsSync } = await import("node:fs");
-    // Walk up from the bundled file until we find a directory containing node_modules/,
-    // since the bundled output may be nested (e.g. dist/plugin-sdk/).
-    const target = "@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js";
-    let dir = dirname(fileURLToPath(import.meta.url));
-    let abs = "";
-    for (let i = 0; i < 10; i++) {
-      const candidate = resolve(dir, "node_modules", target);
-      if (existsSync(candidate)) {
-        abs = candidate;
-        break;
-      }
-      const parent = dirname(dir);
-      if (parent === dir) {
-        break;
-      }
-      dir = parent;
-    }
-    if (!abs) {
-      throw new Error(`Could not find ${target} in any ancestor node_modules`);
-    }
-    const mod = await import(pathToFileURL(abs).href);
-    prepareCompaction = mod.prepareCompaction as typeof prepareCompaction;
-  } catch (err) {
-    log.warn(`Failed to load SDK prepareCompaction: ${String(err)}`);
-  }
-}
-// Eager init
-const initCompactPromise = loadPrepareCompaction();
+// FORK: upstream v2026.5.28 vendored the pi-coding-agent SDK into
+// src/agents/sessions/, so prepareCompaction is now a local import (was a
+// node_modules-walk dynamic import against the npm package internal).
 
 const CompactToolSchema = Type.Object({
   summary: Type.String({
@@ -85,7 +49,7 @@ export function createCompactTool(options: {
   sessionKey?: string;
   config?: OpenClawConfig;
   workspaceDir?: string;
-  getSessionManager?: () => import("@earendil-works/pi-coding-agent").SessionManager | undefined;
+  getSessionManager?: () => SessionManager | undefined;
   /**
    * Optional: refresh the live agent.state.messages after compaction is appended.
    * Receives the in-flight tool_call_id + the tool_result text so the rebuilt
@@ -117,8 +81,8 @@ export function createCompactTool(options: {
     return null;
   }
 
-  // prepareCompaction loads async — if not ready at tool creation, that's OK.
-  // execute() awaits initCompactPromise before using it.
+  // prepareCompaction is now a static import (upstream vendored the SDK), so it
+  // is always available at tool creation — no async loader to await.
 
   return {
     name: "compact",
@@ -128,7 +92,6 @@ export function createCompactTool(options: {
     label: "Compact conversation history",
     parameters: CompactToolSchema,
     async execute(toolCallId, params) {
-      await initCompactPromise;
       const prep = options.prepareCompactionOverride ?? prepareCompaction;
       if (!prep) {
         return {

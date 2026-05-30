@@ -501,7 +501,7 @@ export function createOpenClawCodingTools(options?: {
   /** Trusted sender identity bit for command/channel-action auth; does not filter model tools. */
   senderIsOwner?: boolean;
   /** Getter for the live SessionManager instance (for compact tool). */
-  getSessionManager?: () => import("@earendil-works/pi-coding-agent").SessionManager | undefined;
+  getSessionManager?: () => import("./sessions/index.js").SessionManager | undefined;
   /** Refresh the live agent state after a compaction is appended (for compact tool). */
   updateAgentMessagesAfterCompaction?: (toolCallId: string, resultText: string) => void;
   /** FORK: wrap compact-tool session writes in the embedded attempt write lock. */

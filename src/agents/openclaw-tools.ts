@@ -152,7 +152,7 @@ export function createOpenClawTools(
     /** Ephemeral session UUID — regenerated on /new and /reset. */
     sessionId?: string;
     /** Getter for the live SessionManager instance (for compact tool). */
-    getSessionManager?: () => import("@earendil-works/pi-coding-agent").SessionManager | undefined;
+    getSessionManager?: () => import("./sessions/index.js").SessionManager | undefined;
     updateAgentMessagesAfterCompaction?: (toolCallId: string, resultText: string) => void;
     /** FORK: wrap compact-tool session writes in the embedded attempt write lock. */
     withSessionWriteLock?: <T>(run: () => Promise<T> | T) => Promise<T>;

@@ -11,7 +11,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "../sessions/index.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock config/sessions module so the tool doesn't resolve real paths
