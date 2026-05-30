@@ -49,7 +49,7 @@ const SessionsSendToolSchema = Type.Object({
   agentId: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
   message: Type.String(),
   // Accepted for back-compat under fork fire-and-forget semantics; ignored.
-  timeoutSeconds: Type.Optional(Type.Integer({ minimum: 0 })),
+  timeoutSeconds: Type.Optional(Type.Number({ minimum: 0 })),
 });
 
 type GatewayCaller = typeof callGateway;

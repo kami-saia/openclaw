@@ -621,7 +621,7 @@ describe("applyAgentAutoCompactionGuard", () => {
       applyOverrides: () => {},
       setCompactionEnabled,
     };
-    const result = applyPiAutoCompactionGuard({
+    const result = applyAgentAutoCompactionGuard({
       settingsManager,
       compactionMode: resolveEffectiveCompactionMode({
         agents: { defaults: { compaction: { mode: "agent" } } },

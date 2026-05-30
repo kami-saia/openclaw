@@ -36,8 +36,11 @@ export function optionalFiniteNumberSchema(options: NumberSchemaOptions = {}) {
 }
 
 export function optionalPositiveIntegerSchema(options: IntegerSchemaOptions = {}) {
+  // FORK: emit Type.Number (not Type.Integer) so the JSON schema type is
+  // "number" rather than "integer". Gemini rejects "integer"-typed tool params,
+  // so all our integer-valued tool inputs must serialize as "number".
   return Type.Optional(
-    Type.Integer({
+    Type.Number({
       minimum: 1,
       ...options,
     }),
@@ -45,8 +48,9 @@ export function optionalPositiveIntegerSchema(options: IntegerSchemaOptions = {}
 }
 
 export function optionalNonNegativeIntegerSchema(options: IntegerSchemaOptions = {}) {
+  // FORK: Type.Number for Gemini compatibility (see optionalPositiveIntegerSchema).
   return Type.Optional(
-    Type.Integer({
+    Type.Number({
       minimum: 0,
       ...options,
     }),
