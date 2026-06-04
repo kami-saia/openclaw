@@ -249,6 +249,23 @@ function supportsReasoningContentReplay(
   return resolveProviderEndpoint(model.baseUrl).endpointClass === "xiaomi-native";
 }
 
+// FORK: GitHub Copilot proxies Claude across multiple backends (Bedrock `msg_bdrk_`,
+// Vertex `msg_vrtx_`, direct `msg_01`). Thinking-block signatures are bound to the
+// producing backend, so replaying them verbatim (upstream 4a45a259ec "preserve signed
+// thinking payloads") fails signature validation when a later turn routes to a different
+// backend -> 400 invalid_request_error "Invalid `signature` in `thinking` block". This
+// deadlocks any compacted Copilot session whose kept tail leads with a signed thinking
+// block. Drop the signature on replay for copilot so the block downgrades to plain text
+// (preserves reasoning visibility, loses nothing the backend will accept). The
+// `reasoning_content` sentinel is NOT a real signature and is left untouched.
+// See TOOLS.md "Copilot thinking-signature replay". Re-check after upstream merges that
+// touch this file.
+function shouldDropThinkingSignatureOnReplay(
+  model: Pick<AnthropicTransportModel, "provider">,
+): boolean {
+  return model.provider === "github-copilot";
+}
+
 function buildAnthropicBetaHeader(
   model: AnthropicTransportModel,
   betaFeatures: readonly string[],
@@ -407,7 +424,14 @@ function convertAnthropicMessages(
           if (block.thinking.trim().length === 0) {
             continue;
           }
-          if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
+          const dropCopilotSignature =
+            shouldDropThinkingSignatureOnReplay(model) &&
+            block.thinkingSignature !== "reasoning_content";
+          if (
+            !block.thinkingSignature ||
+            block.thinkingSignature.trim().length === 0 ||
+            dropCopilotSignature
+          ) {
             blocks.push({
               type: "text",
               text: sanitizeTransportPayloadText(block.thinking),
