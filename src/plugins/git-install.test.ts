@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { redactSensitiveUrlLikeString } from "../shared/net/redact-sensitive-url.js";
+import { redactSensitiveUrlLikeString } from "@openclaw/net-policy/redact-sensitive-url";
 
 const runCommandWithTimeoutMock = vi.fn();
 const installPluginFromInstalledPackageDirMock = vi.fn();
@@ -40,11 +40,6 @@ function expectParsedGitSpec(spec: string) {
   }
   return parsed;
 }
-
-function firstCommandRun(): unknown[] | undefined {
-  return runCommandWithTimeoutMock.mock.calls[0];
-}
-
 function commandArgvAt(index: number): string[] {
   const call = runCommandWithTimeoutMock.mock.calls[index];
   if (!call) {

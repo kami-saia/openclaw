@@ -60,6 +60,7 @@ import {
 import {
   applyImageModelConfigDefaults,
   buildTextToolResult,
+  REMOTE_MEDIA_READ_IDLE_TIMEOUT_MS,
   resolveMediaToolInboundRoots,
   resolveMediaToolLocalRoots,
   resolveRemoteMediaSsrfPolicy,
@@ -91,6 +92,7 @@ type ImageToolLoadWebMediaOptions = {
   localRoots?: readonly string[] | "any";
   inboundRoots?: readonly string[];
   ssrfPolicy?: ReturnType<typeof resolveRemoteMediaSsrfPolicy>;
+  readIdleTimeoutMs?: number;
 };
 
 type ImageWebMediaRuntime = {
@@ -385,7 +387,7 @@ function resolveBundledStaticCompressionModelPolicy(params: {
     cfg: params.cfg,
     workspaceDir: params.workspaceDir,
   });
-  return (model as ProviderRuntimeModel | undefined)?.mediaInput?.image ?? {};
+  return model?.mediaInput?.image ?? {};
 }
 
 function providerUsesRuntimeModelAugment(params: {
@@ -975,6 +977,7 @@ export function createImageTool(options?: {
                 localRoots: mediaLocalRoots,
                 inboundRoots: mediaInboundRoots,
                 ssrfPolicy: remoteMediaSsrfPolicy,
+                ...(isHttpUrl ? { readIdleTimeoutMs: REMOTE_MEDIA_READ_IDLE_TIMEOUT_MS } : {}),
                 imageCompression,
               });
         if (media.kind !== "image") {
@@ -998,10 +1001,6 @@ export function createImageTool(options?: {
         });
       }
 
-      // FORK PATCH (re-applied post-merge): return loaded images as tool-result
-      // image attachments instead of calling a separate vision model. The host
-      // model will then see the images directly in its next turn, just like a
-      // user pasted them. See kami-saia/openclaw#37.
       const imageDetails =
         loadedImages.length === 1
           ? {
@@ -1019,26 +1018,46 @@ export function createImageTool(options?: {
               ),
             };
 
-      const result = {
-        content: [
-          { type: "text" as const, text: promptRaw },
-          ...loadedImages.map((img) => ({
-            type: "image" as const,
-            data: img.buffer.toString("base64"),
-            mimeType: img.mimeType,
-          })),
-        ],
-        details: imageDetails,
-      };
+      // FORK PATCH (kami-saia/openclaw#37): when the HOST model has native
+      // vision, return the loaded images directly as tool-result attachments
+      // so the model sees them in its next turn (just like a user pasted them)
+      // instead of round-tripping through a separate describe/VLM model.
+      //
+      // The rationale only holds when the host model can actually see images.
+      // When it is NOT multimodal we fall through to upstream's vision-model
+      // path so a configured image/VLM model actually describes the image.
+      if (options?.modelHasVision) {
+        const result = {
+          content: [
+            { type: "text" as const, text: promptRaw },
+            ...loadedImages.map((img) => ({
+              type: "image" as const,
+              data: img.buffer.toString("base64"),
+              mimeType: img.mimeType,
+            })),
+          ],
+          details: imageDetails,
+        };
+        return await sanitizeToolResultImages(result, "image");
+      }
 
-      return await sanitizeToolResultImages(result, "image");
+      // MARK: - Run image prompt with all loaded images (upstream vision path)
+      const result = await legacyRunImagePrompt({
+        cfg: options?.config,
+        agentDir,
+        imageModelConfig,
+        modelOverride,
+        prompt: promptRaw,
+        images: loadedImages.map((img) => ({ buffer: img.buffer, mimeType: img.mimeType })),
+        workspaceDir: options?.workspaceDir,
+      });
+
+      return buildTextToolResult(result, imageDetails);
     },
   };
 }
 
-// FORK: image-tool returns images directly (kami-saia/openclaw#37) so upstream's
-// vision-call path is unused. Keep the helpers as dead code in case we ever
-// flip back, but reference them here so noUnusedLocals doesn't fail typecheck.
+// FORK: resolveImageModelConfigForOverride is only reachable on some config
+// shapes; reference it so noUnusedLocals does not fail typecheck.
 void resolveImageModelConfigForOverride;
-void legacyRunImagePrompt;
 export { testing as __testing };

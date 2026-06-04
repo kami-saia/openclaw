@@ -21,7 +21,7 @@ import { findTailscaleBinary } from "../infra/tailscale.js";
 import { resolveSecretInputModeForEnvSelection } from "../plugins/provider-auth-mode.js";
 import { promptSecretRefForSetup } from "../plugins/provider-auth-ref.js";
 import type { RuntimeEnv } from "../runtime.js";
-import { validateIPv4AddressInput } from "../shared/net/ipv4.js";
+import { validateIPv4AddressInput } from "@openclaw/net-policy/ipv4";
 import { maskApiKey } from "../utils/mask-api-key.js";
 import { t } from "./i18n/index.js";
 import type { WizardPrompter } from "./prompts.js";

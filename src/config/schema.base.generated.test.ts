@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SENSITIVE_URL_HINT_TAG } from "../shared/net/redact-sensitive-url.js";
+import { SENSITIVE_URL_HINT_TAG } from "@openclaw/net-policy/redact-sensitive-url";
 import { computeBaseConfigSchemaResponse } from "./schema-base.js";
 
 type TestJsonSchema = {

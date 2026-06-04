@@ -2,7 +2,6 @@ import os from "node:os";
 import path from "node:path";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelMessagingAdapter } from "../../channels/plugins/types.js";
-import { MAX_TIMER_TIMEOUT_MS } from "../../shared/number-coercion.js";
 import { createTestRegistry } from "../../test-utils/channel-plugins.js";
 import { extractAssistantText, sanitizeTextContent } from "./sessions-helpers.js";
 
@@ -928,7 +927,9 @@ describe("sessions_send gating", () => {
     expect((result.details as { reply?: unknown }).reply).toBeUndefined();
   });
 
-  it("caps oversized timeoutSeconds before waiting for the target run", async () => {
+  it("ignores oversized timeoutSeconds under fire-and-forget semantics", async () => {
+    // FORK: sessions_send is fire-and-forget; timeoutSeconds is accepted for
+    // back-compat but ignored, and the tool never issues an agent.wait.
     const tool = createMainSessionsSendTool();
     const waitTimeouts: unknown[] = [];
 
@@ -959,7 +960,7 @@ describe("sessions_send gating", () => {
       timeoutSeconds: Number.MAX_SAFE_INTEGER,
     });
 
-    expect(requireDetails(result).status).toBe("ok");
-    expect(waitTimeouts).toEqual([MAX_TIMER_TIMEOUT_MS]);
+    expect(requireDetails(result).status).toBe("accepted");
+    expect(waitTimeouts).toEqual([]);
   });
 });
