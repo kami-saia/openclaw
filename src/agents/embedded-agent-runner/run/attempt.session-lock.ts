@@ -7,7 +7,52 @@ import { withOwnedSessionTranscriptWrites } from "../../../config/sessions/trans
 import { resolveGlobalSingleton } from "../../../shared/global-singleton.js";
 import { isSessionWriteLockAcquireError } from "../../session-write-lock-error.js";
 import type { acquireSessionWriteLock } from "../../session-write-lock.js";
+import { log } from "../logger.js";
 import { resolveEmbeddedSessionFileKey } from "../session-file-key.js";
+
+// FORK: bound the post-turn session-event-queue drain. waitForSessionEventQueue
+// awaits the _agentEventQueue with NO timeout; if one queued handler (transcript
+// write on a large jsonl, or Discord delivery) stalls, acquireForCleanup never
+// returns, cleanupEmbeddedAttemptResources' lock-release finally never runs, and
+// the session write-lock leaks until the run's own maxHold timeout (minutes).
+// While leaked, every inbound message hits the 60s acquire-timeout and is
+// dropped before reaching the session ("went silent"). The drain is only an
+// ordering optimization — concurrent writes are still serialized by the write
+// lock itself (installSessionEventWriteLock), so timing out here is safe.
+// Re-check after upstream merges touching this file. See TOOLS.md.
+const SESSION_EVENT_QUEUE_DRAIN_TIMEOUT_MS = (() => {
+  const raw = process.env.OPENCLAW_SESSION_EVENT_QUEUE_DRAIN_TIMEOUT_MS;
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 30_000;
+})();
+
+// Resolve `queue` but never block longer than the remaining deadline. Returns
+// "settled" if the queue promise resolved/rejected, or "timed_out" otherwise.
+async function awaitQueuePromiseWithDeadline(
+  queue: PromiseLike<unknown>,
+  remainingMs: number,
+): Promise<"settled" | "timed_out"> {
+  if (remainingMs <= 0) {
+    return "timed_out";
+  }
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve(queue).then(
+        () => "settled" as const,
+        () => "settled" as const,
+      ),
+      new Promise<"timed_out">((resolve) => {
+        timer = setTimeout(() => resolve("timed_out"), remainingMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
 
 type SessionLock = Awaited<ReturnType<typeof acquireSessionWriteLock>>;
 type AcquireSessionWriteLock = typeof acquireSessionWriteLock;
@@ -680,19 +725,34 @@ function readSessionFileFingerprintSync(sessionFile: string): SessionFileFingerp
 
 async function waitForSessionEventQueue(session: unknown): Promise<void> {
   const owner = session as SessionEventQueueOwner;
+  // FORK: deadline-bounded drain (see SESSION_EVENT_QUEUE_DRAIN_TIMEOUT_MS).
+  const deadline = Date.now() + SESSION_EVENT_QUEUE_DRAIN_TIMEOUT_MS;
   for (let attempts = 0; attempts < 5; attempts += 1) {
     const queue = owner?.["_agentEventQueue"];
     if (!queue || typeof queue.then !== "function") {
       return;
     }
-    await Promise.resolve(queue).catch(() => {});
+    const outcome = await awaitQueuePromiseWithDeadline(queue, deadline - Date.now());
+    if (outcome === "timed_out") {
+      log.warn(
+        `session event queue drain timed out after ${SESSION_EVENT_QUEUE_DRAIN_TIMEOUT_MS}ms; ` +
+          `releasing without full drain to avoid write-lock leak`,
+      );
+      return;
+    }
     if (owner?.["_agentEventQueue"] === queue) {
       return;
     }
   }
   const queue = owner?.["_agentEventQueue"];
   if (queue && typeof queue.then === "function") {
-    await Promise.resolve(queue).catch(() => {});
+    const outcome = await awaitQueuePromiseWithDeadline(queue, deadline - Date.now());
+    if (outcome === "timed_out") {
+      log.warn(
+        `session event queue drain timed out after ${SESSION_EVENT_QUEUE_DRAIN_TIMEOUT_MS}ms ` +
+          `(final attempt); releasing without full drain to avoid write-lock leak`,
+      );
+    }
   }
 }
 
