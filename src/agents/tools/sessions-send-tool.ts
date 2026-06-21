@@ -1,27 +1,27 @@
+/**
+ * sessions_send built-in tool.
+ *
+ * Sends messages to visible sessions, starts embedded runs, and optionally announces replies.
+ */
 import crypto from "node:crypto";
+import { finiteSecondsToTimerSafeMilliseconds } from "@openclaw/normalization-core/number-coercion";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { Type } from "typebox";
 import { parseSessionThreadInfoFast } from "../../config/sessions/thread-info.js";
-import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { callGateway } from "../../gateway/call.js";
 import { formatErrorMessage } from "../../infra/errors.js";
-import {
-  isSubagentSessionKey,
-  normalizeAgentId,
-  resolveAgentIdFromSessionKey,
-  toAgentStoreSessionKey,
-} from "../../routing/session-key.js";
+import { normalizeAgentId, resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
 import { annotateInterSessionPromptText } from "../../sessions/input-provenance.js";
+import { isCronRunSessionKey, parseAgentSessionKey } from "../../sessions/session-key-utils.js";
 import { SESSION_LABEL_MAX_LENGTH } from "../../sessions/session-label.js";
-import { finiteSecondsToTimerSafeMilliseconds } from "@openclaw/normalization-core/number-coercion";
-import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import {
   type GatewayMessageChannel,
   INTERNAL_MESSAGE_CHANNEL,
 } from "../../utils/message-channel.js";
-import { listAgentIds } from "../agent-scope.js";
 import {
   type EmbeddedAgentQueueMessageOptions,
+  type EmbeddedAgentQueueMessageOutcome,
   formatEmbeddedAgentQueueFailureSummary,
   queueEmbeddedAgentMessageWithOutcomeAsync,
   resolveActiveEmbeddedRunSessionId,
@@ -54,104 +54,42 @@ const SessionsSendToolSchema = Type.Object({
 
 type GatewayCaller = typeof callGateway;
 
-// FORK: upstream lifts this into a top-level helper inside the renamed
-// embedded-agent-runner subtree; we keep pi-embedded-runner names and inline
-// the helper so the active-run queue fallback can resolve the parent session
-// key from a run-scoped key.
-function resolveRunScopedFallbackSessionKey(sessionKey: string): string | undefined {
-  const match = /^(agent:[^:]+:.+):run:[^:]+$/.exec(sessionKey.trim());
-  return match?.[1];
+function isRunScopedAgentSessionKey(sessionKey: string): boolean {
+  const parsed = parseAgentSessionKey(normalizeOptionalString(sessionKey));
+  return Boolean(parsed && /(?:^|:)run:[^:]+(?::|$)/.test(parsed.rest));
 }
 
-function resolveConfiguredAgentMainSessionKey(params: {
-  cfg: OpenClawConfig;
-  agentId: string;
-  mainKey: string;
-}): string | undefined {
-  const agentId = normalizeAgentId(params.agentId);
-  if (!listAgentIds(params.cfg).includes(agentId)) {
+function resolveCronRunScopedFallbackSessionKey(sessionKey: string): string | undefined {
+  const normalizedSessionKey = normalizeOptionalString(sessionKey);
+  if (!normalizedSessionKey || !isCronRunSessionKey(normalizedSessionKey)) {
     return undefined;
   }
-  return toAgentStoreSessionKey({
-    agentId,
-    requestKey: "main",
-    mainKey: params.mainKey,
-  });
+  const parsed = parseAgentSessionKey(normalizedSessionKey);
+  if (!parsed) {
+    return undefined;
+  }
+  const runMarker = ":run:";
+  const runMarkerIndex = parsed.rest.lastIndexOf(runMarker);
+  if (runMarkerIndex <= 0) {
+    return undefined;
+  }
+  const runId = parsed.rest.slice(runMarkerIndex + runMarker.length);
+  if (!runId || runId.includes(":")) {
+    return undefined;
+  }
+  const fallbackRest = parsed.rest.slice(0, runMarkerIndex);
+  if (!fallbackRest) {
+    return undefined;
+  }
+  return `agent:${parsed.agentId}:${fallbackRest}`;
 }
 
-function isConfiguredAgentMainSessionKey(params: {
-  cfg: OpenClawConfig;
-  sessionKey: string;
-  mainKey: string;
-}): boolean {
-  const agentId = resolveAgentIdFromSessionKey(params.sessionKey);
+function shouldFallbackCronRunScopedActiveDelivery(
+  outcome: EmbeddedAgentQueueMessageOutcome,
+): boolean {
   return (
-    params.sessionKey ===
-    resolveConfiguredAgentMainSessionKey({
-      cfg: params.cfg,
-      agentId,
-      mainKey: params.mainKey,
-    })
+    !outcome.queued && (outcome.reason === "not_streaming" || outcome.reason === "no_active_run")
   );
-}
-
-async function ensureConfiguredAgentMainSession(params: {
-  cfg: OpenClawConfig;
-  callGateway: GatewayCaller;
-  sessionKey: string;
-  mainKey: string;
-}): Promise<{ ok: true } | { ok: false; error: string }> {
-  if (
-    !isConfiguredAgentMainSessionKey({
-      cfg: params.cfg,
-      sessionKey: params.sessionKey,
-      mainKey: params.mainKey,
-    })
-  ) {
-    return { ok: true };
-  }
-
-  try {
-    await params.callGateway({
-      method: "sessions.resolve",
-      params: { key: params.sessionKey },
-      timeoutMs: 10_000,
-    });
-    return { ok: true };
-  } catch {
-    try {
-      await params.callGateway({
-        method: "sessions.create",
-        params: {
-          key: params.sessionKey,
-          agentId: resolveAgentIdFromSessionKey(params.sessionKey),
-        },
-        timeoutMs: 10_000,
-      });
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: formatErrorMessage(err) };
-    }
-  }
-}
-
-type SessionsSendRouteEntry = Pick<SessionEntry, "acp" | "parentSessionKey" | "spawnedBy">;
-
-function isRequesterParentOfNativeSubagentSession(params: {
-  entry: SessionsSendRouteEntry | null | undefined;
-  requesterSessionKey: string | null | undefined;
-  targetSessionKey: string;
-}): boolean {
-  if (!params.entry || params.entry.acp || !isSubagentSessionKey(params.targetSessionKey)) {
-    return false;
-  }
-  const requester = normalizeOptionalString(params.requesterSessionKey);
-  if (!requester) {
-    return false;
-  }
-  const spawnedBy = normalizeOptionalString(params.entry.spawnedBy);
-  const parentSessionKey = normalizeOptionalString(params.entry.parentSessionKey);
-  return requester === spawnedBy || requester === parentSessionKey;
 }
 
 async function startAgentRun(params: {
@@ -160,7 +98,7 @@ async function startAgentRun(params: {
   sendParams: Record<string, unknown>;
   sessionKey: string;
   deliveryTimeoutMs?: number;
-  allowActiveRunQueueFallback?: boolean;
+  allowActiveRunQueueDelivery?: boolean;
 }): Promise<
   | {
       ok: true;
@@ -172,20 +110,24 @@ async function startAgentRun(params: {
   | { ok: false; result: ReturnType<typeof jsonResult> }
 > {
   try {
-    const activeRunSessionId = params.allowActiveRunQueueFallback
-      ? resolveActiveEmbeddedRunSessionId(params.sessionKey)
-      : undefined;
-    const fallbackSessionKey = activeRunSessionId
-      ? resolveRunScopedFallbackSessionKey(params.sessionKey)
-      : undefined;
+    const activeRunSessionId =
+      params.allowActiveRunQueueDelivery && isRunScopedAgentSessionKey(params.sessionKey)
+        ? resolveActiveEmbeddedRunSessionId(params.sessionKey)
+        : undefined;
     const messageText =
       typeof params.sendParams.message === "string" ? params.sendParams.message : undefined;
-    if (activeRunSessionId && fallbackSessionKey && messageText) {
+    if (activeRunSessionId && messageText) {
+      const sourceReplyDeliveryMode =
+        params.sendParams.sourceReplyDeliveryMode === "automatic" ||
+        params.sendParams.sourceReplyDeliveryMode === "message_tool_only"
+          ? params.sendParams.sourceReplyDeliveryMode
+          : undefined;
       const queueOptions: EmbeddedAgentQueueMessageOptions = {
         steeringMode: "all",
         debounceMs: 0,
         deliveryTimeoutMs: params.deliveryTimeoutMs,
         waitForTranscriptCommit: true,
+        ...(sourceReplyDeliveryMode ? { sourceReplyDeliveryMode } : {}),
       };
       let queueOutcome = await queueEmbeddedAgentMessageWithOutcomeAsync(
         activeRunSessionId,
@@ -204,7 +146,8 @@ async function startAgentRun(params: {
       if (queueOutcome.queued) {
         return { ok: true, runId: params.runId, activeRunQueue: true };
       }
-      try {
+      const fallbackSessionKey = resolveCronRunScopedFallbackSessionKey(params.sessionKey);
+      if (fallbackSessionKey && shouldFallbackCronRunScopedActiveDelivery(queueOutcome)) {
         const response = await params.callGateway<{ runId: string }>({
           method: "agent",
           params: {
@@ -221,13 +164,10 @@ async function startAgentRun(params: {
           a2aSessionKey: fallbackSessionKey,
           a2aDisplayKey: fallbackSessionKey,
         };
-      } catch (err) {
-        const queueSummary =
-          formatEmbeddedAgentQueueFailureSummary(queueOutcome) ?? "active run queue rejected";
-        throw new Error(`${queueSummary}; fallback_failed error=${formatErrorMessage(err)}`, {
-          cause: err,
-        });
       }
+      const queueSummary =
+        formatEmbeddedAgentQueueFailureSummary(queueOutcome) ?? "active run queue rejected";
+      throw new Error(queueSummary);
     }
     const response = await params.callGateway<{ runId: string }>({
       method: "agent",
@@ -283,13 +223,6 @@ export function createSessionsSendTool(opts?: {
       const sessionKeyParam = readStringParam(params, "sessionKey");
       const labelParam = normalizeOptionalString(readStringParam(params, "label"));
       const labelAgentIdParam = normalizeOptionalString(readStringParam(params, "agentId"));
-      if (sessionKeyParam && labelParam) {
-        return jsonResult({
-          runId: crypto.randomUUID(),
-          status: "error",
-          error: "Provide either sessionKey or label (not both).",
-        });
-      }
 
       let sessionKey = sessionKeyParam;
       if (!sessionKey && labelParam) {
@@ -397,12 +330,13 @@ export function createSessionsSendTool(opts?: {
         restrictToSpawned,
         visibilitySessionKey: sessionKey,
       });
+      const unresolvedDisplayKey = sessionKey;
       if (!visibleSession.ok) {
         return jsonResult({
           runId: crypto.randomUUID(),
           status: visibleSession.status,
           error: visibleSession.error,
-          sessionKey: visibleSession.displayKey,
+          sessionKey: unresolvedDisplayKey,
         });
       }
       const resolvedKey = visibleSession.key;
@@ -420,7 +354,7 @@ export function createSessionsSendTool(opts?: {
           status: "error",
           error:
             "sessions_send cannot target a thread session for inter-agent coordination. Use the parent channel session key instead.",
-          sessionKey: displayKey,
+          sessionKey: unresolvedDisplayKey,
         });
       }
       const visibilityGuard = await createSessionVisibilityGuard({
@@ -435,7 +369,7 @@ export function createSessionsSendTool(opts?: {
           runId: crypto.randomUUID(),
           status: access.status,
           error: access.error,
-          sessionKey: displayKey,
+          sessionKey: unresolvedDisplayKey,
         });
       }
 

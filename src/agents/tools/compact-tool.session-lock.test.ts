@@ -9,7 +9,9 @@ const mocks = vi.hoisted(() => ({
   resolveStorePath: vi.fn(() => "/tmp/store.json"),
   loadSessionStore: vi.fn(() => ({})),
   resolveSessionFilePathOptions: vi.fn(() => ({})),
-  resolveSessionFilePath: vi.fn(() => ""),
+  resolveSessionFilePath: vi.fn(
+    (_sessionId: string, _entry?: { sessionFile?: string }, _opts?: unknown): string => "",
+  ),
   incrementCompactionCount: vi.fn(async () => undefined),
   SessionManagerOpen: vi.fn(),
   prepareCompactionImpl: vi.fn(() => ({
@@ -78,7 +80,7 @@ describe("compact-tool session write lock (FORK regression)", () => {
   it("wraps appendCompaction AND updateAgentMessagesAfterCompaction inside withSessionWriteLock", async () => {
     const callOrder: string[] = [];
 
-    const withSessionWriteLock = vi.fn(async <T>(run: () => Promise<T> | T) => {
+    const withSessionWriteLock = vi.fn(async <T>(run: () => Promise<T> | T): Promise<T> => {
       callOrder.push("lock:enter");
       try {
         const result = await run();
@@ -94,7 +96,7 @@ describe("compact-tool session write lock (FORK regression)", () => {
       callOrder.push("appendCompaction");
     });
 
-    const updateAgentMessagesAfterCompaction = vi.fn(() => {
+    const updateAgentMessagesAfterCompaction = vi.fn((_toolCallId: string, _resultText: string) => {
       callOrder.push("updateAgentMessages");
     });
 
@@ -102,7 +104,9 @@ describe("compact-tool session write lock (FORK regression)", () => {
       sessionKey: "agent:main:test",
       config: { agents: { defaults: { compaction: { mode: "agent" } } } } as never,
       workspaceDir: tmpDir,
-      withSessionWriteLock,
+      withSessionWriteLock: withSessionWriteLock as unknown as <T>(
+        run: () => Promise<T> | T,
+      ) => Promise<T>,
       updateAgentMessagesAfterCompaction,
       prepareCompactionOverride: mocks.prepareCompactionImpl,
     });

@@ -1,3 +1,4 @@
+// Covers CLI turn compaction lifecycle and external CLI resume-state cleanup.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -42,6 +43,8 @@ function buildContextEngine(params: {
 }
 
 async function writeSessionFile(params: { sessionFile: string; sessionId: string }) {
+  // The lifecycle compacts canonical OpenClaw session JSONL, so tests write the
+  // same session/message envelope the real store appends.
   await fs.mkdir(path.dirname(params.sessionFile), { recursive: true });
   await fs.writeFile(
     params.sessionFile,
@@ -116,6 +119,8 @@ describe("runCliTurnCompactionLifecycle", () => {
     const compactCalls: Array<Parameters<ContextEngine["compact"]>[0]> = [];
     const maintenance = vi.fn(async () => ({ changed: false, bytesFreed: 0, rewrittenEntries: 0 }));
     const settingsCwds: string[] = [];
+    // Compaction settings should be resolved against the task cwd, not the
+    // bootstrap workspace, because CLI prompts may run from nested repos.
     setCliCompactionTestDeps({
       resolveContextEngine: async () => buildContextEngine({ compactCalls }),
       createPreparedEmbeddedAgentSettingsManager: async (params) => {
@@ -187,6 +192,8 @@ describe("runCliTurnCompactionLifecycle", () => {
     const sessionId = "session-cli-snapshot";
     const sessionFile = path.join(tmpDir, "snapshot-session.jsonl");
     const storePath = path.join(tmpDir, "snapshot-sessions.json");
+    const taskCwd = path.join(tmpDir, "snapshot-task-repo");
+    await fs.mkdir(taskCwd, { recursive: true });
     await writeSessionFile({ sessionFile, sessionId });
 
     const sessionEntry: SessionEntry = {
@@ -203,14 +210,18 @@ describe("runCliTurnCompactionLifecycle", () => {
     await fs.writeFile(storePath, JSON.stringify(sessionStore, null, 2), "utf-8");
 
     const compactCalls: Array<Parameters<ContextEngine["compact"]>[0]> = [];
+    const settingsCwds: string[] = [];
     const maintenance = vi.fn(async () => ({ changed: false, bytesFreed: 0, rewrittenEntries: 0 }));
     setCliCompactionTestDeps({
       resolveContextEngine: async () => buildContextEngine({ compactCalls }),
-      createPreparedEmbeddedPiSettingsManager: async () => ({
-        getCompactionReserveTokens: () => 200,
-        getCompactionKeepRecentTokens: () => 0,
-        applyOverrides: () => {},
-      }),
+      createPreparedEmbeddedAgentSettingsManager: async (params) => {
+        settingsCwds.push(params.cwd);
+        return {
+          getCompactionReserveTokens: () => 200,
+          getCompactionKeepRecentTokens: () => 0,
+          applyOverrides: () => {},
+        };
+      },
       shouldPreemptivelyCompactBeforePrompt: () => ({
         route: "fits",
         shouldCompact: false,
@@ -270,6 +281,8 @@ describe("runCliTurnCompactionLifecycle", () => {
     expect(maintenanceCall?.sessionKey).toBe(sessionKey);
     expect(maintenanceCall?.sessionFile).toBe(sessionFile);
     expect(updatedEntry?.compactionCount).toBe(1);
+    // Once OpenClaw rewrites the transcript, external CLI resume ids are stale
+    // and must be cleared so the next turn starts from the compacted prompt.
     expect(updatedEntry?.cliSessionBindings?.["claude-cli"]).toBeUndefined();
     expect(updatedEntry?.cliSessionIds?.["claude-cli"]).toBeUndefined();
     expect(updatedEntry?.claudeCliSessionId).toBeUndefined();

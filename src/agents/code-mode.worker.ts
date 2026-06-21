@@ -1,8 +1,46 @@
+/**
+ * QuickJS worker for Code Mode guest execution and suspended VM snapshots.
+ */
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { parentPort, workerData } from "node:worker_threads";
 import { EvalFlags, Intrinsics, JSException, QuickJS, type JSValueHandle } from "quickjs-wasi";
+
+// FORK: keep this helper inline in the worker instead of importing the shared
+// ./code-mode-json.js module. tsx's `.js`->`.ts` extension rewrite does not
+// apply inside worker threads (proven repo-wide by compaction-planning.worker),
+// so a local sibling import breaks every from-source test that spawns this
+// worker. The non-worker call sites (code-mode.ts, code-mode-namespaces.ts)
+// run on the main thread where tsx resolves the shared module fine.
+function toJsonSafe(value: unknown): unknown {
+  if (value === undefined) {
+    return null;
+  }
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized === undefined ? null : (JSON.parse(serialized) as unknown);
+  } catch {
+    if (value instanceof Error) {
+      return { name: value.name, message: value.message };
+    }
+    if (value === null) {
+      return null;
+    }
+    switch (typeof value) {
+      case "string":
+      case "number":
+      case "boolean":
+        return value;
+      case "bigint":
+      case "symbol":
+      case "function":
+        return String(value);
+      default:
+        return Object.prototype.toString.call(value);
+    }
+  }
+}
 
 const require = createRequire(import.meta.url);
 const QUICKJS_WASM_PATH = require.resolve("quickjs-wasi/quickjs.wasm");
@@ -146,35 +184,6 @@ function getQuickJsWasmModule(): Promise<WebAssembly.Module> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
-function toJsonSafe(value: unknown): unknown {
-  if (value === undefined) {
-    return null;
-  }
-  try {
-    const serialized = JSON.stringify(value);
-    return serialized === undefined ? null : (JSON.parse(serialized) as unknown);
-  } catch {
-    if (value instanceof Error) {
-      return { name: value.name, message: value.message };
-    }
-    if (value === null) {
-      return null;
-    }
-    switch (typeof value) {
-      case "string":
-      case "number":
-      case "boolean":
-        return value;
-      case "bigint":
-      case "symbol":
-      case "function":
-        return String(value);
-      default:
-        return Object.prototype.toString.call(value);
-    }
-  }
 }
 
 function errorMessage(error: unknown): string {
@@ -399,6 +408,8 @@ function createHostRequestHandler(params: {
       args = [];
     }
     const id = `bridge:${params.pendingRequests.length + 1}:${randomUUID()}`;
+    // The guest receives only an opaque id. Host-side tool execution and policy
+    // happen after the worker returns a waiting snapshot.
     params.pendingRequests.push({
       id,
       method,
@@ -622,6 +633,8 @@ async function runExec(input: Extract<CodeModeWorkerInput, { kind: "exec" }>) {
     const resultHandle = getResultHandle(vm);
     try {
       if (pendingRequests.length > 0) {
+        // Pending host work suspends the VM instead of blocking in-worker; the
+        // host resumes with settled bridge results via runResume.
         return waitingResult({ vm, pendingRequests, output, config: input.config });
       }
       if (resultHandle.isPromise && resultHandle.promiseState === 0) {

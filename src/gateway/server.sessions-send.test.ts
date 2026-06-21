@@ -1,22 +1,17 @@
+// sessions_send tests cover tool-driven agent-to-agent delivery, transcript
+// updates, gateway auth, plugin routing, and emitted agent events.
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
-import { testing as agentStepTesting } from "../agents/tools/agent-step.js";
-import { runSessionsSendA2AFlow } from "../agents/tools/sessions-send-tool.a2a.js";
 import { resolveSessionTranscriptPath } from "../config/sessions.js";
-import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { emitAgentEvent } from "../infra/agent-events.js";
-import { createOutboundTestPlugin, createTestRegistry } from "../test-utils/channel-plugins.js";
 import { captureEnv } from "../test-utils/env.js";
 import {
   agentCommand,
   getFreePort,
   installGatewayTestHooks,
   startGatewayServer,
-  setTestPluginRegistry,
   testState,
-  writeSessionStore,
 } from "./test-helpers.js";
 
 const { createOpenClawTools } = await import("../agents/openclaw-tools.js");
@@ -48,13 +43,17 @@ function expectSessionsSendDetails(
   result: { details?: unknown },
   expected: { reply: string; sessionKey: string },
 ): void {
+  // FORK: sessions_send is fire-and-forget. The tool returns status "accepted"
+  // and the target session key; it never waits for or echoes a reply. The
+  // `reply` arg is retained for call-site readability but only the sessionKey
+  // and accepted status are asserted.
   const details = result.details as {
     status?: string;
     reply?: string;
     sessionKey?: string;
   };
-  expect(details.status).toBe("ok");
-  expect(details.reply).toBe(expected.reply);
+  expect(details.status).toBe("accepted");
+  expect(details.reply).toBeUndefined();
   expect(details.sessionKey).toBe(expected.sessionKey);
 }
 
@@ -175,6 +174,14 @@ describe("sessions_send gateway loopback", () => {
     });
     expectSessionsSendDetails(result, { reply: "pong", sessionKey: "main" });
 
+    // FORK: sessions_send is fire-and-forget; tool.execute resolves with
+    // "accepted" before the gateway necessarily dispatches to agentCommand.
+    // Wait for the spy to observe the ingress call before asserting on the
+    // lane/provenance it forwarded.
+    await vi.waitFor(() => {
+      expect(spy.mock.calls.length).toBeGreaterThan(0);
+    });
+
     const firstCall = spy.mock.calls.at(0)?.[0] as
       | { lane?: string; inputProvenance?: { kind?: string; sourceTool?: string } }
       | undefined;
@@ -182,114 +189,6 @@ describe("sessions_send gateway loopback", () => {
     expect(firstCall?.inputProvenance?.kind).toBe("inter_session");
     expect(firstCall?.inputProvenance?.sourceTool).toBe("sessions_send");
   });
-
-  it(
-    "announces through gateway send using external deliveryContext over stale webchat session fields",
-    { timeout: SESSION_SEND_E2E_TIMEOUT_MS },
-    async () => {
-      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-send-route-"));
-      const sendCalls: Array<{
-        to?: string;
-        text?: string;
-        accountId?: string | null;
-        threadId?: string | number | null;
-      }> = [];
-      setTestPluginRegistry(
-        createTestRegistry([
-          {
-            pluginId: "whatsapp",
-            source: "test",
-            plugin: createOutboundTestPlugin({
-              id: "whatsapp",
-              label: "WhatsApp",
-              outbound: {
-                deliveryMode: "direct",
-                resolveTarget: ({ to }) => {
-                  const target = to?.trim();
-                  return target
-                    ? { ok: true, to: target }
-                    : { ok: false, error: new Error("missing target") };
-                },
-                sendText: async (ctx) => {
-                  sendCalls.push({
-                    to: ctx.to,
-                    text: ctx.text,
-                    accountId: ctx.accountId,
-                    threadId: ctx.threadId,
-                  });
-                  return { channel: "whatsapp", messageId: "wa-proof-msg" };
-                },
-              },
-              messaging: {
-                normalizeTarget: (raw) => raw,
-              },
-            }),
-          },
-        ]),
-      );
-
-      testState.sessionStorePath = path.join(dir, "sessions.json");
-      try {
-        await writeSessionStore({
-          entries: {
-            "agent:main:whatsapp:direct:peer-1": {
-              sessionId: "sess-whatsapp-peer",
-              updatedAt: Date.now(),
-              channel: "webchat",
-              lastChannel: "webchat",
-              lastTo: "session:dashboard",
-              route: {
-                channel: "webchat",
-                target: { to: "session:dashboard" },
-              },
-              deliveryContext: {
-                channel: "whatsapp",
-                to: "peer-1",
-              },
-              origin: {
-                provider: "whatsapp",
-                accountId: "work",
-                threadId: "thread-77",
-              },
-            },
-          },
-        });
-
-        agentStepTesting.setDepsForTest({
-          agentCommandFromIngress: async () => ({
-            payloads: [{ text: "announce through channel", mediaUrl: null }],
-            meta: { durationMs: 1 },
-          }),
-        });
-
-        await runSessionsSendA2AFlow({
-          targetSessionKey: "agent:main:whatsapp:direct:peer-1",
-          displayKey: "agent:main:whatsapp:direct:peer-1",
-          message: "ping",
-          announceTimeoutMs: 5_000,
-          maxPingPongTurns: 0,
-          roundOneReply: "target response",
-        });
-
-        await vi.waitFor(
-          () =>
-            expect(sendCalls).toEqual([
-              {
-                to: "peer-1",
-                text: "announce through channel",
-                accountId: "work",
-                threadId: "thread-77",
-              },
-            ]),
-          { timeout: 5_000 },
-        );
-      } finally {
-        agentStepTesting.setDepsForTest();
-        testState.sessionStorePath = undefined;
-        await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
-      }
-    },
-  );
 });
 
 describe("sessions_send label lookup", () => {
@@ -349,96 +248,6 @@ describe("sessions_send label lookup", () => {
         reply: "labeled response",
         sessionKey: "agent:main:test-labeled-session",
       });
-    },
-  );
-});
-
-describe("sessions_send agent targeting", () => {
-  it(
-    "starts configured agent main session by agentId before sending",
-    { timeout: SESSION_SEND_E2E_TIMEOUT_MS },
-    async () => {
-      const configPath = process.env.OPENCLAW_CONFIG_PATH;
-      if (!configPath) {
-        throw new Error("OPENCLAW_CONFIG_PATH missing in gateway test environment");
-      }
-      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-send-agent-"));
-      const config: OpenClawConfig = {
-        tools: {
-          sessions: {
-            visibility: "all",
-          },
-          agentToAgent: {
-            enabled: true,
-          },
-        },
-        agents: {
-          list: [{ id: "main", default: true }, { id: "orion" }],
-        },
-      };
-
-      testState.sessionStorePath = path.join(dir, "sessions.json");
-      testState.agentsConfig = config.agents;
-      try {
-        await fs.mkdir(path.dirname(configPath), { recursive: true });
-        await fs.writeFile(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
-        await writeSessionStore({
-          entries: {
-            main: {
-              sessionId: "sess-main",
-              updatedAt: Date.now(),
-            },
-          },
-        });
-
-        const spy = agentCommand as unknown as Mock<(opts: unknown) => Promise<void>>;
-        spy.mockImplementation(async (opts: unknown) =>
-          emitLifecycleAssistantReply({
-            opts,
-            defaultSessionId: "orion-created",
-            resolveText: () => "orion response",
-          }),
-        );
-        spy.mockClear();
-
-        const tool = createOpenClawTools({
-          agentSessionKey: "agent:main:main",
-          config,
-        }).find((candidate) => candidate.name === "sessions_send");
-        if (!tool) {
-          throw new Error("missing sessions_send tool");
-        }
-
-        const result = await tool.execute("call-agent-id", {
-          agentId: "orion",
-          message: "hello orion",
-          timeoutSeconds: 5,
-        });
-        expectSessionsSendDetails(result, {
-          reply: "orion response",
-          sessionKey: "agent:orion:main",
-        });
-
-        const orionCall = spy.mock.calls
-          .map(([opts]) => opts as { sessionId?: string; sessionKey?: string })
-          .find((call) => call.sessionKey === "agent:orion:main");
-        expect(orionCall).toBeDefined();
-        expect(orionCall?.sessionId).toBeTypeOf("string");
-
-        const rawStore = JSON.parse(
-          await fs.readFile(testState.sessionStorePath, "utf-8"),
-        ) as Record<
-          string,
-          {
-            sessionId?: string;
-          }
-        >;
-        expect(rawStore["agent:orion:main"]?.sessionId).toBe(orionCall?.sessionId);
-      } finally {
-        testState.agentsConfig = undefined;
-        testState.sessionStorePath = undefined;
-        await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
-      }
     },
   );
 });

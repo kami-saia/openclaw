@@ -1,3 +1,4 @@
+// Gateway-first agent CLI implementation with embedded fallback for local/runtime failures.
 import { randomUUID } from "node:crypto";
 import { resolveTimerTimeoutMs } from "@openclaw/normalization-core/number-coercion";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
@@ -146,6 +147,7 @@ function loadReplyPayloadModule() {
   return replyPayloadModulePromise;
 }
 
+/** Test-only hooks for resetting lazy imports and shortening retry timing. */
 export const agentViaGatewayTesting = {
   resetLazyImportsForTests(): void {
     embeddedAgentCommandPromise = undefined;
@@ -229,9 +231,21 @@ function isGatewayAgentTimeoutError(err: unknown): boolean {
   return err instanceof Error && err.message.includes("gateway request timeout for agent");
 }
 
-function isControlCommandThatMustNotFallback(opts: Pick<AgentCliOpts, "message">): boolean {
-  const normalized = opts.message.trim().toLowerCase();
-  return normalized === "/compact" || normalized.startsWith("/compact ");
+function isCompactControlCommand(message: string): boolean {
+  return /^\/compact(?:\s|:|$)/iu.test(message.trim());
+}
+
+// FORK: A gateway-timeout embedded fallback spins up a fresh `gateway-fallback-*`
+// session that lacks the target channel's identity but still reads global routing
+// rules, so it re-routes the message into the real channel session as an orphan
+// agent (e.g. the sentinel `wake_quant` alert getting `sessions_send`'d into
+// #saiabets with cover text). For channel/group targets we refuse the embedded
+// fallback entirely so the caller can use a non-agent send path or retry later.
+function isChannelOrGroupFallbackTarget(to: string | undefined): boolean {
+  if (!to) {
+    return false;
+  }
+  return /(?::|^)(?:channel|group):/i.test(to.trim());
 }
 
 function isSessionResetCommand(message: string): boolean {
@@ -288,6 +302,14 @@ function validateExplicitSessionKeyForDispatch(
 
 async function normalizeSessionKeyOptsForDispatch(opts: AgentCliOpts): Promise<AgentCliOpts> {
   const rawSessionKey = opts.sessionKey?.trim();
+  const rawTo = opts.to?.trim();
+  if (!rawSessionKey && !opts.sessionId?.trim() && classifySessionKeyShape(rawTo) === "agent") {
+    return {
+      ...opts,
+      to: undefined,
+      sessionKey: rawTo,
+    };
+  }
   const isLegacySessionKey =
     rawSessionKey && classifySessionKeyShape(rawSessionKey) === "legacy_or_alias";
   const agentIdRaw = opts.agent?.trim();
@@ -702,6 +724,7 @@ async function agentViaGatewayCommand(
             timeout: timeoutSeconds,
             lane: opts.lane,
             extraSystemPrompt: opts.extraSystemPrompt,
+            cleanupBundleMcpOnRunEnd: true,
             idempotencyKey,
           },
           expectFinal: true,
@@ -828,6 +851,17 @@ export async function agentCliCommand(
   deps?: AgentCliDeps,
 ) {
   protectJsonStdout(opts);
+  // `/compact` cannot run as a plain CLI agent turn: the slash-command handler
+  // rejects CLI-originated senders, so the message would fall through to a
+  // normal turn and exit 0 without compacting anything (issue #90640 Gap B).
+  // Fail loudly and point at the first-class command instead of no-opping.
+  if (isCompactControlCommand(opts.message)) {
+    runtime.error?.(
+      "Slash commands cannot be executed via --message from the CLI. Use: openclaw sessions compact <key>",
+    );
+    runtime.exit(1);
+    return undefined;
+  }
   const dispatchOpts = await normalizeSessionKeyOptsForDispatch(opts);
   validateExplicitSessionKeyForDispatch(dispatchOpts);
   const gatewayDispatchOpts = dispatchOpts.runId
@@ -840,6 +874,7 @@ export async function agentCliCommand(
     replyAccountId: gatewayDispatchOpts.replyAccount,
     cleanupBundleMcpOnRunEnd: true,
     cleanupCliLiveSessionOnRunEnd: true,
+    oneShotCliRun: dispatchOpts.local === true,
     abortSignal: signalBridge.signal,
   };
   try {
@@ -864,7 +899,16 @@ export async function agentCliCommand(
         throw err;
       }
       if (isGatewayAgentTimeoutError(err)) {
-        if (isControlCommandThatMustNotFallback(dispatchOpts)) {
+        // FORK: refuse embedded fresh-session fallback to avoid orphan-agent
+        // re-routing into channel/group targets (see isChannelOrGroupFallbackTarget).
+        if (isChannelOrGroupFallbackTarget(dispatchOpts.to)) {
+          runtime.error?.(
+            `Gateway agent timed out for channel/group target ${String(
+              dispatchOpts.to,
+            )}; refusing embedded fresh-session fallback to avoid orphan-agent re-routing: ${String(
+              err,
+            )}`,
+          );
           throw err;
         }
         const fallbackAgentId = await resolveAgentIdForGatewayTimeoutFallback(dispatchOpts);
