@@ -1,3 +1,8 @@
+/**
+ * OpenClaw built-in and plugin tool assembly.
+ *
+ * Creates the per-run tool inventory from config, channel context, sandbox policy, auth stores, and plugin tools.
+ */
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { SourceReplyDeliveryMode } from "../auto-reply/get-reply-options.types.js";
 import type { InboundEventKind } from "../channels/inbound-event/kind.js";
@@ -37,7 +42,7 @@ import { resolveToolLoopDetectionConfig } from "./tool-loop-detection-config.js"
 import { createAgentsListTool } from "./tools/agents-list-tool.js";
 import type { AnyAgentTool } from "./tools/common.js";
 import { createCompactTool } from "./tools/compact-tool.js";
-import { createCronTool } from "./tools/cron-tool.js";
+import { createCronTool, type CronCreatorToolAllowlistEntry } from "./tools/cron-tool.js";
 import { createEmbeddedCallGateway } from "./tools/embedded-gateway-stub.js";
 import { createGatewayTool } from "./tools/gateway-tool.js";
 import {
@@ -105,8 +110,12 @@ export function createOpenClawTools(
     config?: OpenClawConfig;
     pluginToolAllowlist?: string[];
     pluginToolDenylist?: string[];
+    /** Effective caller tool surface to persist on isolated cron agentTurn jobs. */
+    cronCreatorToolAllowlist?: CronCreatorToolAllowlistEntry[];
     /** Current channel ID for auto-threading. */
     currentChannelId?: string;
+    /** Routable target for the current conversation when it differs from the native channel ID. */
+    currentMessagingTarget?: string;
     /** Current thread timestamp for auto-threading. */
     currentThreadTs?: string;
     /** Current inbound message id for action fallbacks. */
@@ -165,6 +174,11 @@ export function createOpenClawTools(
     updateAgentMessagesAfterCompaction?: (toolCallId: string, resultText: string) => void;
     /** FORK: wrap compact-tool session writes in the embedded attempt write lock. */
     withSessionWriteLock?: <T>(run: () => Promise<T> | T) => Promise<T>;
+    /**
+     * Explicit one-shot local CLI runs should not keep plugin-owned process
+     * resources alive after emitting their result.
+     */
+    oneShotCliRun?: boolean;
     /**
      * Workspace directory to pass to spawned subagents for inheritance.
      * Defaults to workspaceDir. Use this to pass the actual agent workspace when the
@@ -339,6 +353,7 @@ export function createOpenClawTools(
         sessionId: options?.sessionId,
         config: options?.config,
         currentChannelId: options?.currentChannelId,
+        currentMessagingTarget: options?.currentMessagingTarget,
         currentChannelProvider: options?.agentChannel,
         currentThreadTs: options?.currentThreadTs,
         currentInboundAudio: options?.currentInboundAudio,
@@ -432,6 +447,7 @@ export function createOpenClawTools(
               accountId: options?.agentAccountId,
               threadId: options?.currentThreadTs ?? options?.agentThreadId,
             },
+            creatorToolAllowlist: options?.cronCreatorToolAllowlist,
             ...(options?.cronSelfRemoveOnlyJobId
               ? { selfRemoveOnlyJobId: options.cronSelfRemoveOnlyJobId }
               : {}),

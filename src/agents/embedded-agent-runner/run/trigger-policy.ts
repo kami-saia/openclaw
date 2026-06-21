@@ -1,29 +1,29 @@
+/**
+ * Resolves trigger-specific prompt injection behavior.
+ */
 import type { EmbeddedRunTrigger } from "./params.js";
 
 type EmbeddedRunTriggerPolicy = {
   injectHeartbeatPrompt: boolean;
 };
 
-// FORK: default-agent non-cron/non-heartbeat runs SHOULD inject the heartbeat
-// prompt (e.g. user-driven turns on the heartbeat agent). Heartbeat- and
-// cron-triggered runs explicitly suppress it so exec/cron wakes don't
-// re-execute the heartbeat checklist on every event.
 const DEFAULT_EMBEDDED_RUN_TRIGGER_POLICY: EmbeddedRunTriggerPolicy = {
-  injectHeartbeatPrompt: true,
+  injectHeartbeatPrompt: false,
 };
 
 const EMBEDDED_RUN_TRIGGER_POLICY: Partial<Record<EmbeddedRunTrigger, EmbeddedRunTriggerPolicy>> = {
-  cron: {
-    injectHeartbeatPrompt: false,
-  },
-  // FORK: exec completion wakes should not inject the heartbeat prompt.
-  // Without this, exec:*:exit events on non-main sessions cause the agent
-  // to read HEARTBEAT.md and run the full heartbeat checklist.
+  // Heartbeat runs are scheduler-originated and need an explicit prompt nudge;
+  // all user/operator triggers keep their existing prompt shape by default.
   heartbeat: {
-    injectHeartbeatPrompt: false,
+    injectHeartbeatPrompt: true,
   },
 };
 
+/**
+ * Decides whether a run trigger should add the heartbeat-specific prompt
+ * instruction. Unknown or omitted triggers fall back to the user-prompt shape
+ * so non-heartbeat runs do not get scheduler wording.
+ */
 export function shouldInjectHeartbeatPromptForTrigger(trigger?: EmbeddedRunTrigger): boolean {
   return (
     (trigger ? EMBEDDED_RUN_TRIGGER_POLICY[trigger] : undefined)?.injectHeartbeatPrompt ??

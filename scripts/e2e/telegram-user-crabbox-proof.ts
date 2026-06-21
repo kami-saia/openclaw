@@ -1,4 +1,5 @@
 #!/usr/bin/env -S node --import tsx
+// Telegram User Crabbox Proof script supports OpenClaw repository automation.
 
 import { type ChildProcess, spawn, type SpawnOptionsWithoutStdio } from "node:child_process";
 import fs from "node:fs";
@@ -226,10 +227,24 @@ function trimToValue(value: string | undefined) {
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
 }
 
+const positiveIntegerPattern = /^[1-9]\d*$/u;
+
 function parsePositiveInteger(value: string, label: string) {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1) {
+  const trimmed = value.trim();
+  if (!positiveIntegerPattern.test(trimmed)) {
     throw new Error(`${label} must be a positive integer.`);
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`${label} must be a positive integer.`);
+  }
+  return parsed;
+}
+
+function parseTcpPort(value: string, label: string) {
+  const parsed = parsePositiveInteger(value, label);
+  if (parsed > 65_535) {
+    throw new Error(`${label} must be a TCP port from 1 to 65535.`);
   }
   return parsed;
 }
@@ -313,7 +328,7 @@ function parseArgs(argvInput: string[]): Options {
       }
       opts.expect.push(readValue());
     } else if (arg === "--gateway-port") {
-      opts.gatewayPort = parsePositiveInteger(readValue(), "--gateway-port");
+      opts.gatewayPort = parseTcpPort(readValue(), "--gateway-port");
     } else if (arg === "--id") {
       opts.leaseId = readValue();
     } else if (arg === "--idle-timeout") {
@@ -321,7 +336,7 @@ function parseArgs(argvInput: string[]): Options {
     } else if (arg === "--keep-box") {
       opts.keepBox = true;
     } else if (arg === "--mock-port") {
-      opts.mockPort = parsePositiveInteger(readValue(), "--mock-port");
+      opts.mockPort = parseTcpPort(readValue(), "--mock-port");
     } else if (arg === "--mock-response-file") {
       opts.mockResponseText = fs.readFileSync(resolveRepoPath(process.cwd(), readValue()), "utf8");
     } else if (arg === "--message-id") {
@@ -581,6 +596,24 @@ function signalCommandTree(child: ChildProcess, signal: NodeJS.Signals) {
   child.kill(signal);
 }
 
+function commandProcessTreeAlive(child: ChildProcess) {
+  if (!child.pid || process.platform === "win32") {
+    return child.exitCode === null && child.signalCode === null;
+  }
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch (error) {
+    return error && typeof error === "object" && "code" in error && error.code === "EPERM";
+  }
+}
+
+function untrackCommandChild(child: ChildProcess) {
+  if (!commandProcessTreeAlive(child)) {
+    activeCommandChildren.delete(child);
+  }
+}
+
 function signalActiveCommandChildren(signal: NodeJS.Signals) {
   for (const child of activeCommandChildren) {
     signalCommandTree(child, signal);
@@ -692,7 +725,7 @@ export function runCommand(params: {
         return;
       }
       settled = true;
-      activeCommandChildren.delete(child);
+      untrackCommandChild(child);
       clearTimers();
       reject(error);
     });
@@ -701,7 +734,7 @@ export function runCommand(params: {
         return;
       }
       settled = true;
-      activeCommandChildren.delete(child);
+      untrackCommandChild(child);
       if (timeoutError) {
         signalCommandTree(child, "SIGKILL");
         clearTimers();
@@ -798,7 +831,7 @@ function waitForOutput(
 }
 
 function killTree(child: ChildProcess | undefined) {
-  if (!child || child.killed || child.exitCode !== null) {
+  if (!child) {
     return;
   }
   if (!child.pid) {
@@ -854,6 +887,9 @@ function sleep(ms: number) {
 }
 
 function waitForChildExit(child: ChildProcess) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve(child.exitCode);
+  }
   return new Promise<number | null>((resolve, reject) => {
     child.once("error", reject);
     child.once("exit", resolve);
@@ -1448,9 +1484,9 @@ async function sshRun(
   });
 }
 
-function renderRemoteSetup(params: { tdlibSha256?: string; tdlibUrl?: string }) {
-  const tdlibSha256 = JSON.stringify(params.tdlibSha256 ?? "");
-  const tdlibUrl = JSON.stringify(params.tdlibUrl ?? "");
+export function renderRemoteSetup(params: { tdlibSha256?: string; tdlibUrl?: string }) {
+  const tdlibSha256 = shellQuote(params.tdlibSha256 ?? "");
+  const tdlibUrl = shellQuote(params.tdlibUrl ?? "");
   return `#!/usr/bin/env bash
 set -euo pipefail
 root=${REMOTE_ROOT}
@@ -1522,22 +1558,27 @@ TELEGRAM_USER_DRIVER_STATE_DIR="$root/user-driver" python3 "$root/user-driver.py
 `;
 }
 
-function renderLaunchDesktop() {
+export function renderLaunchDesktop() {
   return `#!/usr/bin/env bash
 set -euo pipefail
 root=${REMOTE_ROOT}
 export DISPLAY="\${DISPLAY:-:99}"
+print_desktop_log_tail() {
+  local log_file="$root/telegram-desktop.log"
+  [ -f "$log_file" ] || return 0
+  tail -c 262144 "$log_file" >&2 || true
+}
 pkill -f "$root/Telegram/Telegram" >/dev/null 2>&1 || true
 rm -rf "$root/desktop/tdata"
 nohup "$root/Telegram/Telegram" -workdir "$root/desktop" >"$root/telegram-desktop.log" 2>&1 &
 pid=$!
 sleep 8
 if ! kill -0 "$pid" >/dev/null 2>&1; then
-  cat "$root/telegram-desktop.log" >&2
+  print_desktop_log_tail
   exit 1
 fi
 if ! wmctrl -l | grep -i telegram >/dev/null 2>&1; then
-  cat "$root/telegram-desktop.log" >&2
+  print_desktop_log_tail
   exit 1
 fi
 `;
@@ -1597,10 +1638,10 @@ sleep 6
 `;
 }
 
-function renderSelectDesktopChat(params: { chatTitle: string }) {
+export function renderSelectDesktopChat(params: { chatTitle: string }) {
   return `#!/usr/bin/env bash
 set -euo pipefail
-chat_title=${JSON.stringify(params.chatTitle)}
+chat_title=${shellQuote(params.chatTitle)}
 export DISPLAY="\${DISPLAY:-:99}"
 win="$(wmctrl -l | awk 'tolower($0) ~ /telegram/ {print $1; exit}')"
 test -n "$win"
@@ -1619,7 +1660,7 @@ sleep 1
 `;
 }
 
-function renderRemoteProbe(params: {
+export function renderRemoteProbe(params: {
   expect: string[];
   outputPath?: string;
   sutUsername: string;
@@ -1639,12 +1680,12 @@ function renderRemoteProbe(params: {
   for (const expected of params.expect) {
     args.push("--expect", expected);
   }
-  const escapedArgs = args.map((arg) => JSON.stringify(arg)).join(" ");
+  const escapedArgs = args.map(shellQuote).join(" ");
   return `#!/usr/bin/env bash
 set -euo pipefail
 root=${REMOTE_ROOT}
 export TELEGRAM_USER_DRIVER_STATE_DIR="$root/user-driver"
-export TELEGRAM_USER_DRIVER_SUT_USERNAME=${JSON.stringify(params.sutUsername)}
+export TELEGRAM_USER_DRIVER_SUT_USERNAME=${shellQuote(params.sutUsername)}
 python3 "$root/user-driver.py" ${escapedArgs}
 `;
 }
@@ -1906,7 +1947,7 @@ async function writeRemoteSessionScripts(params: {
     params.inspect,
     `cat >${REMOTE_ROOT}/env.sh <<'EOF'
 export TELEGRAM_USER_DRIVER_STATE_DIR=${REMOTE_ROOT}/user-driver
-export TELEGRAM_USER_DRIVER_SUT_USERNAME=${params.sutUsername}
+export TELEGRAM_USER_DRIVER_SUT_USERNAME=${shellQuote(params.sutUsername)}
 EOF
 `,
   );
@@ -1936,7 +1977,7 @@ async function stopRemoteRecording(root: string, inspect: CrabboxInspect, sessio
     root,
     inspect,
     `set -euo pipefail
-pid_file=${JSON.stringify(session.recorder.pidFile)}
+pid_file=${shellQuote(session.recorder.pidFile)}
 if [ -s "$pid_file" ]; then
   pid="$(cat "$pid_file")"
   kill -INT "$pid" >/dev/null 2>&1 || true

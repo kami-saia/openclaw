@@ -1,3 +1,5 @@
+// Gateway WebSocket broadcaster.
+// Applies event scope guards and slow-consumer handling before sending frames.
 import { logRejectedLargePayload } from "../logging/diagnostic-payload.js";
 import {
   ADMIN_SCOPE,
@@ -29,6 +31,7 @@ const NODE_EXCLUDED_EVENTS = new Set(["chat", "chat.side_result", "agent"]);
 const EVENT_SCOPE_GUARDS: Record<string, string[]> = {
   agent: [READ_SCOPE],
   chat: [READ_SCOPE],
+  "chat.send_timing": [READ_SCOPE],
   "chat.side_result": [READ_SCOPE],
   cron: [READ_SCOPE],
   health: [],
@@ -61,6 +64,8 @@ const EVENT_SCOPE_GUARDS: Record<string, string[]> = {
 const NODE_ALLOWED_EVENTS = new Set<string>(["voicewake.changed", "voicewake.routing.changed"]);
 
 function serializeFrameField(name: "payload" | "stateVersion", value: unknown): string {
+  // Serialize one field through JSON.stringify so embedded values keep JSON
+  // escaping, then splice it into the shared per-client frame body.
   const fieldJSON = JSON.stringify({ [name]: value });
   const keyJSON = JSON.stringify(name);
   const prefix = `{${keyJSON}:`;

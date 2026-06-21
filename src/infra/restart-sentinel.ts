@@ -1,3 +1,4 @@
+// Persists restart sentinel files that coordinate deferred restarts.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { isRecord as isPlainRecord } from "@openclaw/normalization-core/record-coerce";
@@ -123,6 +124,9 @@ export async function finalizeUpdateRestartSentinelRunningVersion(
     }
     const stats = payload.stats ? { ...payload.stats } : {};
     const after = isPlainRecord(stats.after) ? { ...stats.after } : {};
+    if (after.version === version) {
+      return null;
+    }
     after.version = version;
     stats.after = after;
     return {
@@ -193,18 +197,6 @@ export async function readRestartSentinel(
   }
 }
 
-export async function consumeRestartSentinel(
-  env: NodeJS.ProcessEnv = process.env,
-): Promise<RestartSentinel | null> {
-  const filePath = resolveRestartSentinelPath(env);
-  const parsed = await readRestartSentinel(env);
-  if (!parsed) {
-    return null;
-  }
-  await removeRestartSentinelFile(filePath);
-  return parsed;
-}
-
 export function formatRestartSentinelMessage(payload: RestartSentinelPayload): string {
   const message = payload.message?.trim();
   if (message && (!payload.stats || payload.kind === "config-auto-recovery")) {
@@ -231,7 +223,8 @@ export function summarizeRestartSentinel(payload: RestartSentinelPayload): strin
   const kind = payload.kind;
   const status = payload.status;
   const mode = payload.stats?.mode ? ` (${payload.stats.mode})` : "";
-  return `Gateway restart ${kind} ${status}${mode}`.trim();
+  const kindSegment = kind === "restart" ? "" : ` ${kind}`;
+  return `Gateway restart${kindSegment} ${status}${mode}`.trim();
 }
 
 export function trimLogTail(input?: string | null, maxChars = 8000) {

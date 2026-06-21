@@ -1,3 +1,4 @@
+// Tests heartbeat reason formatting and normalization.
 import { describe, expect, it } from "vitest";
 import {
   isHeartbeatActionWakeReason,
@@ -94,12 +95,9 @@ describe("heartbeat-reason", () => {
       "wake",
     ];
 
-    it.each(eventReasons)(
-      "reason %j must bypass isolatedSession (event-driven=true)",
-      (reason) => {
-        expect(isHeartbeatEventDrivenReason(reason)).toBe(true);
-      },
-    );
+    it.each(eventReasons)("reason %j must bypass isolatedSession (event-driven=true)", (reason) => {
+      expect(isHeartbeatEventDrivenReason(reason)).toBe(true);
+    });
 
     const intervalReasons = ["interval", "retry"];
     it.each(intervalReasons)(

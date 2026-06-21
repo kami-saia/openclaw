@@ -24,12 +24,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionEntry } from "../../../config/sessions.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
+import { applyAgentAutoCompactionGuard } from "../../agent-settings.js";
 import {
   resetCliCompactionTestDeps,
   runCliTurnCompactionLifecycle,
   setCliCompactionTestDeps,
 } from "../../command/cli-compaction.js";
-import { applyPiAutoCompactionGuard } from "../../pi-settings.js";
 
 type GuardCall = {
   cfg?: OpenClawConfig;
@@ -63,20 +63,22 @@ function installCliCompactionTestDeps(captured: GuardCall) {
       ({
         info: {} as never,
       }) as never,
-    createPreparedEmbeddedPiSettingsManager: async () => {
+    createPreparedEmbeddedAgentSettingsManager: async () => {
       const stub = buildSettingsManagerStub();
       // Re-bind the captured calls so the assertion below sees them.
       captured.setCompactionEnabledCalls = stub.setCompactionEnabledCalls;
       return stub.settingsManager as never;
     },
-    applyPiAutoCompactionGuard: (params) => {
+    applyAgentAutoCompactionGuard: (
+      params: Parameters<typeof applyAgentAutoCompactionGuard>[0],
+    ) => {
       captured.compactionMode = params.compactionMode;
       captured.contextEngineInfo = params.contextEngineInfo as
         | { ownsCompaction?: boolean }
         | undefined;
       // Delegate to the REAL implementation so the test reflects the
       // real production decision, not a stubbed boolean.
-      return applyPiAutoCompactionGuard(params as never);
+      return applyAgentAutoCompactionGuard(params as never);
     },
     // Force the lifecycle to short-circuit *after* the guard has been
     // applied: claim no preemptive compaction is needed and have the rest

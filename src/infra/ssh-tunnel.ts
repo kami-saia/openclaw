@@ -1,9 +1,10 @@
+// Starts and monitors SSH tunnels for remote gateway access.
 import { spawn } from "node:child_process";
 import net from "node:net";
 import { normalizeStringEntries } from "@openclaw/normalization-core/string-normalization";
 import { formatErrorMessage, isErrno } from "./errors.js";
 import { parseStrictPositiveInteger } from "./parse-finite-number.js";
-import { ensurePortAvailable } from "./ports.js";
+import { ensurePortAvailable, PortInUseError } from "./ports.js";
 
 export type SshParsedTarget = {
   user?: string;
@@ -118,9 +119,9 @@ export async function startSshPortForward(opts: {
 
   let localPort = opts.localPortPreferred;
   try {
-    await ensurePortAvailable(localPort);
+    await ensurePortAvailable(localPort, "127.0.0.1");
   } catch (err) {
-    if (isErrno(err) && err.code === "EADDRINUSE") {
+    if (err instanceof PortInUseError || (isErrno(err) && err.code === "EADDRINUSE")) {
       localPort = await pickEphemeralPort();
     } else {
       throw err;
@@ -131,7 +132,7 @@ export async function startSshPortForward(opts: {
   const args = [
     "-N",
     "-L",
-    `${localPort}:127.0.0.1:${opts.remotePort}`,
+    `127.0.0.1:${localPort}:127.0.0.1:${opts.remotePort}`,
     "-p",
     String(parsed.port),
     "-o",

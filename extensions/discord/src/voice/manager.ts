@@ -1,3 +1,4 @@
+// Discord plugin module implements manager behavior.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { DiscordAccountConfig } from "openclaw/plugin-sdk/config-contracts";
 import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
@@ -58,8 +59,6 @@ import {
   logVoiceVerbose,
   resolveVoiceTimeoutMs,
   MIN_SEGMENT_SECONDS,
-  PLAYBACK_READY_TIMEOUT_MS,
-  SPEAKING_READY_TIMEOUT_MS,
   VOICE_CONNECT_READY_TIMEOUT_MS,
   VOICE_RECONNECT_GRACE_MS,
   type VoiceOperationResult,
