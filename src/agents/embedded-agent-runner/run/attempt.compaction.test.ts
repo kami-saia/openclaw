@@ -52,16 +52,28 @@ function buildSettingsManagerStub() {
 }
 
 function installCliCompactionTestDeps(captured: GuardCall) {
-  // Use the real applyPiAutoCompactionGuard implementation; we want the
+  // Use the real applyAgentAutoCompactionGuard implementation; we want the
   // production decision to flow through, only stubbing surrounding I/O.
+  //
+  // FORK: upstream v2026.6.9 moved the CLI auto-compaction guard to a lazy
+  // call site that runs only on the actual compaction path (after the no-op
+  // early-return), not on every turn. So instead of short-circuiting *after*
+  // the guard, drive the lifecycle *through* compaction: force shouldCompact,
+  // and have the context engine report a clean below-threshold no-op so the
+  // guard runs but no real transcript work happens.
   setCliCompactionTestDeps({
     openSessionManager: () =>
       ({
         getBranch: () => [],
       }) as never,
+    ensureContextEnginesInitialized: () => undefined,
+    // Non-native backend with no native-compaction ownership so the lifecycle
+    // takes the context-engine compaction path (where the guard is applied).
+    resolveCliBackendConfig: () => undefined as never,
     resolveContextEngine: async () =>
       ({
-        info: {} as never,
+        info: { id: "test-context-engine" } as never,
+        compact: async () => ({ compacted: false, reason: "below threshold" }),
       }) as never,
     createPreparedEmbeddedAgentSettingsManager: async () => {
       const stub = buildSettingsManagerStub();
@@ -80,17 +92,13 @@ function installCliCompactionTestDeps(captured: GuardCall) {
       // real production decision, not a stubbed boolean.
       return applyAgentAutoCompactionGuard(params as never);
     },
-    // Force the lifecycle to short-circuit *after* the guard has been
-    // applied: claim no preemptive compaction is needed and have the rest
-    // of the pipeline noop.
+    // Force the lifecycle past the no-op early-return so it reaches the
+    // context-engine compaction path (and therefore the guard).
     shouldPreemptivelyCompactBeforePrompt: () =>
       ({
-        shouldCompact: false,
-        estimatedPromptTokens: 0,
-        // Force the lifecycle to short-circuit *after* the guard runs and
-        // *before* it tries to actually compact (which would need a real
-        // context engine + transcript).
-        promptBudgetBeforeReserve: Number.MAX_SAFE_INTEGER,
+        shouldCompact: true,
+        estimatedPromptTokens: Number.MAX_SAFE_INTEGER,
+        promptBudgetBeforeReserve: 0,
       }) as never,
     resolveLiveToolResultMaxChars: () => 100_000,
     runContextEngineMaintenance: (async () => undefined) as never,
@@ -170,7 +178,8 @@ describe("integration: Pi auto-compaction guard wiring at real call sites", () =
     setCliCompactionTestDeps({
       resolveContextEngine: async () =>
         ({
-          info: { ownsCompaction: true },
+          info: { id: "test-context-engine", ownsCompaction: true } as never,
+          compact: async () => ({ compacted: false, reason: "below threshold" }),
         }) as never,
     });
     await runCliTurnCompactionLifecycle({

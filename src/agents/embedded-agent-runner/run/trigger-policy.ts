@@ -8,14 +8,25 @@ type EmbeddedRunTriggerPolicy = {
 };
 
 const DEFAULT_EMBEDDED_RUN_TRIGGER_POLICY: EmbeddedRunTriggerPolicy = {
-  injectHeartbeatPrompt: false,
+  // FORK: default-agent non-cron/non-heartbeat runs SHOULD inject the heartbeat
+  // prompt (e.g. user-driven turns on the heartbeat agent). Upstream defaults
+  // this to false and only injects for the heartbeat trigger; the fork inverts
+  // it so interactive turns keep heartbeat context while scheduler/exec wakes
+  // below explicitly suppress it.
+  injectHeartbeatPrompt: true,
 };
 
 const EMBEDDED_RUN_TRIGGER_POLICY: Partial<Record<EmbeddedRunTrigger, EmbeddedRunTriggerPolicy>> = {
-  // Heartbeat runs are scheduler-originated and need an explicit prompt nudge;
-  // all user/operator triggers keep their existing prompt shape by default.
+  // FORK: cron-triggered runs suppress the heartbeat prompt so cron wakes don't
+  // re-execute the heartbeat checklist on every event.
+  cron: {
+    injectHeartbeatPrompt: false,
+  },
+  // FORK: exec completion / scheduler heartbeat wakes should not inject the
+  // heartbeat prompt. Without this, exec:*:exit events on non-main sessions
+  // cause the agent to read HEARTBEAT.md and run the full heartbeat checklist.
   heartbeat: {
-    injectHeartbeatPrompt: true,
+    injectHeartbeatPrompt: false,
   },
 };
 
