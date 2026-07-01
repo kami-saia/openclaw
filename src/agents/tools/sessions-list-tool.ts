@@ -5,6 +5,7 @@
  */
 import path from "node:path";
 import {
+  normalizeFastMode,
   normalizeOptionalLowercaseString,
   readStringValue,
 } from "@openclaw/normalization-core/string-coerce";
@@ -21,11 +22,13 @@ import { callGateway } from "../../gateway/call.js";
 import { readSessionTitleFieldsFromTranscriptAsync } from "../../gateway/session-transcript-readers.js";
 import { deriveSessionTitle } from "../../gateway/session-utils.js";
 import { resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
+import { normalizeFastModeAutoOnSeconds, normalizeFastModeSource } from "../../shared/fast-mode.js";
 import { deliveryContextFromSession } from "../../utils/delivery-context.shared.js";
 import {
   describeSessionsListTool,
   SESSIONS_LIST_TOOL_DISPLAY_SUMMARY,
 } from "../tool-description-presets.js";
+import { stripToolMessages } from "./chat-history-text.js";
 import type { AnyAgentTool } from "./common.js";
 import {
   jsonResult,
@@ -45,7 +48,6 @@ import {
   resolveSandboxedSessionToolContext,
   type SessionListRow,
   type SessionRunStatus,
-  stripToolMessages,
 } from "./sessions-helpers.js";
 
 const SessionsListToolSchema = Type.Object({
@@ -260,6 +262,9 @@ export function createSessionsListTool(opts?: {
           }
         }
 
+        const effectiveFastMode = normalizeFastMode(entry.effectiveFastMode);
+        const effectiveFastModeSource = normalizeFastModeSource(entry.effectiveFastModeSource);
+        const fastAutoOnSeconds = normalizeFastModeAutoOnSeconds(entry.fastAutoOnSeconds);
         const row: SessionListRow = {
           key: displayKey,
           agentId: resolvedAgentId,
@@ -325,7 +330,10 @@ export function createSessionsListTool(opts?: {
                 )
             : undefined,
           thinkingLevel: readStringValue(entry.thinkingLevel),
-          fastMode: typeof entry.fastMode === "boolean" ? entry.fastMode : undefined,
+          fastMode: normalizeFastMode(entry.fastMode),
+          ...(effectiveFastMode !== undefined ? { effectiveFastMode } : {}),
+          ...(effectiveFastModeSource !== undefined ? { effectiveFastModeSource } : {}),
+          ...(fastAutoOnSeconds !== undefined ? { fastAutoOnSeconds } : {}),
           verboseLevel: readStringValue(entry.verboseLevel),
           reasoningLevel: readStringValue(entry.reasoningLevel),
           elevatedLevel: readStringValue(entry.elevatedLevel),

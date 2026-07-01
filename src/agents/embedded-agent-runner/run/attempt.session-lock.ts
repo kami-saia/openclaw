@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { createReadStream, readFileSync, statSync } from "node:fs";
 import fs from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
+import { clampTimerTimeoutMs } from "@openclaw/normalization-core/number-coercion";
 import { normalizeStringEntries } from "@openclaw/normalization-core/string-normalization";
 import {
   type OwnedSessionTranscriptPublishedEntry,
@@ -13,6 +14,7 @@ import {
   type OwnedSessionTranscriptCacheSnapshot,
   withOwnedSessionTranscriptWrites,
 } from "../../../config/sessions/transcript-write-context.js";
+import { toErrorObject } from "../../../infra/errors.js";
 import { resolveGlobalSingleton } from "../../../shared/global-singleton.js";
 import { isTranscriptOnlyOpenClawAssistantMessage } from "../../../shared/transcript-only-openclaw-assistant.js";
 import { isSessionWriteLockAcquireError } from "../../session-write-lock-error.js";
@@ -1031,6 +1033,13 @@ function abortOwnerWaitReason(signal: AbortSignal): unknown {
   return abortReason(signal) ?? new Error("operation aborted", { cause: signal });
 }
 
+function resolveSessionFileOwnerWaitTimeoutMs(timeoutMs: number | undefined): number | undefined {
+  if (timeoutMs === undefined) {
+    return undefined;
+  }
+  return clampTimerTimeoutMs(timeoutMs);
+}
+
 function waitForSessionFileOwnerRelease(params: {
   sessionFile: string;
   entry: SessionFileOwnerEntry;
@@ -1039,7 +1048,7 @@ function waitForSessionFileOwnerRelease(params: {
 }): Promise<void> {
   if (params.signal?.aborted) {
     return Promise.reject(
-      toLintErrorObject(abortOwnerWaitReason(params.signal), "Non-Error rejection"),
+      toErrorObject(abortOwnerWaitReason(params.signal), "Non-Error rejection"),
     );
   }
   return new Promise<void>((resolve, reject) => {
@@ -1063,20 +1072,15 @@ function waitForSessionFileOwnerRelease(params: {
     };
     waiter.reject = (error) => {
       cleanup();
-      reject(toLintErrorObject(error, "Non-Error rejection"));
+      reject(toErrorObject(error, "Non-Error rejection"));
     };
-    if (params.timeoutMs !== undefined && Number.isFinite(params.timeoutMs)) {
-      waiter.timer = setTimeout(
-        () => {
-          waiter.reject(
-            new EmbeddedAttemptSessionFileOwnerTimeoutError(
-              params.sessionFile,
-              params.timeoutMs ?? 0,
-            ),
-          );
-        },
-        Math.max(1, Math.floor(params.timeoutMs)),
-      );
+    const timeoutMs = resolveSessionFileOwnerWaitTimeoutMs(params.timeoutMs);
+    if (timeoutMs !== undefined) {
+      waiter.timer = setTimeout(() => {
+        waiter.reject(
+          new EmbeddedAttemptSessionFileOwnerTimeoutError(params.sessionFile, timeoutMs),
+        );
+      }, timeoutMs);
       waiter.timer.unref?.();
     }
     if (params.signal) {
@@ -2377,18 +2381,4 @@ export function installPromptSubmissionLockRelease(params: {
   };
   wrappedStreamFn["__openclawSessionLockPromptReleaseInstalled"] = true;
   agent.streamFn = wrappedStreamFn;
-}
-
-function toLintErrorObject(value: unknown, fallbackMessage: string): Error {
-  if (value instanceof Error) {
-    return value;
-  }
-  if (typeof value === "string") {
-    return new Error(value);
-  }
-  const error = new Error(fallbackMessage, { cause: value });
-  if ((typeof value === "object" && value !== null) || typeof value === "function") {
-    Object.assign(error, value);
-  }
-  return error;
 }
