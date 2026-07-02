@@ -120,7 +120,6 @@ import {
   isRelayableExecCompletionEvent,
 } from "./heartbeat-events-filter.js";
 import { emitHeartbeatEvent, resolveIndicatorType } from "./heartbeat-events.js";
-import { resolveHeartbeatReasonKind } from "./heartbeat-reason.js";
 import {
   computeNextHeartbeatPhaseDueMs,
   resolveHeartbeatPhaseMs,
@@ -1427,18 +1426,6 @@ export async function runHeartbeatOnce(opts: {
     return { status: "skipped", reason: HEARTBEAT_SKIP_REQUESTS_IN_FLIGHT };
   }
 
-  // FORK: trace heartbeat invocations to debug stray :heartbeat sessions
-  log.warn("heartbeat: runHeartbeatOnce entry", {
-    reason: opts.reason,
-    sessionKey: opts.sessionKey,
-    agentId,
-    caller: new Error().stack
-      ?.split("\n")
-      .slice(1, 4)
-      .map((s) => s.trim())
-      .join(" <- "),
-  });
-
   // Preflight centralizes trigger classification, event inspection, and HEARTBEAT.md gating.
   const preflight = await resolveHeartbeatPreflight({
     cfg,
@@ -1485,35 +1472,7 @@ export async function runHeartbeatOnce(opts: {
   const previousUpdatedAt = entry?.updatedAt;
   const dueHeartbeatTasks = resolveDueHeartbeatTasks(preflight, startedAt);
 
-  // When isolatedSession is enabled, create a fresh session via the same
-  // pattern as cron sessionTarget: "isolated". This gives the heartbeat
-  // a new session ID (empty transcript) each run, avoiding the cost of
-  // sending the full conversation history (~100K tokens) to the LLM.
-  // Delivery routing still uses the main session entry (lastChannel, lastTo).
-  // Only use isolated sessions for periodic (interval) heartbeats.
-  // Event-driven wakes (exec completions, cron events) must run on the base session
-  // so they can drain system events from the correct queue. Isolated sessions create
-  // a `:heartbeat` suffixed key that never sees the events enqueued on the base key.
-  const useIsolatedSession =
-    heartbeat?.isolatedSession === true &&
-    !preflight.isExecEventWake &&
-    !preflight.isCronWake &&
-    !preflight.isWakePayload &&
-    !preflight.hasTaggedCronEvents;
-
-  // FORK: trace isolation decision
-  log.warn("heartbeat: isolation decision", {
-    sessionKey,
-    reason: opts.reason,
-    reasonKind: resolveHeartbeatReasonKind(opts.reason),
-    useIsolatedSession,
-    isExecEvent: preflight.isExecEventWake,
-    isCronEvent: preflight.isCronWake,
-    isWake: preflight.isWakePayload,
-    hasTaggedCron: preflight.hasTaggedCronEvents,
-    isolatedCfg: heartbeat?.isolatedSession,
-  });
-
+  const useIsolatedSession = heartbeat?.isolatedSession === true;
   const firstDueCommitment =
     canHeartbeatDeliverCommitments(heartbeat) && dueHeartbeatTasks.length === 0
       ? preflight.dueCommitments[0]
