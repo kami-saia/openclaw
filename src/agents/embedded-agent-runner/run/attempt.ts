@@ -1204,6 +1204,9 @@ export async function runEmbeddedAttempt(
       params.toolsAllow,
       {
         forceMessageTool: forceDirectMessageTool,
+        // FORK: re-add compact to narrowed (e.g. cron-stamped) allowlists when
+        // this session's compaction mode registers the compact tool.
+        forceCompactTool: params.config?.agents?.defaults?.compaction?.mode === "agent",
       },
     );
     const toolConstructionPlan = resolveEmbeddedAttemptToolConstructionPlan({

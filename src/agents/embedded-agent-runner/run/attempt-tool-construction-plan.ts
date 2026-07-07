@@ -132,20 +132,35 @@ export function applyEmbeddedAttemptToolsAllow<T extends { name: string }>(
  */
 export function mergeForcedEmbeddedAttemptToolsAllow(
   toolsAllow: string[] | undefined,
-  params: { forceMessageTool?: boolean },
+  params: { forceMessageTool?: boolean; forceCompactTool?: boolean },
 ): string[] | undefined {
-  if (
-    !params.forceMessageTool ||
-    toolsAllow === undefined ||
-    hasWildcardToolAllowlist(toolsAllow)
-  ) {
+  // FORK: the `compact` tool is registered only inside the embedded run (gated
+  // on compaction.mode==="agent") and is therefore never present in the cron
+  // creator-tool enumeration used to stamp a job's toolsAllow. That silently
+  // strips in-turn compaction from any cron agentTurn firing into a live
+  // session. `compact` is an always-safe session-management tool, so re-add it
+  // to a narrowed allowlist exactly like the forced `message` tool below.
+  const forced: string[] = [];
+  if (params.forceMessageTool) {
+    forced.push("message");
+  }
+  if (params.forceCompactTool) {
+    forced.push("compact");
+  }
+  if (forced.length === 0 || toolsAllow === undefined || hasWildcardToolAllowlist(toolsAllow)) {
     return toolsAllow;
   }
   if (toolsAllow.length === 0) {
-    return ["message"];
+    return [...forced];
   }
   const normalized = new Set(toolsAllow.map((entry) => normalizeToolName(entry)));
-  return normalized.has("message") ? toolsAllow : [...toolsAllow, "message"];
+  const merged = [...toolsAllow];
+  for (const toolName of forced) {
+    if (!normalized.has(toolName)) {
+      merged.push(toolName);
+    }
+  }
+  return merged;
 }
 
 function resolveCodingToolConstructionPlanForAllowlist(

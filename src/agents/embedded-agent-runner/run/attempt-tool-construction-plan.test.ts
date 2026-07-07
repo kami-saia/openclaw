@@ -63,6 +63,44 @@ describe("applyEmbeddedAttemptToolsAllow", () => {
     ]);
   });
 
+  it("re-adds forced compact tool to a narrowed cron-stamped allowlist", () => {
+    // FORK: compact is registered only inside the embedded run, so cron-stamped
+    // allowlists omit it; forceCompactTool must merge it back in.
+    const tools = [{ name: "read" }, { name: "exec" }, { name: "compact" }];
+    const toolsAllow = mergeForcedEmbeddedAttemptToolsAllow(["read", "exec"], {
+      forceCompactTool: true,
+    });
+
+    expect(toolsAllow).toEqual(["read", "exec", "compact"]);
+    expect(applyEmbeddedAttemptToolsAllow(tools, toolsAllow).map((tool) => tool.name)).toEqual([
+      "read",
+      "exec",
+      "compact",
+    ]);
+  });
+
+  it("does not duplicate compact when already present in the allowlist", () => {
+    const toolsAllow = mergeForcedEmbeddedAttemptToolsAllow(["read", "compact"], {
+      forceCompactTool: true,
+    });
+    expect(toolsAllow).toEqual(["read", "compact"]);
+  });
+
+  it("leaves wildcard and undefined allowlists untouched for forced compact", () => {
+    expect(
+      mergeForcedEmbeddedAttemptToolsAllow(undefined, { forceCompactTool: true }),
+    ).toBeUndefined();
+    expect(mergeForcedEmbeddedAttemptToolsAllow(["*"], { forceCompactTool: true })).toEqual(["*"]);
+  });
+
+  it("merges both forced message and compact tools together", () => {
+    const toolsAllow = mergeForcedEmbeddedAttemptToolsAllow(["read"], {
+      forceMessageTool: true,
+      forceCompactTool: true,
+    });
+    expect(toolsAllow).toEqual(["read", "message", "compact"]);
+  });
+
   it("materializes forced message tool through empty runtime allowlists", () => {
     const tools = [{ name: "music_generate" }, { name: "message" }];
     const toolsAllow = mergeForcedEmbeddedAttemptToolsAllow([], {
