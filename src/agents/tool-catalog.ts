@@ -309,6 +309,20 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
     includeInOpenClawGroup: true,
   },
   {
+    // FORK: register the agent-driven compact tool in the core catalog so
+    // profile-based allowlists (tools.profile: "coding") include it. Without
+    // this the compact tool is built during the run but stripped by the tool
+    // policy pipeline (profile allowlist omits uncatalogued tools), so it never
+    // reaches the model on interactive turns. It only registers when
+    // compaction.mode === "agent" (see createCompactTool gate).
+    id: "compact",
+    label: "compact",
+    description: "Compact conversation history using your own summary",
+    sectionId: "agents",
+    profiles: ["coding", "messaging"],
+    includeInOpenClawGroup: true,
+  },
+  {
     id: "image",
     label: "image",
     description: "Image understanding",

@@ -50,6 +50,7 @@ describe("tool-catalog", () => {
       "update_goal",
       "update_plan",
       "skill_workshop",
+      "compact",
       "image",
       "image_generate",
       "music_generate",
@@ -66,6 +67,7 @@ describe("tool-catalog", () => {
       "sessions_send",
       "session_status",
       "message",
+      "compact",
       "bundle-mcp",
     ]);
     expect(requirePolicyAllow("minimal")).toEqual(["session_status"]);
