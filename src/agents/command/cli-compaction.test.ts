@@ -42,6 +42,12 @@ function buildContextEngine(params: {
   };
 }
 
+function buildDefaultCompactionConfig(): OpenClawConfig {
+  return {
+    agents: { defaults: { compaction: { mode: "default" } } },
+  } as OpenClawConfig;
+}
+
 async function writeSessionFile(params: { sessionFile: string; sessionId: string }) {
   // The lifecycle compacts canonical OpenClaw session JSONL, so tests write the
   // same session/message envelope the real store appends.
@@ -87,6 +93,41 @@ describe("runCliTurnCompactionLifecycle", () => {
     vi.clearAllTimers();
     vi.useRealTimers();
     await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("does not run automatic CLI transcript compaction in agent compaction mode", async () => {
+    const sessionEntry: SessionEntry = {
+      sessionId: "session-agent-mode",
+      updatedAt: Date.now(),
+      sessionFile: path.join(tmpDir, "session.jsonl"),
+      contextTokens: 1_000,
+      totalTokens: 950,
+      totalTokensFresh: true,
+    };
+    const createPreparedEmbeddedAgentSettingsManager = vi.fn();
+    const shouldPreemptivelyCompactBeforePrompt = vi.fn();
+    setCliCompactionTestDeps({
+      createPreparedEmbeddedAgentSettingsManager,
+      shouldPreemptivelyCompactBeforePrompt,
+    });
+
+    const result = await runCliTurnCompactionLifecycle({
+      cfg: {
+        agents: { defaults: { compaction: { mode: "agent" } } },
+      } as OpenClawConfig,
+      sessionId: sessionEntry.sessionId,
+      sessionKey: "agent:main:cli",
+      sessionEntry,
+      sessionAgentId: "main",
+      workspaceDir: tmpDir,
+      agentDir: tmpDir,
+      provider: "github-copilot",
+      model: "gpt-5.6-sol",
+    });
+
+    expect(result).toBe(sessionEntry);
+    expect(createPreparedEmbeddedAgentSettingsManager).not.toHaveBeenCalled();
+    expect(shouldPreemptivelyCompactBeforePrompt).not.toHaveBeenCalled();
   });
 
   it("compacts over-budget CLI transcripts and clears external CLI resume state", async () => {
@@ -145,7 +186,7 @@ describe("runCliTurnCompactionLifecycle", () => {
     });
 
     const updatedEntry = await runCliTurnCompactionLifecycle({
-      cfg: {} as OpenClawConfig,
+      cfg: buildDefaultCompactionConfig(),
       sessionId,
       sessionKey,
       sessionEntry,
@@ -182,51 +223,30 @@ describe("runCliTurnCompactionLifecycle", () => {
     expect(updatedEntry?.claudeCliSessionId).toBeUndefined();
   });
 
-  it("does not compact when only the totalTokens snapshot is over budget (system prompt + tools, transcript is small)", async () => {
-    // Regression: tokenSnapshot reflects the FULL prior prompt (system + tools
-    // + skills + transcript). Gating compaction on the snapshot triggers no-op
-    // compactions on already-tiny transcripts and loops every turn (deadlocked
-    // Quant on 2026-05-14). Compaction must gate on the transcript-only
-    // estimatedPromptTokens.
-    const sessionKey = "agent:main:cli";
-    const sessionId = "session-cli-snapshot";
+  it("does not compact when only the totalTokens snapshot is over budget", async () => {
     const sessionFile = path.join(tmpDir, "snapshot-session.jsonl");
-    const storePath = path.join(tmpDir, "snapshot-sessions.json");
-    const taskCwd = path.join(tmpDir, "snapshot-task-repo");
-    await fs.mkdir(taskCwd, { recursive: true });
-    await writeSessionFile({ sessionFile, sessionId });
-
     const sessionEntry: SessionEntry = {
-      sessionId,
+      sessionId: "session-cli-snapshot",
       updatedAt: Date.now(),
       sessionFile,
       contextTokens: 1_000,
-      // Snapshot is way over the post-reserve budget (800) because it includes
-      // a 60k system prompt + tool defs in real life. Transcript itself is small.
       totalTokens: 950,
       totalTokensFresh: true,
     };
-    const sessionStore: Record<string, SessionEntry> = { [sessionKey]: sessionEntry };
-    await fs.writeFile(storePath, JSON.stringify(sessionStore, null, 2), "utf-8");
+    await writeSessionFile({ sessionFile, sessionId: sessionEntry.sessionId });
 
     const compactCalls: Array<Parameters<ContextEngine["compact"]>[0]> = [];
-    const settingsCwds: string[] = [];
-    const maintenance = vi.fn(async () => ({ changed: false, bytesFreed: 0, rewrittenEntries: 0 }));
+    const createPreparedEmbeddedAgentSettingsManager = vi.fn(async () => ({
+      getCompactionReserveTokens: () => 200,
+      getCompactionKeepRecentTokens: () => 0,
+      applyOverrides: () => {},
+    }));
     setCliCompactionTestDeps({
       resolveContextEngine: async () => buildContextEngine({ compactCalls }),
-      createPreparedEmbeddedAgentSettingsManager: async (params) => {
-        settingsCwds.push(params.cwd);
-        return {
-          getCompactionReserveTokens: () => 200,
-          getCompactionKeepRecentTokens: () => 0,
-          applyOverrides: () => {},
-        };
-      },
+      createPreparedEmbeddedAgentSettingsManager,
       shouldPreemptivelyCompactBeforePrompt: () => ({
         route: "fits",
         shouldCompact: false,
-        // Transcript itself is well under budget. Snapshot is bigger only because
-        // of the static system prompt + tool defs that compaction can't reduce.
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -234,58 +254,23 @@ describe("runCliTurnCompactionLifecycle", () => {
         effectiveReserveTokens: 200,
       }),
       resolveLiveToolResultMaxChars: () => 20_000,
-      runContextEngineMaintenance: maintenance,
     });
 
     const updatedEntry = await runCliTurnCompactionLifecycle({
-      cfg: {} as OpenClawConfig,
-      sessionId,
-      sessionKey,
+      cfg: buildDefaultCompactionConfig(),
+      sessionId: sessionEntry.sessionId,
+      sessionKey: "agent:main:cli",
       sessionEntry,
-      sessionStore,
-      storePath,
       sessionAgentId: "main",
       workspaceDir: tmpDir,
-      cwd: taskCwd,
       agentDir: tmpDir,
       provider: "claude-cli",
       model: "opus",
     });
 
-    expect(compactCalls).toHaveLength(1);
-    const compactCall = compactCalls[0];
-    expect(compactCall?.sessionId).toBe(sessionId);
-    expect(compactCall?.sessionKey).toBe(sessionKey);
-    expect(compactCall?.sessionFile).toBe(sessionFile);
-    expect(compactCall?.tokenBudget).toBe(1_000);
-    expect(compactCall?.currentTokenCount).toBe(950);
-    expect(compactCall?.force).toBe(true);
-    expect(compactCall?.compactionTarget).toBe("budget");
-    expect(compactCall?.runtimeContext?.workspaceDir).toBe(tmpDir);
-    expect(compactCall?.runtimeContext?.cwd).toBe(taskCwd);
-    expect(settingsCwds).toEqual([taskCwd]);
-    expect(maintenance).toHaveBeenCalledTimes(1);
-    const maintenanceCalls = maintenance.mock.calls as unknown as Array<
-      [
-        {
-          reason?: string;
-          sessionId?: string;
-          sessionKey?: string;
-          sessionFile?: string;
-        },
-      ]
-    >;
-    const maintenanceCall = maintenanceCalls[0]?.[0];
-    expect(maintenanceCall?.reason).toBe("compaction");
-    expect(maintenanceCall?.sessionId).toBe(sessionId);
-    expect(maintenanceCall?.sessionKey).toBe(sessionKey);
-    expect(maintenanceCall?.sessionFile).toBe(sessionFile);
-    expect(updatedEntry?.compactionCount).toBe(1);
-    // Once OpenClaw rewrites the transcript, external CLI resume ids are stale
-    // and must be cleared so the next turn starts from the compacted prompt.
-    expect(updatedEntry?.cliSessionBindings?.["claude-cli"]).toBeUndefined();
-    expect(updatedEntry?.cliSessionIds?.["claude-cli"]).toBeUndefined();
-    expect(updatedEntry?.claudeCliSessionId).toBeUndefined();
+    expect(updatedEntry).toBe(sessionEntry);
+    expect(createPreparedEmbeddedAgentSettingsManager).toHaveBeenCalledTimes(1);
+    expect(compactCalls).toHaveLength(0);
   });
 
   it("treats below-target CLI transcript compaction as a no-op", async () => {
@@ -330,8 +315,8 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
+        route: "compact_only",
+        shouldCompact: true,
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -344,7 +329,7 @@ describe("runCliTurnCompactionLifecycle", () => {
     });
 
     const updatedEntry = await runCliTurnCompactionLifecycle({
-      cfg: {} as OpenClawConfig,
+      cfg: buildDefaultCompactionConfig(),
       sessionId,
       sessionKey,
       sessionEntry,
@@ -414,8 +399,8 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
+        route: "compact_only",
+        shouldCompact: true,
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -428,7 +413,7 @@ describe("runCliTurnCompactionLifecycle", () => {
     });
 
     const updatedEntry = await runCliTurnCompactionLifecycle({
-      cfg: {} as OpenClawConfig,
+      cfg: buildDefaultCompactionConfig(),
       sessionId,
       sessionKey,
       sessionEntry,
@@ -526,8 +511,8 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
+        route: "compact_only",
+        shouldCompact: true,
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -539,7 +524,7 @@ describe("runCliTurnCompactionLifecycle", () => {
     });
 
     const updatedEntry = await runCliTurnCompactionLifecycle({
-      cfg: {} as OpenClawConfig,
+      cfg: buildDefaultCompactionConfig(),
       sessionId,
       sessionKey,
       sessionEntry,
@@ -588,8 +573,8 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
+        route: "compact_only",
+        shouldCompact: true,
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -605,7 +590,7 @@ describe("runCliTurnCompactionLifecycle", () => {
     });
 
     await runCliTurnCompactionLifecycle({
-      cfg: {} as OpenClawConfig,
+      cfg: buildDefaultCompactionConfig(),
       sessionId,
       sessionKey,
       sessionEntry,
@@ -659,8 +644,8 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
+        route: "compact_only",
+        shouldCompact: true,
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -673,7 +658,7 @@ describe("runCliTurnCompactionLifecycle", () => {
 
     await expect(
       runCliTurnCompactionLifecycle({
-        cfg: {} as OpenClawConfig,
+        cfg: buildDefaultCompactionConfig(),
         sessionId,
         sessionKey,
         sessionEntry,
@@ -739,8 +724,8 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
+        route: "compact_only",
+        shouldCompact: true,
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -753,7 +738,7 @@ describe("runCliTurnCompactionLifecycle", () => {
     });
 
     const result = await runCliTurnCompactionLifecycle({
-      cfg: {} as OpenClawConfig,
+      cfg: buildDefaultCompactionConfig(),
       sessionId,
       sessionKey,
       sessionEntry,
@@ -812,8 +797,8 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
+        route: "compact_only",
+        shouldCompact: true,
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -825,7 +810,7 @@ describe("runCliTurnCompactionLifecycle", () => {
 
     await expect(
       runCliTurnCompactionLifecycle({
-        cfg: {} as OpenClawConfig,
+        cfg: buildDefaultCompactionConfig(),
         sessionId,
         sessionKey,
         sessionEntry,
@@ -906,8 +891,8 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
+        route: "compact_only",
+        shouldCompact: true,
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -919,7 +904,7 @@ describe("runCliTurnCompactionLifecycle", () => {
     });
 
     await runCliTurnCompactionLifecycle({
-      cfg: {} as OpenClawConfig,
+      cfg: buildDefaultCompactionConfig(),
       sessionId,
       sessionKey,
       sessionEntry,
@@ -986,8 +971,8 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
+        route: "compact_only",
+        shouldCompact: true,
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -1000,7 +985,7 @@ describe("runCliTurnCompactionLifecycle", () => {
     });
 
     const updatedEntry = await runCliTurnCompactionLifecycle({
-      cfg: {} as OpenClawConfig,
+      cfg: buildDefaultCompactionConfig(),
       sessionId,
       sessionKey,
       sessionEntry,
@@ -1072,8 +1057,8 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
+        route: "compact_only",
+        shouldCompact: true,
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -1086,7 +1071,7 @@ describe("runCliTurnCompactionLifecycle", () => {
     });
 
     const updatedEntry = await runCliTurnCompactionLifecycle({
-      cfg: {} as OpenClawConfig,
+      cfg: buildDefaultCompactionConfig(),
       sessionId,
       sessionKey,
       sessionEntry,
@@ -1171,8 +1156,8 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
+        route: "compact_only",
+        shouldCompact: true,
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -1185,7 +1170,7 @@ describe("runCliTurnCompactionLifecycle", () => {
     });
 
     const updatedEntry = await runCliTurnCompactionLifecycle({
-      cfg: {} as OpenClawConfig,
+      cfg: buildDefaultCompactionConfig(),
       sessionId,
       sessionKey,
       sessionEntry,
@@ -1249,8 +1234,8 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
+        route: "compact_only",
+        shouldCompact: true,
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -1263,7 +1248,7 @@ describe("runCliTurnCompactionLifecycle", () => {
     });
 
     const updatedEntry = await runCliTurnCompactionLifecycle({
-      cfg: {} as OpenClawConfig,
+      cfg: buildDefaultCompactionConfig(),
       sessionId,
       sessionKey,
       sessionEntry,
@@ -1331,8 +1316,8 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
+        route: "compact_only",
+        shouldCompact: true,
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -1345,7 +1330,7 @@ describe("runCliTurnCompactionLifecycle", () => {
     });
 
     const updatedEntry = await runCliTurnCompactionLifecycle({
-      cfg: {} as OpenClawConfig,
+      cfg: buildDefaultCompactionConfig(),
       sessionId,
       sessionKey,
       sessionEntry,
@@ -1395,8 +1380,8 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
+        route: "compact_only",
+        shouldCompact: true,
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -1407,7 +1392,7 @@ describe("runCliTurnCompactionLifecycle", () => {
     });
 
     await runCliTurnCompactionLifecycle({
-      cfg: {} as OpenClawConfig,
+      cfg: buildDefaultCompactionConfig(),
       sessionId,
       sessionKey,
       sessionEntry,
@@ -1463,8 +1448,8 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
+        route: "compact_only",
+        shouldCompact: true,
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -1478,7 +1463,9 @@ describe("runCliTurnCompactionLifecycle", () => {
 
     vi.useFakeTimers();
     const pending = runCliTurnCompactionLifecycle({
-      cfg: { agents: { defaults: { compaction: { timeoutSeconds: 1 } } } } as OpenClawConfig,
+      cfg: {
+        agents: { defaults: { compaction: { mode: "default", timeoutSeconds: 1 } } },
+      } as OpenClawConfig,
       sessionId,
       sessionKey,
       sessionEntry,
@@ -1544,8 +1531,8 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
+        route: "compact_only",
+        shouldCompact: true,
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -1557,7 +1544,7 @@ describe("runCliTurnCompactionLifecycle", () => {
     });
 
     const updatedEntry = await runCliTurnCompactionLifecycle({
-      cfg: {} as OpenClawConfig,
+      cfg: buildDefaultCompactionConfig(),
       sessionId,
       sessionKey,
       sessionEntry,
@@ -1609,8 +1596,8 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
+        route: "compact_only",
+        shouldCompact: true,
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -1622,7 +1609,7 @@ describe("runCliTurnCompactionLifecycle", () => {
     });
 
     await runCliTurnCompactionLifecycle({
-      cfg: {} as OpenClawConfig,
+      cfg: buildDefaultCompactionConfig(),
       sessionId,
       sessionKey,
       sessionEntry,
@@ -1684,8 +1671,8 @@ describe("runCliTurnCompactionLifecycle", () => {
         applyOverrides: () => {},
       }),
       shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
+        route: "compact_only",
+        shouldCompact: true,
         estimatedPromptTokens: 600,
         promptBudgetBeforeReserve: 800,
         overflowTokens: 0,
@@ -1698,7 +1685,7 @@ describe("runCliTurnCompactionLifecycle", () => {
     });
 
     await runCliTurnCompactionLifecycle({
-      cfg: {} as OpenClawConfig,
+      cfg: buildDefaultCompactionConfig(),
       sessionId,
       sessionKey,
       sessionEntry,

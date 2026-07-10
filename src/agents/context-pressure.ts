@@ -1,6 +1,9 @@
 /** Pressure thresholds for context pressure signaling. */
 const PRESSURE_SILENT = 0.75;
-const PRESSURE_RECOMMEND = 0.85;
+// FORK: Recommend at the first pressure signal. Waiting until 0.85 allowed the
+// pre-turn CLI prompt estimator to overflow before the agent could receive and
+// act on the compact-tool instruction (observed at API-reported pressure 0.82).
+const PRESSURE_RECOMMEND = 0.75;
 
 /** Track last emitted pressure to avoid redundant signals below RECOMMEND threshold. */
 let lastEmittedPressure: number | null = null;

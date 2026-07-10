@@ -525,6 +525,14 @@ export async function runCliTurnCompactionLifecycle(params: {
     return params.sessionEntry;
   }
 
+  // FORK: Agent-owned compaction must not be preempted by the CLI lifecycle.
+  // The agent will receive a context-pressure event and invoke the compact tool
+  // itself; running transcript compaction here silently replaces that flow.
+  const compactionMode = resolveEffectiveCompactionMode(params.cfg);
+  if (compactionMode === "agent") {
+    return params.sessionEntry;
+  }
+
   const sessionManager = cliCompactionDeps.openSessionManager(sessionFile);
   const settingsManager = await cliCompactionDeps.createPreparedEmbeddedAgentSettingsManager({
     cwd: params.cwd ?? params.workspaceDir,
@@ -590,7 +598,7 @@ export async function runCliTurnCompactionLifecycle(params: {
     await cliCompactionDeps.applyAgentAutoCompactionGuard({
       settingsManager,
       contextEngineInfo: contextEngine.info,
-      compactionMode: resolveEffectiveCompactionMode(params.cfg),
+      compactionMode,
     });
   };
 

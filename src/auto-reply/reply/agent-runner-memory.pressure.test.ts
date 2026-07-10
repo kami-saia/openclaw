@@ -48,7 +48,7 @@ describe("agent compaction pressure signaling", () => {
     resetPressureTrackingForTestsHook();
   });
 
-  it("enqueues a pressure signal at 76% when compaction.mode is agent", async () => {
+  it("enqueues a compaction-recommended pressure signal at 76% when compaction.mode is agent", async () => {
     const entry = createEntry(76_000);
     maybeInjectAgentCompactionPressureSignal({
       cfg: createCfg("agent"),
@@ -63,7 +63,7 @@ describe("agent compaction pressure signaling", () => {
 
     const expected = formatContextPressureMessage({
       pressure: 0.76,
-      compactionRecommended: false,
+      compactionRecommended: true,
     });
     expect(enqueueSystemEventMock).toHaveBeenCalledWith(expected, {
       sessionKey: "agent:main:main",
@@ -104,7 +104,7 @@ describe("agent compaction pressure signaling", () => {
     expect(enqueueSystemEventMock).not.toHaveBeenCalled();
   });
 
-  it("76% fires once only below RECOMMEND threshold", async () => {
+  it("76% fires every turn at/above RECOMMEND threshold", async () => {
     const entry = createEntry(76_000);
     const params = {
       cfg: createCfg("agent"),
@@ -119,7 +119,7 @@ describe("agent compaction pressure signaling", () => {
     maybeInjectAgentCompactionPressureSignal(params);
     await new Promise((r) => setTimeout(r, 50));
 
-    expect(enqueueSystemEventMock).toHaveBeenCalledTimes(1);
+    expect(enqueueSystemEventMock).toHaveBeenCalledTimes(2);
   });
 
   it("86% fires every turn at/above RECOMMEND threshold", async () => {
@@ -140,7 +140,7 @@ describe("agent compaction pressure signaling", () => {
     expect(enqueueSystemEventMock).toHaveBeenCalledTimes(2);
   });
 
-  it("escalation from 76% to 86% fires both times", async () => {
+  it("continued pressure from 76% to 86% fires both times", async () => {
     const params76 = {
       cfg: createCfg("agent"),
       sessionEntry: createEntry(76_000),

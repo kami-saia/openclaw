@@ -110,7 +110,9 @@ async function estimateSessionTokensFromTranscriptDefault(
     // perturb the tsdown chunk graph. Close enough for pressure thresholds.
     const estimateMessageTokens = (msg: unknown): number => {
       const m = msg as Record<string, unknown> | null;
-      if (!m) return 0;
+      if (!m) {
+        return 0;
+      }
       const content = m.content;
       let chars = 0;
       if (typeof content === "string") {
@@ -118,7 +120,9 @@ async function estimateSessionTokensFromTranscriptDefault(
       } else if (Array.isArray(content)) {
         for (const block of content) {
           const b = block as Record<string, unknown> | null;
-          if (b && typeof b.text === "string") chars += b.text.length;
+          if (b && typeof b.text === "string") {
+            chars += b.text.length;
+          }
         }
       }
       return Math.ceil(chars / 4);
@@ -171,7 +175,7 @@ export async function maybeInjectAgentCompactionPressureSignal(params: {
   logVerbose(
     `preflightCompaction check: sessionKey=${params.sessionKey} ` +
       `tokenCount=${totalTokens} contextWindow=${contextWindowTokens} ` +
-      `threshold=${contextWindowTokens * 0.85} ` +
+      `threshold=${contextWindowTokens * 0.75} ` +
       `estimated=true method=${tokenSource}`,
   );
 
