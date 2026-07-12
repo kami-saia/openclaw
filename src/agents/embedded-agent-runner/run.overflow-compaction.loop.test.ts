@@ -112,6 +112,33 @@ describe("overflow compaction in run loop", () => {
     expect(result.meta.error).toBeUndefined();
   });
 
+  it("uses tool-result truncation instead of automatic overflow compaction in agent mode", async () => {
+    queueOverflowAttemptWithOversizedToolOutput(mockedRunEmbeddedAttempt);
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(makeAttemptResult({ promptError: null }));
+    mockedSessionLikelyHasOversizedToolResults.mockReturnValue(true);
+    mockedTruncateOversizedToolResultsInSession.mockResolvedValue({
+      truncated: true,
+      truncatedCount: 1,
+    });
+
+    const result = await runEmbeddedAgent({
+      ...baseParams,
+      config: {
+        agents: { defaults: { compaction: { mode: "agent" } } },
+      },
+    });
+
+    expect(mockedCompactDirect).not.toHaveBeenCalled();
+    expect(mockedTruncateOversizedToolResultsInSession).toHaveBeenCalledTimes(1);
+    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(2);
+    expect(result.meta.error).toBeUndefined();
+    expectLogIncludes(
+      mockedLog.warn,
+      "skipping automatic overflow compaction because agent mode owns compaction",
+    );
+    expectLogIncludes(mockedLog.info, "Truncated 1 tool result(s); retrying prompt");
+  });
+
   it("keeps fallback unsafe when an overflow retry follows a mutating attempt", async () => {
     const overflowError = makeOverflowError();
     mockedRunEmbeddedAttempt

@@ -48,6 +48,7 @@ import {
   resolveSessionAgentIds,
   resolveAgentWorkspaceDir,
 } from "../agent-scope.js";
+import { resolveEffectiveCompactionMode } from "../agent-settings.js";
 import type { ToolOutcomeObservation } from "../agent-tools.before-tool-call.js";
 import { resolveProcessToolScopeKey } from "../agent-tools.js";
 import {
@@ -2622,8 +2623,18 @@ async function runEmbeddedAgentInternal(
               continue;
             }
             // Attempt explicit overflow compaction only when this attempt did not
-            // already auto-compact.
+            // already auto-compact. In agent mode, the agent exclusively owns
+            // compaction; overflow recovery may still truncate oversized tool
+            // results below, but it must never synthesize a summary behind the
+            // agent's back.
+            const agentOwnsCompaction = resolveEffectiveCompactionMode(params.config) === "agent";
+            if (agentOwnsCompaction && !isCompactionFailure && !hadAttemptLevelCompaction) {
+              log.warn(
+                `context overflow detected for ${provider}/${modelId}; skipping automatic overflow compaction because agent mode owns compaction`,
+              );
+            }
             if (
+              !agentOwnsCompaction &&
               !isCompactionFailure &&
               !hadAttemptLevelCompaction &&
               overflowCompactionAttempts < MAX_OVERFLOW_COMPACTION_ATTEMPTS
