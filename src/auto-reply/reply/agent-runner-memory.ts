@@ -881,30 +881,8 @@ export async function runPreflightCompactionIfNeeded(params: {
       ? projectedTokenCount
       : undefined;
 
-  // FORK: agent-owned compaction must be actionable in this model invocation.
-  // Queueing a system event here is too late: prompt construction has already
-  // drained events, so the marker would not arrive until a later run (or until
-  // after this one overflowed). Put the trusted System: block directly into the
-  // runtime prompt and leave compaction itself to the compact tool.
+  // FORK: defer agent-owned pressure signaling to the authoritative LLM boundary.
   if (params.cfg.agents?.defaults?.compaction?.mode === "agent") {
-    const { maybeBuildAgentCompactionPressureSignal } =
-      await import("./agent-compaction-pressure.runtime.js");
-    const pressureMessage = await maybeBuildAgentCompactionPressureSignal({
-      cfg: params.cfg,
-      sessionEntry: entry,
-      sessionKey: params.sessionKey,
-      defaultModel: params.defaultModel,
-      agentCfgContextTokens: contextWindowTokens,
-      totalTokens: tokenCountForCompaction,
-    });
-    if (pressureMessage) {
-      const pressureBlock = pressureMessage
-        .split("\n")
-        .map((line) => `System: ${line}`)
-        .join("\n");
-      params.followupRun.prompt = `${pressureBlock}\n\n${params.followupRun.prompt}`;
-      params.followupRun.agentCompactionPressureInjected = true;
-    }
     return entry ?? params.sessionEntry;
   }
 
@@ -1093,28 +1071,10 @@ export async function runMemoryFlushIfNeeded(params: {
   replyOperation: ReplyOperation;
   onVisibleErrorPayloads?: (payloads: ReplyPayload[]) => void;
 }): Promise<SessionEntry | undefined> {
-  // FORK: agent-controlled compaction. When enabled, inject a context-pressure
-  // system event instead of running a memory-flush turn (works regardless of
-  // whether a memory plugin is configured).
+  // FORK: the embedded runner signals from the authoritative LLM boundary.
   const compactionMode = params.cfg?.agents?.defaults?.compaction?.mode;
   if (compactionMode === "agent") {
-    // Preflight normally injected the signal into this exact run. Do not also
-    // queue a duplicate for the next invocation.
-    if (params.followupRun.agentCompactionPressureInjected) {
-      return params.sessionEntry;
-    }
-    // Dynamic import isolates agent-compaction-pressure (and its context-pressure
-    // dependency) from this module's chunk graph; a static edge perturbs tsdown
-    // chunk-init ordering and breaks unrelated runtime chunks. See 2026-05-28 merge note.
-    const { maybeInjectAgentCompactionPressureSignal } =
-      await import("./agent-compaction-pressure.runtime.js");
-    return maybeInjectAgentCompactionPressureSignal({
-      cfg: params.cfg,
-      sessionEntry: params.sessionEntry,
-      sessionKey: params.sessionKey,
-      defaultModel: params.defaultModel,
-      agentCfgContextTokens: params.agentCfgContextTokens,
-    });
+    return params.sessionEntry;
   }
 
   const memoryFlushPlan = resolveMemoryFlushPlan({ cfg: params.cfg });

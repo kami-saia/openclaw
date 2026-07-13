@@ -153,6 +153,7 @@ import {
   createCodeModeTools,
   resolveCodeModeConfig,
 } from "../../code-mode.js";
+import { buildAgentCompactionPressurePrompt } from "../../context-pressure.js";
 import { resolveUserTimezone } from "../../date-time.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../defaults.js";
 import { resolveOpenClawReferencePaths } from "../../docs-path.js";
@@ -1386,7 +1387,7 @@ export async function runEmbeddedAttempt(
                     ? (last.content as Array<Record<string, unknown>>)
                     : [];
                 const hasOrphan =
-                  !!last &&
+                  Boolean(last) &&
                   last.role === "assistant" &&
                   lastContent.some((b) => b?.type === "toolCall" && b?.id === toolCallId);
                 if (hasOrphan) {
@@ -4300,7 +4301,7 @@ export async function runEmbeddedAttempt(
             context: params.currentInboundContext,
             prompt: promptSubmission.prompt,
           });
-          const promptForModel = buildCurrentInboundPrompt({
+          let promptForModel = buildCurrentInboundPrompt({
             context: params.currentInboundContext,
             prompt: promptSubmission.modelPrompt ?? promptSubmission.prompt,
           });
@@ -4617,7 +4618,7 @@ export async function runEmbeddedAttempt(
             );
           }
 
-          const llmBoundaryPromptForPrecheck = normalizeCurrentPromptTextForLlmBoundary({
+          let llmBoundaryPromptForPrecheck = normalizeCurrentPromptTextForLlmBoundary({
             prompt: promptForModel,
             ...(boundaryTimezone ? { timezone: boundaryTimezone } : {}),
             ...(includeBoundaryTimestamp ? {} : { includeTimestamp: false }),
@@ -4625,6 +4626,43 @@ export async function runEmbeddedAttempt(
               ? { currentUserTimestamp: preparedUserTurnMessage.timestamp }
               : {}),
           });
+
+          // FORK: decide agent-owned compaction pressure from the authoritative,
+          // fully assembled LLM boundary. Keep it model-only, not in the transcript.
+          let llmBoundaryTokenPressure = estimateLlmBoundaryTokenPressure({
+            messages: hookMessagesForCurrentPrompt,
+            systemPrompt: systemPromptForHook,
+            prompt: llmBoundaryPromptForPrecheck,
+          });
+          if (params.config?.agents?.defaults?.compaction?.mode === "agent") {
+            const pressureBlock = buildAgentCompactionPressurePrompt({
+              prompt: promptForModel,
+              estimatedPromptTokens: llmBoundaryTokenPressure,
+              contextWindowTokens: contextTokenBudget,
+            });
+            if (pressureBlock) {
+              promptForModel = `${pressureBlock}\n\n${promptForModel}`;
+              if (currentUserTimestampOverride) {
+                currentUserTimestampOverride.alternateText = promptForModel;
+              }
+              llmBoundaryPromptForPrecheck = normalizeCurrentPromptTextForLlmBoundary({
+                prompt: promptForModel,
+                ...(boundaryTimezone ? { timezone: boundaryTimezone } : {}),
+                ...(includeBoundaryTimestamp ? {} : { includeTimestamp: false }),
+                ...(typeof preparedUserTurnMessage?.timestamp === "number"
+                  ? { currentUserTimestamp: preparedUserTurnMessage.timestamp }
+                  : {}),
+              });
+              llmBoundaryTokenPressure = estimateLlmBoundaryTokenPressure({
+                messages: hookMessagesForCurrentPrompt,
+                systemPrompt: systemPromptForHook,
+                prompt: llmBoundaryPromptForPrecheck,
+              });
+              log.info(
+                `[agent-compaction-pressure] injected at LLM boundary estimatedPromptTokens=${llmBoundaryTokenPressure} contextWindow=${contextTokenBudget} sessionKey=${params.sessionKey ?? params.sessionId ?? "unknown"}`,
+              );
+            }
+          }
 
           if (!skipPromptSubmission && !isRawModelRun && hookRunner?.hasHooks("llm_input")) {
             hookRunner
@@ -4677,11 +4715,6 @@ export async function runEmbeddedAttempt(
                   llmBoundaryOptionsForPrecheck,
                 )
               : undefined;
-          const llmBoundaryTokenPressure = estimateLlmBoundaryTokenPressure({
-            messages: hookMessagesForCurrentPrompt,
-            systemPrompt: systemPromptForHook,
-            prompt: llmBoundaryPromptForPrecheck,
-          });
           const preemptiveCompaction = skipPromptSubmission
             ? null
             : shouldPreemptivelyCompactBeforePrompt({

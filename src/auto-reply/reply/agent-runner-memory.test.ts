@@ -1197,14 +1197,10 @@ describe("runMemoryFlushIfNeeded", () => {
     });
 
     expect(result).toBe(sessionEntry);
-    expect(followupRun.prompt).toContain(
-      "System: [context_pressure: 0.76, compaction_recommended: true]",
-    );
-    expect(followupRun.prompt).toContain(
-      "System: **Context pressure is at the recommended threshold",
-    );
-    expect(followupRun.prompt.endsWith("the current user request")).toBe(true);
-    expect(followupRun.agentCompactionPressureInjected).toBe(true);
+    // Agent mode now defers signaling until the embedded runner has assembled the
+    // authoritative LLM boundary. This stale preflight estimate must not mutate
+    // the user prompt or decide whether pressure is high enough.
+    expect(followupRun.prompt).toBe("the current user request");
     expect(compactEmbeddedAgentSessionMock).not.toHaveBeenCalled();
     expect(incrementCompactionCountMock).not.toHaveBeenCalled();
   });

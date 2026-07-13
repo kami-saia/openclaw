@@ -102,30 +102,14 @@ describe("agent-runner integration: pressure signal wiring", () => {
     setTokenSourceForTestsHook(null);
   });
 
-  it("fires the [context_pressure] signal from entry.totalTokens when totalTokensFresh=true and no transcript exists", async () => {
-    // 95k of 100k window -> pressure 0.95, well above the 0.85 RECOMMEND
-    // threshold. Pre-fix this would have silently returned undefined
-    // because the only token source was a transcript file we never wrote.
+  it("does not queue from persisted totals because the LLM boundary owns signaling", async () => {
     await callRunMemoryFlush({
       cfg: agentCompactionCfg(),
       sessionEntry: entryAtPressure(95_000, true, 100_000),
       agentCfgContextTokens: 100_000,
     });
 
-    // import("../../infra/system-events.js") inside
-    // maybeInjectAgentCompactionPressureSignal is a microtask; flush it.
-    await new Promise<void>((resolve) => {
-      setImmediate(resolve);
-    });
-
-    expect(enqueueSystemEventMock).toHaveBeenCalledTimes(1);
-    const [message, opts] = enqueueSystemEventMock.mock.calls[0] as [
-      string,
-      { sessionKey: string },
-    ];
-    expect(message).toContain("context_pressure");
-    expect(message).toContain("compaction_recommended: true");
-    expect(opts.sessionKey).toBe("agent:main:integration-pressure-test");
+    expect(enqueueSystemEventMock).not.toHaveBeenCalled();
   });
 
   it("does NOT fire the signal when totalTokensFresh=false (API number is stale and no transcript on disk)", async () => {

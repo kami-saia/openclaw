@@ -95,6 +95,39 @@ export function resetPressureTrackingForTestsHook(): void {
 /**
  * Format a context pressure signal as a system message string.
  */
+const CONTEXT_PRESSURE_MARKER = "[context_pressure:";
+
+/** Build a trusted model-only pressure block from the fully assembled LLM boundary. */
+export function buildAgentCompactionPressurePrompt(params: {
+  prompt: string;
+  estimatedPromptTokens: number;
+  contextWindowTokens: number;
+}): string | undefined {
+  if (params.prompt.includes(CONTEXT_PRESSURE_MARKER)) {
+    return undefined;
+  }
+  if (
+    !Number.isFinite(params.estimatedPromptTokens) ||
+    params.estimatedPromptTokens <= 0 ||
+    !Number.isFinite(params.contextWindowTokens) ||
+    params.contextWindowTokens <= 0
+  ) {
+    return undefined;
+  }
+  const pressure = params.estimatedPromptTokens / params.contextWindowTokens;
+  if (pressure < PRESSURE_RECOMMEND) {
+    return undefined;
+  }
+  const message = formatContextPressureMessage({
+    pressure: Math.round(pressure * 100) / 100,
+    compactionRecommended: true,
+  });
+  return message
+    .split("\n")
+    .map((line) => `System: ${line}`)
+    .join("\n");
+}
+
 export function formatContextPressureMessage(signal: ContextPressureSignal): string {
   const tag = signal.compactionRecommended
     ? `[context_pressure: ${signal.pressure}, compaction_recommended: true]`
