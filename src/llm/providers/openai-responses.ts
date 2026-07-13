@@ -182,6 +182,9 @@ function buildParams(
 ) {
   const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, {
     replayResponsesItemIds: options?.replayResponsesItemIds ?? false,
+    // Copilot can invalidate encrypted reasoning between calls, including within one tool loop.
+    // Preserve visible assistant/tool history but never replay opaque reasoning ciphertext.
+    replayReasoning: model.provider !== "github-copilot",
   });
 
   const cacheRetention = resolveCacheRetention(options?.cacheRetention);

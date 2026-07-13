@@ -159,6 +159,7 @@ export interface OpenAIResponsesStreamOptions {
 export interface ConvertResponsesMessagesOptions {
   includeSystemPrompt?: boolean;
   replayResponsesItemIds?: boolean;
+  replayReasoning?: boolean;
 }
 export { convertResponsesToolPayload, convertResponsesTools };
 export type { ConvertResponsesToolsOptions } from "./openai-responses-tools.js";
@@ -210,6 +211,7 @@ export function convertResponsesMessages<TApi extends Api>(
 ): ResponseInput {
   const messages: ResponseInput = [];
   const shouldReplayResponsesItemIds = options?.replayResponsesItemIds ?? true;
+  const shouldReplayReasoning = options?.replayReasoning ?? true;
 
   const normalizeIdPart = (part: string): string => {
     const sanitized = part.replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -308,7 +310,7 @@ export function convertResponsesMessages<TApi extends Api>(
 
       for (const block of msg.content) {
         if (block.type === "thinking") {
-          if (block.thinkingSignature) {
+          if (shouldReplayReasoning && block.thinkingSignature) {
             const reasoningItem = normalizeResponsesReasoningReplayItem({
               item: JSON.parse(block.thinkingSignature) as ReplayableResponseReasoningItem,
               replayResponsesItemIds: shouldReplayResponsesItemIds,

@@ -481,6 +481,55 @@ describe("convertResponsesMessages", () => {
     expect(functionCall).not.toHaveProperty("id");
   });
 
+  it("omits encrypted reasoning while preserving visible assistant content", () => {
+    const input = convertResponsesMessages(
+      nativeOpenAIModel,
+      {
+        systemPrompt: "system",
+        messages: [
+          {
+            role: "assistant",
+            api: nativeOpenAIModel.api,
+            provider: nativeOpenAIModel.provider,
+            model: nativeOpenAIModel.id,
+            usage: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 0,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: "stop",
+            timestamp: 1,
+            content: [
+              {
+                type: "thinking",
+                thinking: "Need continuity.",
+                thinkingSignature: JSON.stringify({
+                  type: "reasoning",
+                  id: "rs_stale",
+                  encrypted_content: "stale-ciphertext",
+                }),
+              },
+              { type: "text", text: "Visible answer" },
+            ],
+          },
+        ],
+      } satisfies Context,
+      allowedToolCallProviders,
+      { includeSystemPrompt: false, replayReasoning: false },
+    ) as unknown as Array<Record<string, unknown>>;
+
+    expect(input.find((item) => item.type === "reasoning")).toBeUndefined();
+    expect(input.find((item) => item.type === "message")).toMatchObject({
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "Visible answer" }],
+    });
+    expect(JSON.stringify(input)).not.toContain("stale-ciphertext");
+  });
+
   it("keeps encrypted reasoning replay item ids when requested", () => {
     const input = convertResponsesMessages(
       nativeOpenAIModel,
