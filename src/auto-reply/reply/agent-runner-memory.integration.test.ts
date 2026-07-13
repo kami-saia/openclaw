@@ -67,13 +67,11 @@ async function callRunMemoryFlush(params: {
   sessionEntry: SessionEntry;
   agentCfgContextTokens?: number;
 }) {
-  // runMemoryFlushIfNeeded short-circuits into the pressure-signal path as
-  // soon as it sees `compaction.mode === "agent"`; the followupRun /
-  // sessionCtx / replyOperation never get touched on that branch, so
-  // intentionally minimal stubs are fine here.
+  // This covers the fallback queue path used when preflight did not already
+  // inject pressure into the current prompt.
   return runMemoryFlushIfNeeded({
     cfg: params.cfg,
-    followupRun: {} as never,
+    followupRun: { agentCompactionPressureInjected: false } as never,
     promptForEstimate: undefined,
     sessionCtx: {} as never,
     opts: undefined,
@@ -116,7 +114,9 @@ describe("agent-runner integration: pressure signal wiring", () => {
 
     // import("../../infra/system-events.js") inside
     // maybeInjectAgentCompactionPressureSignal is a microtask; flush it.
-    await new Promise((r) => setImmediate(r));
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
 
     expect(enqueueSystemEventMock).toHaveBeenCalledTimes(1);
     const [message, opts] = enqueueSystemEventMock.mock.calls[0] as [
@@ -138,7 +138,9 @@ describe("agent-runner integration: pressure signal wiring", () => {
       agentCfgContextTokens: 100_000,
     });
 
-    await new Promise((r) => setImmediate(r));
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
 
     expect(enqueueSystemEventMock).not.toHaveBeenCalled();
   });

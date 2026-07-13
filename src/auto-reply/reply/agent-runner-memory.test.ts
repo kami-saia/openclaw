@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { testing as cliBackendsTesting } from "../../agents/cli-backends.js";
+import { resetPressureTrackingForTestsHook } from "../../agents/context-pressure.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import {
   clearMemoryPluginState,
@@ -160,6 +161,7 @@ describe("runMemoryFlushIfNeeded", () => {
 
   beforeEach(async () => {
     rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-memory-unit-"));
+    resetPressureTrackingForTestsHook();
     registerMemoryFlushPlanResolverForTest(() => ({
       softThresholdTokens: 4_000,
       forceFlushTranscriptBytes: 1_000_000_000,
@@ -1115,7 +1117,7 @@ describe("runMemoryFlushIfNeeded", () => {
     expect(incrementCompactionCountMock).not.toHaveBeenCalled();
   });
 
-  it("soft-fails (does not throw) when preflight compaction fails in agent compaction mode", async () => {
+  it("does not run automatic preflight compaction in agent compaction mode", async () => {
     const sessionFile = path.join(rootDir, "session.jsonl");
     await fs.writeFile(
       sessionFile,
@@ -1130,12 +1132,6 @@ describe("runMemoryFlushIfNeeded", () => {
       systemPrompt: "Write memory to memory/YYYY-MM-DD.md.",
       relativePath: "memory/2023-11-14.md",
     }));
-    compactEmbeddedAgentSessionMock.mockResolvedValueOnce({
-      ok: true,
-      compacted: false,
-      reason: "deferred to background context-engine maintenance",
-    });
-
     const sessionEntry: SessionEntry = {
       sessionId: "session",
       sessionFile,
@@ -1161,9 +1157,55 @@ describe("runMemoryFlushIfNeeded", () => {
       replyOperation: createReplyOperation(),
     });
 
-    // Turn continues with the original session entry instead of throwing.
     expect(result).toBe(sessionEntry);
-    expect(compactEmbeddedAgentSessionMock).toHaveBeenCalledTimes(1);
+    expect(compactEmbeddedAgentSessionMock).not.toHaveBeenCalled();
+    expect(incrementCompactionCountMock).not.toHaveBeenCalled();
+  });
+
+  it("injects agent compaction pressure into the current prompt before the model run", async () => {
+    const sessionFile = path.join(rootDir, "session.jsonl");
+    await fs.writeFile(
+      sessionFile,
+      `${JSON.stringify({ message: { role: "user", content: "x".repeat(5_000) } })}\n`,
+      "utf8",
+    );
+    const sessionEntry: SessionEntry = {
+      sessionId: "session",
+      sessionFile,
+      updatedAt: Date.now(),
+      totalTokens: 76_000,
+      totalTokensFresh: true,
+    };
+    const followupRun = createTestFollowupRun({
+      sessionId: "session",
+      sessionFile,
+      sessionKey: "agent:main:main",
+    });
+    followupRun.prompt = "the current user request";
+
+    const result = await runPreflightCompactionIfNeeded({
+      cfg: { agents: { defaults: { compaction: { mode: "agent" } } } },
+      followupRun,
+      defaultModel: "anthropic/claude-opus-4-6",
+      agentCfgContextTokens: 100_000,
+      sessionEntry,
+      sessionStore: { "agent:main:main": sessionEntry },
+      sessionKey: "agent:main:main",
+      storePath: path.join(rootDir, "sessions.json"),
+      isHeartbeat: false,
+      replyOperation: createReplyOperation(),
+    });
+
+    expect(result).toBe(sessionEntry);
+    expect(followupRun.prompt).toContain(
+      "System: [context_pressure: 0.76, compaction_recommended: true]",
+    );
+    expect(followupRun.prompt).toContain(
+      "System: **Context pressure is at the recommended threshold",
+    );
+    expect(followupRun.prompt.endsWith("the current user request")).toBe(true);
+    expect(followupRun.agentCompactionPressureInjected).toBe(true);
+    expect(compactEmbeddedAgentSessionMock).not.toHaveBeenCalled();
     expect(incrementCompactionCountMock).not.toHaveBeenCalled();
   });
 

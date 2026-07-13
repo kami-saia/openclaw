@@ -137,16 +137,23 @@ async function estimateSessionTokensFromTranscriptDefault(
   }
 }
 
-export async function maybeInjectAgentCompactionPressureSignal(params: {
+type AgentCompactionPressureParams = {
   cfg: OpenClawConfig;
   sessionEntry?: SessionEntry;
   sessionKey?: string;
   defaultModel: string;
   agentCfgContextTokens?: number;
-}): Promise<SessionEntry | undefined> {
+  /** Current-run projection, when the caller already estimated the pending prompt. */
+  totalTokens?: number;
+};
+
+/** Build the pressure instruction for immediate inclusion in the current model prompt. */
+export async function maybeBuildAgentCompactionPressureSignal(
+  params: AgentCompactionPressureParams,
+): Promise<string | undefined> {
   const entry = params.sessionEntry;
   if (!entry) {
-    return entry;
+    return undefined;
   }
 
   // Prefer explicit agent config contextTokens over catalog-reported value
@@ -162,8 +169,12 @@ export async function maybeInjectAgentCompactionPressureSignal(params: {
   // it only sees conversation messages, missing ~80-100k of system overhead.
   // Fall back to transcript estimation only when the API number is stale or
   // unavailable (totalTokensFresh=false or missing).
+  const projectedTokens =
+    typeof params.totalTokens === "number" && Number.isFinite(params.totalTokens)
+      ? params.totalTokens
+      : undefined;
   const apiTokens = resolveFreshSessionTotalTokens(entry);
-  let totalTokens = apiTokens;
+  let totalTokens = projectedTokens ?? apiTokens;
   let tokenSource: "api-fresh" | "transcript" = "api-fresh";
   if (totalTokens === undefined) {
     totalTokens = tokenSourceOverride
@@ -191,14 +202,24 @@ export async function maybeInjectAgentCompactionPressureSignal(params: {
 
   if (signal && params.sessionKey) {
     const message = formatContextPressureMessage(signal);
-    void import("../../infra/system-events.js").then(({ enqueueSystemEvent }) => {
-      enqueueSystemEvent(message, { sessionKey: params.sessionKey! });
-    });
     logVerbose(
       `agent-compaction pressure signal: sessionKey=${params.sessionKey} ` +
         `pressure=${signal.pressure} recommended=${signal.compactionRecommended}`,
     );
+    return message;
   }
 
-  return entry;
+  return undefined;
+}
+
+/** Queue the pressure instruction for a later run when immediate prompt injection is unavailable. */
+export async function maybeInjectAgentCompactionPressureSignal(
+  params: AgentCompactionPressureParams,
+): Promise<SessionEntry | undefined> {
+  const message = await maybeBuildAgentCompactionPressureSignal(params);
+  if (message && params.sessionKey) {
+    const { enqueueSystemEvent } = await import("../../infra/system-events.js");
+    enqueueSystemEvent(message, { sessionKey: params.sessionKey });
+  }
+  return params.sessionEntry;
 }

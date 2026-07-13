@@ -881,6 +881,33 @@ export async function runPreflightCompactionIfNeeded(params: {
       ? projectedTokenCount
       : undefined;
 
+  // FORK: agent-owned compaction must be actionable in this model invocation.
+  // Queueing a system event here is too late: prompt construction has already
+  // drained events, so the marker would not arrive until a later run (or until
+  // after this one overflowed). Put the trusted System: block directly into the
+  // runtime prompt and leave compaction itself to the compact tool.
+  if (params.cfg.agents?.defaults?.compaction?.mode === "agent") {
+    const { maybeBuildAgentCompactionPressureSignal } =
+      await import("./agent-compaction-pressure.runtime.js");
+    const pressureMessage = await maybeBuildAgentCompactionPressureSignal({
+      cfg: params.cfg,
+      sessionEntry: entry,
+      sessionKey: params.sessionKey,
+      defaultModel: params.defaultModel,
+      agentCfgContextTokens: contextWindowTokens,
+      totalTokens: tokenCountForCompaction,
+    });
+    if (pressureMessage) {
+      const pressureBlock = pressureMessage
+        .split("\n")
+        .map((line) => `System: ${line}`)
+        .join("\n");
+      params.followupRun.prompt = `${pressureBlock}\n\n${params.followupRun.prompt}`;
+      params.followupRun.agentCompactionPressureInjected = true;
+    }
+    return entry ?? params.sessionEntry;
+  }
+
   logVerbose(
     `preflightCompaction check: sessionKey=${params.sessionKey} ` +
       `tokenCount=${tokenCountForCompaction ?? freshPersistedTokens ?? "undefined"} ` +
@@ -981,15 +1008,6 @@ export async function runPreflightCompactionIfNeeded(params: {
       abortSignal: params.replyOperation.abortSignal,
     });
 
-    // FORK: agent-controlled compaction. When compaction.mode === "agent", the
-    // agent owns compaction via its own compact tool plus the post-turn
-    // context-pressure signal (see runMemoryFlushIfNeeded). Preflight is a
-    // best-effort guardrail here, NOT a hard dependency: if the forced preflight
-    // pass fails for any non-benign reason, degrade to a warning and continue the
-    // turn instead of throwing a turn-killing "could not recover" error. The
-    // agent's own compaction path handles the pressure on this or the next turn.
-    const preflightSoftFailInAgentMode = params.cfg?.agents?.defaults?.compaction?.mode === "agent";
-
     if (!result?.ok) {
       const reason = result?.reason ?? "not_compacted";
       if (isPreflightCompactionSkipReason(reason)) {
@@ -999,13 +1017,6 @@ export async function runPreflightCompactionIfNeeded(params: {
       }
       await notifyTerminalCompaction("incomplete");
       logVerbose(`preflightCompaction failed: sessionKey=${params.sessionKey} reason=${reason}`);
-      if (preflightSoftFailInAgentMode) {
-        logVerbose(
-          `preflightCompaction soft-fail (agent mode): sessionKey=${params.sessionKey} ` +
-            `reason=${reason} — continuing; agent-owned compaction will handle pressure`,
-        );
-        return entry ?? params.sessionEntry;
-      }
       throw new Error(`Preflight compaction required but failed: ${reason}`);
     }
 
@@ -1018,13 +1029,6 @@ export async function runPreflightCompactionIfNeeded(params: {
       }
       await notifyTerminalCompaction("incomplete");
       logVerbose(`preflightCompaction failed: sessionKey=${params.sessionKey} reason=${reason}`);
-      if (preflightSoftFailInAgentMode) {
-        logVerbose(
-          `preflightCompaction soft-fail (agent mode): sessionKey=${params.sessionKey} ` +
-            `reason=${reason} — continuing; agent-owned compaction will handle pressure`,
-        );
-        return entry ?? params.sessionEntry;
-      }
       throw new Error(`Preflight compaction required but failed: ${reason}`);
     }
 
@@ -1066,21 +1070,6 @@ export async function runPreflightCompactionIfNeeded(params: {
     if (startedCompactionNotice && !terminalCompactionNoticeSent) {
       await notifyCompaction("incomplete");
     }
-    // FORK: in agent compaction mode, a thrown compaction attempt (timeout,
-    // provider error, etc.) must not kill the turn — the agent owns compaction
-    // via its compact tool + post-turn pressure signal. Soft-fail and continue.
-    // Genuine aborts (user cancel / shutdown) still propagate.
-    const preflightSoftFailInAgentMode = params.cfg?.agents?.defaults?.compaction?.mode === "agent";
-    const isAbort =
-      params.replyOperation.abortSignal?.aborted === true ||
-      (err instanceof Error && err.name === "AbortError");
-    if (preflightSoftFailInAgentMode && !isAbort) {
-      logVerbose(
-        `preflightCompaction soft-fail (agent mode, threw): sessionKey=${params.sessionKey} ` +
-          `error=${String(err)} — continuing; agent-owned compaction will handle pressure`,
-      );
-      return entry ?? params.sessionEntry;
-    }
     throw err;
   }
 }
@@ -1109,6 +1098,11 @@ export async function runMemoryFlushIfNeeded(params: {
   // whether a memory plugin is configured).
   const compactionMode = params.cfg?.agents?.defaults?.compaction?.mode;
   if (compactionMode === "agent") {
+    // Preflight normally injected the signal into this exact run. Do not also
+    // queue a duplicate for the next invocation.
+    if (params.followupRun.agentCompactionPressureInjected) {
+      return params.sessionEntry;
+    }
     // Dynamic import isolates agent-compaction-pressure (and its context-pressure
     // dependency) from this module's chunk graph; a static edge perturbs tsdown
     // chunk-init ordering and breaks unrelated runtime chunks. See 2026-05-28 merge note.
