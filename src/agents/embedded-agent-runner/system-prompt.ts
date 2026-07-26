@@ -66,6 +66,7 @@ export function buildEmbeddedSystemPrompt(params: {
     arch: string;
     node: string;
     model: string;
+    servedModel?: string; // FORK: provider-reported served model from last prior assistant turn
     provider?: string;
     capabilities?: string[];
     channel?: string;

@@ -1358,6 +1358,39 @@ describe("buildAgentSystemPrompt", () => {
     expect(line).toContain("thinking=low");
   });
 
+  // FORK: served_model surfaces provider-reported swaps in the Runtime line.
+  it("emits served_model adjacent to model when servedModel is provided", () => {
+    const line = buildRuntimeLine({
+      host: "host",
+      os: "linux",
+      arch: "x64",
+      node: "v20",
+      model: "github-copilot/claude-opus-4.8",
+      servedModel: "claude-opus-4-8",
+      defaultModel: "github-copilot/claude-opus-4.8",
+    });
+
+    expect(line).toContain("model=github-copilot/claude-opus-4.8");
+    expect(line).toContain("served_model=claude-opus-4-8");
+    // served_model must sit immediately after model= so divergence is obvious.
+    expect(line).toMatch(/model=github-copilot\/claude-opus-4\.8 \| served_model=claude-opus-4-8/);
+  });
+
+  // FORK: absence of servedModel must not print an empty token.
+  it("omits served_model entirely when servedModel is absent", () => {
+    const line = buildRuntimeLine({
+      host: "host",
+      os: "linux",
+      arch: "x64",
+      node: "v20",
+      model: "github-copilot/claude-opus-4.8",
+      defaultModel: "github-copilot/claude-opus-4.8",
+    });
+
+    expect(line).toContain("model=github-copilot/claude-opus-4.8");
+    expect(line).not.toContain("served_model=");
+  });
+
   it("renders extra system prompt exactly once", () => {
     const prompt = buildAgentSystemPrompt({
       workspaceDir: "/tmp/openclaw",

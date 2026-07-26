@@ -26,6 +26,7 @@ type RuntimeInfoInput = {
   arch: string;
   node: string;
   model: string;
+  servedModel?: string; // FORK: provider-reported served model from last prior assistant turn
   defaultModel?: string;
   shell?: string;
   channel?: string;

@@ -160,11 +160,11 @@ import {
   createCodeModeTools,
   resolveCodeModeConfig,
 } from "../../code-mode.js";
+import { buildAgentCompactionPressurePrompt } from "../../context-pressure.js";
 import {
   resolveConversationCapabilityProfile,
   type ResolvedConversationCapabilityProfile,
 } from "../../conversation-capability-profile.js";
-import { buildAgentCompactionPressurePrompt } from "../../context-pressure.js";
 import { resolveUserTimezone } from "../../date-time.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../defaults.js";
 import { resolveOpenClawReferencePaths } from "../../docs-path.js";
@@ -722,6 +722,28 @@ function isMidTurnPrecheckAssistantError(message: AgentMessage | undefined): boo
   }
   const record = message as unknown as { stopReason?: unknown; errorMessage?: unknown };
   return record.stopReason === "error" && record.errorMessage === MID_TURN_PRECHECK_ERROR_MESSAGE;
+}
+
+// FORK: Resolve the provider-reported *served* model by scanning the restored
+// in-memory transcript backwards for the most recent assistant message that
+// carries a non-empty `responseModel`. A one-turn lag is expected because the
+// current turn's served model is unknowable before the model call. Pure,
+// synchronous, and reads only the array already in memory (no disk IO/async).
+export function resolveLastServedModel(messages: AgentMessage[] | undefined): string | undefined {
+  if (!messages?.length) {
+    return undefined;
+  }
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message?.role !== "assistant") {
+      continue;
+    }
+    const served = (message as unknown as { responseModel?: unknown }).responseModel;
+    if (typeof served === "string" && served.trim().length > 0) {
+      return served;
+    }
+  }
+  return undefined;
 }
 
 function removeTrailingMidTurnPrecheckAssistantError(params: {
@@ -2137,72 +2159,77 @@ export async function runEmbeddedAttempt(
     const bootstrapTruncationNotice = buildBootstrapPromptWarningNotice(
       bootstrapPromptWarning.lines,
     );
-    const attemptSystemPrompt = buildAttemptSystemPrompt({
-      isRawModelRun,
-      transformProviderSystemPrompt: (transformParams) =>
-        transformProviderSystemPrompt({
-          ...transformParams,
-          runtimeHandle: getProviderRuntimeHandle(),
-        }),
-      embeddedSystemPrompt: {
-        config: params.config,
-        agentId: sessionAgentId,
-        workspaceDir: effectiveWorkspace,
-        defaultThinkLevel: params.thinkLevel,
-        reasoningLevel: params.reasoningLevel ?? "off",
-        extraSystemPrompt: params.extraSystemPrompt,
-        ownerNumbers: params.ownerNumbers,
-        reasoningTagHint,
-        heartbeatPrompt,
-        skillsPrompt: effectiveSkillsPrompt,
-        docsPath: openClawReferences.docsPath ?? undefined,
-        sourcePath: openClawReferences.sourcePath ?? undefined,
-        workspaceNotes: workspaceNotes?.length ? workspaceNotes : undefined,
-        reactionGuidance,
-        promptMode: effectivePromptMode,
-        sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
-        silentReplyPromptMode: params.silentReplyPromptMode,
-        proactiveSubagentOrchestration,
-        acpEnabled: isAcpRuntimeSpawnAvailable({
+    // FORK: closure so the system prompt can be re-rendered once the served
+    // model is known from the restored in-memory transcript (see below). The
+    // runtimeInfo object is mutated in place with servedModel; no new IO/async.
+    const renderAttemptSystemPrompt = () =>
+      buildAttemptSystemPrompt({
+        isRawModelRun,
+        transformProviderSystemPrompt: (transformParams) =>
+          transformProviderSystemPrompt({
+            ...transformParams,
+            runtimeHandle: getProviderRuntimeHandle(),
+          }),
+        embeddedSystemPrompt: {
           config: params.config,
-          sandboxed: sandboxInfo?.enabled === true,
-        }),
-        promptSurface,
-        nativeCommandGuidanceLines: listRegisteredPluginAgentPromptGuidance({
-          surface: promptSurface,
-        }),
-        runtimeInfo,
-        messageToolHints,
-        toolSchemaDirectoryPrompt,
-        sandboxInfo,
-        capabilityToolNames: [...capabilityToolNames].toSorted(),
-        tools: effectiveTools,
-        userTimezone,
-        userTime,
-        userTimeFormat,
-        contextFiles,
-        bootstrapMode,
-        bootstrapTruncationNotice,
-        includeMemorySection: !activeContextEngine || activeContextEngine.info.id === "legacy",
-        promptContribution,
-      },
-      providerTransform: {
-        provider: params.provider,
-        config: params.config,
-        workspaceDir: effectiveWorkspace,
-        context: {
-          config: params.config,
-          agentDir: params.agentDir,
-          workspaceDir: effectiveWorkspace,
-          provider: params.provider,
-          modelId: params.modelId,
-          promptMode: effectivePromptMode,
-          runtimeChannel,
-          runtimeCapabilities,
           agentId: sessionAgentId,
+          workspaceDir: effectiveWorkspace,
+          defaultThinkLevel: params.thinkLevel,
+          reasoningLevel: params.reasoningLevel ?? "off",
+          extraSystemPrompt: params.extraSystemPrompt,
+          ownerNumbers: params.ownerNumbers,
+          reasoningTagHint,
+          heartbeatPrompt,
+          skillsPrompt: effectiveSkillsPrompt,
+          docsPath: openClawReferences.docsPath ?? undefined,
+          sourcePath: openClawReferences.sourcePath ?? undefined,
+          workspaceNotes: workspaceNotes?.length ? workspaceNotes : undefined,
+          reactionGuidance,
+          promptMode: effectivePromptMode,
+          sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
+          silentReplyPromptMode: params.silentReplyPromptMode,
+          proactiveSubagentOrchestration,
+          acpEnabled: isAcpRuntimeSpawnAvailable({
+            config: params.config,
+            sandboxed: sandboxInfo?.enabled === true,
+          }),
+          promptSurface,
+          nativeCommandGuidanceLines: listRegisteredPluginAgentPromptGuidance({
+            surface: promptSurface,
+          }),
+          runtimeInfo,
+          messageToolHints,
+          toolSchemaDirectoryPrompt,
+          sandboxInfo,
+          capabilityToolNames: [...capabilityToolNames].toSorted(),
+          tools: effectiveTools,
+          userTimezone,
+          userTime,
+          userTimeFormat,
+          contextFiles,
+          bootstrapMode,
+          bootstrapTruncationNotice,
+          includeMemorySection: !activeContextEngine || activeContextEngine.info.id === "legacy",
+          promptContribution,
         },
-      },
-    });
+        providerTransform: {
+          provider: params.provider,
+          config: params.config,
+          workspaceDir: effectiveWorkspace,
+          context: {
+            config: params.config,
+            agentDir: params.agentDir,
+            workspaceDir: effectiveWorkspace,
+            provider: params.provider,
+            modelId: params.modelId,
+            promptMode: effectivePromptMode,
+            runtimeChannel,
+            runtimeCapabilities,
+            agentId: sessionAgentId,
+          },
+        },
+      });
+    const attemptSystemPrompt = renderAttemptSystemPrompt();
     const appendPrompt = attemptSystemPrompt.systemPrompt;
     const systemPromptReport = buildSystemPromptReport({
       source: "run",
@@ -2681,6 +2708,16 @@ export async function runEmbeddedAttempt(
         systemPromptText = nextSystemPrompt;
         applySystemPromptToSession(activeSession, nextSystemPrompt);
       };
+      // FORK: Now that the restored transcript is in memory, resolve the last
+      // provider-reported served model and, if present, re-render the system
+      // prompt so the Runtime line surfaces `served_model=` next to `model=`.
+      // This makes a silent provider model swap visible without a tool call.
+      // One-turn lag is expected/acceptable; no disk IO or new async on this path.
+      const servedModel = resolveLastServedModel(activeSession.agent.state.messages);
+      if (servedModel && runtimeInfo.servedModel !== servedModel) {
+        runtimeInfo.servedModel = servedModel;
+        systemPromptText = renderAttemptSystemPrompt().systemPrompt;
+      }
       setActiveSessionSystemPrompt(systemPromptText);
       let didDeliverSourceReplyViaMessageTool = false;
       installMessageToolOnlyTerminalHook({

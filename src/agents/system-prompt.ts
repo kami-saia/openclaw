@@ -747,6 +747,7 @@ export function buildAgentSystemPrompt(params: {
     arch?: string;
     node?: string;
     model?: string;
+    servedModel?: string; // FORK: provider-reported served model from last prior assistant turn
     defaultModel?: string;
     shell?: string;
     channel?: string;
@@ -1410,6 +1411,7 @@ export function buildRuntimeLine(
     arch?: string;
     node?: string;
     model?: string;
+    servedModel?: string; // FORK: provider-reported served model from last prior assistant turn
     defaultModel?: string;
     shell?: string;
     repoRoot?: string;
@@ -1433,6 +1435,8 @@ export function buildRuntimeLine(
         : "",
     runtimeInfo?.node ? `node=${runtimeInfo.node}` : "",
     runtimeInfo?.model ? `model=${runtimeInfo.model}` : "",
+    // FORK: surface silently-swapped served model adjacent to requested model
+    runtimeInfo?.servedModel ? `served_model=${runtimeInfo.servedModel}` : "",
     runtimeInfo?.defaultModel ? `default_model=${runtimeInfo.defaultModel}` : "",
     runtimeInfo?.shell ? `shell=${runtimeInfo.shell}` : "",
     runtimeChannel ? `channel=${runtimeChannel}` : "",
