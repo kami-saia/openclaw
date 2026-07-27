@@ -542,10 +542,17 @@ function convertAnthropicMessages(
           const dropCopilotSignature =
             shouldDropThinkingSignatureOnReplay(model) && !isReasoningContent;
           if (!thinkingSignature || dropCopilotSignature) {
-            blocks.push({
-              type: "text",
-              text: sanitizeTransportPayloadText(block.thinking),
-            });
+            // FORK: a signature-bearing thinking block can carry empty text (it passes the
+            // guard above via hasNativeThinkingSignature). Converting it to a text block then
+            // emits {type:"text", text:""}, which Anthropic rejects with
+            // "messages: text content blocks must be non-empty". Drop it instead.
+            const thinkingText = sanitizeTransportPayloadText(block.thinking);
+            if (thinkingText.trim().length > 0) {
+              blocks.push({
+                type: "text",
+                text: thinkingText,
+              });
+            }
           } else {
             const thinking =
               thinkingSignature === "reasoning_content"

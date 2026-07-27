@@ -3107,6 +3107,70 @@ describe("anthropic transport stream", () => {
     expect(toolResult.is_error).toBe(false);
   });
 
+  // FORK: signature-bearing thinking blocks can carry empty text. On Copilot the
+  // signature is dropped and the block is replayed as text, which used to emit
+  // {type:"text", text:""} and trip Anthropic's
+  // "messages: text content blocks must be non-empty" 400.
+  it("drops empty signed thinking blocks instead of replaying them as empty text", async () => {
+    await runTransportStream(
+      makeAnthropicTransportModel({
+        id: "claude-opus-5",
+        name: "Claude Opus 5",
+        provider: "github-copilot",
+      }),
+      {
+        messages: [
+          { role: "user", content: "look it up" },
+          {
+            role: "assistant",
+            provider: "github-copilot",
+            api: "anthropic-messages",
+            model: "claude-opus-5",
+            stopReason: "toolUse",
+            timestamp: 0,
+            content: [
+              {
+                type: "thinking",
+                thinking: "",
+                thinkingSignature: "CAIShAQKhwEIEBgCKkDRIWxBjJ7Fpg",
+              },
+              { type: "toolCall", id: "call_1", name: "lookup", arguments: {} },
+            ],
+          },
+          {
+            role: "toolResult",
+            toolCallId: "call_1",
+            toolName: "lookup",
+            content: [{ type: "text", text: "42" }],
+            isError: false,
+          },
+        ],
+      } as AnthropicStreamContext,
+      {
+        apiKey: "copilot-token",
+      } as AnthropicStreamOptions,
+    );
+
+    const payload = latestAnthropicRequest().payload;
+    const assistantMessage = findRecord(payload.messages, (record) => record.role === "assistant");
+    // The empty signed thinking block is dropped entirely; only the tool call remains.
+    expect(assistantMessage.content).toEqual([
+      { type: "tool_use", id: "call_1", name: "lookup", input: {} },
+    ]);
+    // Belt and braces: no empty text block anywhere in the outgoing payload.
+    for (const message of payload.messages as Array<Record<string, unknown>>) {
+      const content = message.content;
+      if (!Array.isArray(content)) {
+        continue;
+      }
+      for (const block of content as Array<Record<string, unknown>>) {
+        if (block?.type === "text") {
+          expect((block.text as string).length).toBeGreaterThan(0);
+        }
+      }
+    }
+  });
+
   it("serializes structured non-image blocks in tool results as JSON text", async () => {
     await runTransportStream(
       makeAnthropicTransportModel({ id: "claude-sonnet-4-6" }),
