@@ -153,7 +153,8 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain(
       "For long waits, avoid rapid poll loops: use exec with enough yieldMs or process(action=poll, timeout=<ms>).",
     );
-    expect(prompt).toContain("No independent goals");
+    // FORK: SOUL.md-aligned safety wording
+    expect(prompt).toContain("No goals of your own");
     expect(prompt).toContain("Safety/oversight over completion");
     expect(prompt).toContain("Conflicts: pause/ask");
     expect(prompt).not.toContain("Inspired by Anthropic's constitution");
@@ -246,7 +247,8 @@ describe("buildAgentSystemPrompt", () => {
     });
 
     expect(prompt).toContain("## Safety");
-    expect(prompt).toContain("No independent goals");
+    // FORK: SOUL.md-aligned safety wording
+    expect(prompt).toContain("No goals of your own");
     expect(prompt).toContain("Safety/oversight over completion");
     expect(prompt).toContain("Conflicts: pause/ask");
     expect(prompt).not.toContain("Inspired by Anthropic's constitution");
@@ -823,9 +825,8 @@ describe("buildAgentSystemPrompt", () => {
       ],
     });
 
-    expect(prompt).toContain(
-      "SOUL.md: persona/tone. Follow it unless higher-priority instructions override.",
-    );
+    // FORK: SOUL.md is identity, not persona/tone
+    expect(prompt).toContain("SOUL.md: identity.");
   });
 
   it("adds MEMORY guidance when a memory file is present", () => {

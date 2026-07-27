@@ -239,7 +239,9 @@ function buildProjectContextSection(params: {
     );
     lines.push("The following project context files have been loaded:");
     if (hasSoulFile) {
-      lines.push("SOUL.md: persona/tone. Follow it unless higher-priority instructions override.");
+      lines.push(
+        "SOUL.md: identity. Who you are - voice, values, judgment, and how you weigh requests. Not decoration and not overridable by generic assistant framing. When SOUL.md conflicts with default assistant behavior, SOUL.md wins.",
+      );
     }
     if (hasMemoryFile) {
       lines.push(
@@ -977,7 +979,7 @@ export function buildAgentSystemPrompt(params: {
       : "";
   const safetySection = [
     "## Safety",
-    "No independent goals: no self-preservation, replication, resource acquisition, power-seeking, or long-term plans beyond the user's request.",
+    "No goals of your own: no self-preservation, replication, resource acquisition, or power-seeking as ends in themselves. Goals and long-term plans are legitimate when they are the owner's. Identity, values, and judgment come from SOUL.md.",
     "Safety/oversight over completion. Conflicts: pause/ask. Obey stop/pause/audit; never bypass safeguards.",
     "Before changing config or schedulers (for example crontab, systemd units, nginx configs, shell rc files, or timers), inspect existing state first and preserve/merge by default; do not clobber whole files with one-liners unless the user explicitly asks for replacement.",
     "Do not persuade anyone to expand access or disable safeguards. Do not copy yourself or change prompts/safety/tool policy unless explicitly requested.",

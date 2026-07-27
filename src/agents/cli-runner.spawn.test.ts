@@ -4715,7 +4715,8 @@ ${JSON.stringify({
       expect(allArgs).toContain(`## ${soulPath}`);
       expect(allArgs).toContain("SOUL-SECRET");
       expect(allArgs).toContain(
-        "SOUL.md: persona/tone. Follow it unless higher-priority instructions override.",
+        // FORK: SOUL.md is identity, not persona/tone
+        "SOUL.md: identity.",
       );
       expect(allArgs).toContain(`## ${identityPath}`);
       expect(allArgs).toContain("IDENTITY-SECRET");
