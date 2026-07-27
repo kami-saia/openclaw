@@ -746,6 +746,37 @@ export function resolveLastServedModel(messages: AgentMessage[] | undefined): st
   return undefined;
 }
 
+// FORK: The requested label is `provider/model-id` while the provider reports a
+// bare model slug, and the two spell versions differently (`claude-opus-4.8` vs
+// `claude-opus-4-8`). Normalize both sides so an identical model does not read as
+// a divergence.
+function normalizeModelLabelForComparison(label: string): string {
+  const bare = label.includes("/") ? label.slice(label.lastIndexOf("/") + 1) : label;
+  return bare.trim().toLowerCase().replaceAll(".", "-");
+}
+
+// FORK: `served_model=` exists to make a SILENT provider swap visible. When the
+// served model matches the requested one — the overwhelmingly common case — the
+// token adds nothing and re-rendering the system prompt to inject it only churns
+// the prompt digest, which invalidates the provider prompt cache every turn.
+// Report a divergence only.
+export function resolveDivergentServedModel(params: {
+  messages: AgentMessage[] | undefined;
+  requestedModel: string | undefined;
+}): string | undefined {
+  const served = resolveLastServedModel(params.messages);
+  if (!served) {
+    return undefined;
+  }
+  const requested = params.requestedModel;
+  if (!requested) {
+    return served;
+  }
+  return normalizeModelLabelForComparison(requested) === normalizeModelLabelForComparison(served)
+    ? undefined
+    : served;
+}
+
 function removeTrailingMidTurnPrecheckAssistantError(params: {
   activeSession: { agent: { state: { messages: AgentMessage[] } } };
   sessionManager: ReturnType<typeof guardSessionManager>;
@@ -2709,11 +2740,16 @@ export async function runEmbeddedAttempt(
         applySystemPromptToSession(activeSession, nextSystemPrompt);
       };
       // FORK: Now that the restored transcript is in memory, resolve the last
-      // provider-reported served model and, if present, re-render the system
-      // prompt so the Runtime line surfaces `served_model=` next to `model=`.
-      // This makes a silent provider model swap visible without a tool call.
+      // provider-reported served model and, if it DIVERGES from the requested
+      // model, re-render the system prompt so the Runtime line surfaces
+      // `served_model=` next to `model=`. This makes a silent provider model swap
+      // visible without a tool call. Matching models skip the re-render entirely so
+      // the prompt digest stays stable and the provider prompt cache keeps hitting.
       // One-turn lag is expected/acceptable; no disk IO or new async on this path.
-      const servedModel = resolveLastServedModel(activeSession.agent.state.messages);
+      const servedModel = resolveDivergentServedModel({
+        messages: activeSession.agent.state.messages,
+        requestedModel: runtimeInfo.model,
+      });
       if (servedModel && runtimeInfo.servedModel !== servedModel) {
         runtimeInfo.servedModel = servedModel;
         systemPromptText = renderAttemptSystemPrompt().systemPrompt;
