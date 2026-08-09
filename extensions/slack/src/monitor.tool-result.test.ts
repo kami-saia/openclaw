@@ -542,6 +542,8 @@ describe("monitorSlackProvider tool results", () => {
         ackReaction: "👀",
         ackReactionScope: "all",
         groupChat: {
+          // FORK(c3323a31585): exercise the always-on room_event path, which is
+          // where the privacy contract actually matters.
           unmentionedInbound: "room_event",
           visibleReplies: "message_tool",
         },
@@ -569,9 +571,15 @@ describe("monitorSlackProvider tool results", () => {
     });
     await flush();
 
+    // The privacy contract: no reply text reaches the channel.
     expect(replyMock).toHaveBeenCalledTimes(1);
     expect(sendMock).not.toHaveBeenCalled();
-    expect(reactMock).not.toHaveBeenCalled();
+    // FORK: upstream 7e7fc0075e3 ("Honor all ack scope for room events") made
+    // ackReactionScope:"all" deliberately fire the ack on room events, even when
+    // replies are message_tool-only. An ack reaction carries no message content,
+    // so the privacy contract above still holds; only the ack expectation moved.
+    expect(reactMock).toHaveBeenCalledTimes(1);
+    expect(reactMock.mock.calls[0]?.[0]).toMatchObject({ name: "eyes" });
   });
 
   it("treats control commands as mentions for group bypass", async () => {
