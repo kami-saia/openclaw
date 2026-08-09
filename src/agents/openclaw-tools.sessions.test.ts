@@ -55,7 +55,10 @@ import { createSessionsListTool } from "./tools/sessions-list-tool.js";
 import { testing as sessionsResolutionTesting } from "./tools/sessions-resolution.test-support.js";
 import { createSessionsSearchTool } from "./tools/sessions-search-tool.js";
 import { testing as sessionsSendA2ATesting } from "./tools/sessions-send-tool.a2a.test-support.js";
-import { createSessionsSendTool } from "./tools/sessions-send-tool.js";
+import {
+  createSessionsSendTool,
+  forkFireAndForgetTesting,
+} from "./tools/sessions-send-tool.js";
 
 const TEST_CONFIG = {
   session: {
@@ -285,8 +288,13 @@ describe("sessions tools", () => {
     sessionsSendA2ATesting.setDepsForTest({
       callGateway: (opts: unknown) => callGatewayMock(opts),
     });
+    // FORK(fire-and-forget): default the override back on between tests.
+    forkFireAndForgetTesting.reset();
   });
-  afterEach(resetGatewayWorkAdmission);
+  afterEach(() => {
+    resetGatewayWorkAdmission();
+    forkFireAndForgetTesting.reset();
+  });
 
   it("uses integer schemas for session count and window parameters", () => {
     const tools = createOpenClawTools();
@@ -997,6 +1005,9 @@ describe("sessions tools", () => {
   });
 
   it("sessions_send supports fire-and-forget and wait", async () => {
+    // FORK(fire-and-forget): exercises upstream's A2A announce flow, which our
+    // default disables. Kept (not deleted) so upstream behaviour stays covered.
+    forkFireAndForgetTesting.setForTest(false);
     const calls: Array<{ method?: string; params?: unknown }> = [];
     let agentCallCount = 0;
     let historyCallCount = 0;
@@ -1223,6 +1234,8 @@ describe("sessions tools", () => {
   });
 
   it("sessions_send returns pending agent error diagnostics on timeout", async () => {
+    // FORK(fire-and-forget): asserts delivery.status "pending" from the A2A flow.
+    forkFireAndForgetTesting.setForTest(false);
     const calls: Array<{ method?: string; params?: unknown }> = [];
     callGatewayMock.mockImplementation(async (opts: unknown) => {
       const request = opts as { method?: string; params?: unknown };
@@ -1314,6 +1327,8 @@ describe("sessions tools", () => {
   });
 
   it("sessions_send runs ping-pong then announces", async () => {
+    // FORK(fire-and-forget): pure upstream A2A ping-pong/announce coverage.
+    forkFireAndForgetTesting.setForTest(false);
     const calls: Array<{ method?: string; params?: unknown }> = [];
     let agentCallCount = 0;
     let lastWaitedRunId: string | undefined;
@@ -1430,6 +1445,8 @@ describe("sessions tools", () => {
   });
 
   it("sessions_send admits delayed ping-pong and final announce after the parent root releases", async () => {
+    // FORK(fire-and-forget): pure upstream A2A ping-pong/announce coverage.
+    forkFireAndForgetTesting.setForTest(false);
     const calls: Array<{ method?: string; params?: unknown }> = [];
     const requesterKey = "agent:main:main";
     const targetKey = "agent:director1:main";
@@ -1724,6 +1741,10 @@ describe("sessions tools", () => {
   });
 
   it("sessions_send falls back from stranded cron run key to durable cron parent", async () => {
+    // FORK(fire-and-forget): cron run-key ROUTING survives our override (verified:
+    // target sessionKey + single agent call still assert green). Only the second
+    // chat.history read comes from the A2A flow, so run this in upstream mode.
+    forkFireAndForgetTesting.setForTest(false);
     const calls: Array<{ method?: string; params?: unknown }> = [];
     const requesterKey = "agent:main:cron:source-job:run:source-run";
     const runScopedCallerKey = "agent:leasing-ops:cron:monthly-utility:run:run-fast";
@@ -2108,6 +2129,8 @@ describe("sessions tools", () => {
   });
 
   it("sessions_send preserves threadId when announce target is hydrated via sessions.list", async () => {
+    // FORK(fire-and-forget): asserts the announce `send` fires; upstream-only path.
+    forkFireAndForgetTesting.setForTest(false);
     const calls: Array<{ method?: string; params?: unknown }> = [];
     let agentCallCount = 0;
     let lastWaitedRunId: string | undefined;

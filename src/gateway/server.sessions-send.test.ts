@@ -809,41 +809,26 @@ describe("sessions_send direct-message requester routing", () => {
         }
         expect(targetCall?.inputProvenance?.sourceSessionKey).toBe(expectedReplySessionKey);
 
-        await vi.waitFor(
-          () => {
-            expect(
-              spy.mock.calls.some(([opts]) => {
-                const call = opts as {
-                  sessionKey?: string;
-                  extraSystemPrompt?: string;
-                  inputProvenance?: { sourceSessionKey?: string };
-                };
-                return (
-                  call.sessionKey === expectedReplySessionKey &&
-                  call.inputProvenance?.sourceSessionKey === targetSessionKey &&
-                  call.extraSystemPrompt?.includes("Agent-to-agent reply step")
-                );
-              }),
-            ).toBe(true);
-          },
-          { timeout: 10_000, interval: 25 },
-        );
-        if (expectedReplySessionKey !== requesterSessionKey) {
-          expect(
-            spy.mock.calls.some(([opts]) => {
-              const call = opts as {
-                sessionKey?: string;
-                extraSystemPrompt?: string;
-                inputProvenance?: { sourceSessionKey?: string };
-              };
-              return (
-                call.sessionKey === requesterSessionKey &&
-                call.inputProvenance?.sourceSessionKey === targetSessionKey &&
-                call.extraSystemPrompt?.includes("Agent-to-agent reply step")
-              );
-            }),
-          ).toBe(false);
-        }
+        // FORK(fire-and-forget): upstream waits here for an "Agent-to-agent
+        // reply step" wake on the requester. We skip the A2A announce-back
+        // flow entirely (FORK_FIRE_AND_FORGET in sessions-send-tool.ts), so
+        // that wake must never fire. The target's reply is still returned
+        // inline, which the expectSessionsSendDetails assertion above covers.
+        // Settle first so a late detached flow would still be observed.
+        await new Promise((resolve) => {
+          setTimeout(resolve, 250);
+        });
+        const a2aReplyStepCalls = spy.mock.calls.filter(([opts]) => {
+          const call = opts as {
+            extraSystemPrompt?: string;
+            inputProvenance?: { sourceSessionKey?: string };
+          };
+          return (
+            call.inputProvenance?.sourceSessionKey === targetSessionKey &&
+            call.extraSystemPrompt?.includes("Agent-to-agent reply step")
+          );
+        });
+        expect(a2aReplyStepCalls).toHaveLength(0);
       } finally {
         testState.sessionConfig = undefined;
         testState.agentsConfig = undefined;

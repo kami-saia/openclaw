@@ -74,7 +74,11 @@ export function describeSessionsSendTool(): string {
     "Run a visible session on this Gateway by sessionKey/label, or a configured local agent by agentId; sessionKey wins redundant label.",
     "A session identifies model context, not an external address; its reply may still announce through established delivery context.",
     "For an exact external destination, use `conversations_list` plus `conversations_send`/`conversations_turn`, or `message` with an explicit channel and target.",
-    "Thread chats rejected: target parent channel. Missing configured-agent main created. Waits for reply when available.",
+    "Thread chats rejected: target parent channel. Missing configured-agent main created.",
+    // FORK(fire-and-forget): upstream says "Waits for reply when available."
+    // We default timeoutSeconds to 0 and skip the A2A announce-back flow.
+    "Fire-and-forget: returns immediately after enqueuing the wake. The target's reply (if any) goes to the target's own delivery channel, not back here.",
+    "To get a response routed back, the receiving session must call sessions_send itself.",
     "watch:true: notice arrives when others later change target session.",
   ].join(" ");
 }

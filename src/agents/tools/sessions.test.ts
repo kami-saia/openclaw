@@ -94,6 +94,7 @@ vi.mock("./sessions-send-tool.a2a.js", () => ({
 
 let createSessionsListTool: typeof import("./sessions-list-tool.js").createSessionsListTool;
 let createSessionsSendTool: typeof import("./sessions-send-tool.js").createSessionsSendTool;
+let forkFireAndForgetTesting: (typeof import("./sessions-send-tool.js"))["forkFireAndForgetTesting"];
 let resolveAnnounceTarget: (typeof import("./sessions-announce-target.js"))["resolveAnnounceTarget"];
 let setActivePluginRegistry: (typeof import("../../plugins/runtime.js"))["setActivePluginRegistry"];
 const MAIN_AGENT_SESSION_KEY = "agent:main:main";
@@ -134,7 +135,7 @@ function requireGatewayRequest(index = 0) {
 
 beforeAll(async () => {
   ({ createSessionsListTool } = await import("./sessions-list-tool.js"));
-  ({ createSessionsSendTool } = await import("./sessions-send-tool.js"));
+  ({ createSessionsSendTool, forkFireAndForgetTesting } = await import("./sessions-send-tool.js"));
   ({ resolveAnnounceTarget } = await import("./sessions-announce-target.js"));
   ({ setActivePluginRegistry } = await import("../../plugins/runtime.js"));
 });
@@ -777,6 +778,14 @@ describe("sessions_list channel derivation", () => {
 describe("sessions_send gating", () => {
   beforeEach(() => {
     callGatewayMock.mockReset();
+    // FORK(fire-and-forget): this block asserts upstream's A2A announce flow
+    // (runSessionsSendA2AFlow calls, synchronous same-session rejection), which
+    // our default disables. Retained rather than deleted so upstream behaviour
+    // stays covered. See fork commit 9717e7c9c8a.
+    forkFireAndForgetTesting.setForTest(false);
+  });
+  afterEach(() => {
+    forkFireAndForgetTesting.reset();
   });
 
   it("returns an error when neither sessionKey nor label is provided", async () => {

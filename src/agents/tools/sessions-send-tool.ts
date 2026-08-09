@@ -146,6 +146,25 @@ const SessionsSendOutputSchema = Type.Union([
 ]);
 
 type GatewayCaller = typeof callGateway;
+// FORK(fire-and-forget): disables the A2A ping-pong/announce-back flow.
+// Named binding rather than an inline `true ||` so the override is greppable
+// and the intent survives future upstream merges. See fork commit 9717e7c9c8a.
+//
+// While this is on, `sessions-send-tool.a2a.ts` is unreachable from this tool.
+// It is deliberately retained (not deleted, as the original fork commit did) so
+// upstream merges keep applying cleanly to it, and so the upstream behaviour
+// stays covered by its own tests via the test-only override below.
+let forkFireAndForget = true;
+
+/** Test-only switch for exercising upstream's A2A announce flow. */
+export const forkFireAndForgetTesting = {
+  setForTest(value: boolean): void {
+    forkFireAndForget = value;
+  },
+  reset(): void {
+    forkFireAndForget = true;
+  },
+};
 const SESSIONS_SEND_REPLY_HISTORY_LIMIT = 50;
 const SESSIONS_SEND_MESSAGE_ALIASES = ["SendMessage", "content", "text"] as const;
 
@@ -456,7 +475,14 @@ export function createSessionsSendTool(opts?: {
       const params = normalizeSessionsSendArguments(args);
       const gatewayCall = opts?.callGateway ?? callGateway;
       const message = readStringParam(params, "message", { required: true });
-      const timeoutSeconds = readNonNegativeIntegerParam(params, "timeoutSeconds") ?? 30;
+      // FORK(fire-and-forget): default to 0 so sessions_send returns
+      // { status: "accepted" } immediately instead of blocking up to 30s.
+      // The target's reply lands on its own delivery channel; to route a
+      // response back, the receiving session calls sessions_send itself.
+      // Callers may still opt into waiting by passing timeoutSeconds > 0.
+      // Upstream default is 30 — see fork commit 9717e7c9c8a.
+      const timeoutSeconds =
+        readNonNegativeIntegerParam(params, "timeoutSeconds") ?? (forkFireAndForget ? 0 : 30);
       const { cfg, mainKey, alias, effectiveRequesterKey, restrictToSpawned } =
         resolveSessionToolContext(opts);
 
@@ -884,8 +910,16 @@ export function createSessionsSendTool(opts?: {
             });
           // A scoped grant belongs to one exact session incarnation. Do not create
           // post-return work or durable watches that could follow a reused key.
+          // FORK(fire-and-forget): suppress the A2A ping-pong/announce-back
+          // machinery entirely. Upstream wakes the requester with the target's
+          // reply, which can generate another user-facing response and forward
+          // it back to the target. Our contract is one-way: the target replies
+          // on its own channel. See fork commit 9717e7c9c8a.
           const skipA2AFlow =
-            skipAcpA2AFlow || skipNativeParentA2AFlow || Boolean(access.expectedSessionId);
+            forkFireAndForget ||
+            skipAcpA2AFlow ||
+            skipNativeParentA2AFlow ||
+            Boolean(access.expectedSessionId);
           // When the A2A flow is skipped, no follow-up announcement will fire and
           // the reply (when present) is returned inline via the `reply` field.
           // Reflect that in the metadata so the parent LLM does not wait for a
