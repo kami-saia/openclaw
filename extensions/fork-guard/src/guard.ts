@@ -1,11 +1,14 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+// FORK: upstream moved the hook payload types off the deprecated
+// `plugin-runtime` barrel onto `plugin-sdk/types`; PluginLogger lives on
+// `plugin-sdk/plugin-entry`.
+import type { PluginLogger } from "openclaw/plugin-sdk/plugin-entry";
 import type {
   PluginHookBeforeToolCallEvent,
   PluginHookBeforeToolCallResult,
   PluginHookToolContext,
-  PluginLogger,
-} from "openclaw/plugin-sdk/plugin-runtime";
+} from "openclaw/plugin-sdk/types";
 import type { ForkGuardConfig } from "./config.js";
 
 const execFileAsync = promisify(execFile);
@@ -58,6 +61,9 @@ export function parsePattern(raw: string): ParsedPattern {
     return { kind: "string", raw, value: raw };
   }
   const [, pattern, flags] = regexLiteral;
+  if (pattern === undefined) {
+    return { kind: "string", raw, value: raw };
+  }
   try {
     return { kind: "regex", raw, value: new RegExp(pattern, flags) };
   } catch {

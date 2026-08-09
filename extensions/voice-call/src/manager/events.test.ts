@@ -10,26 +10,62 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VoiceCallConfigSchema } from "../config.js";
 import type { VoiceCallProvider } from "../providers/base.js";
-import { clearVoiceCallStateRuntime, setVoiceCallStateRuntime } from "../runtime-state.js";
-import type { AnswerCallInput, HangupCallInput, NormalizedEvent } from "../types.js";
+import { setVoiceCallStateRuntime } from "../runtime-state.js";
+import type { AnswerCallInput, CallRecord, HangupCallInput, NormalizedEvent } from "../types.js";
 import type { CallManagerContext } from "./context.js";
 import { processEvent } from "./events.js";
 import { speakInitialMessage } from "./outbound.js";
-import { flushPendingCallRecordWritesForTest } from "./store.js";
+import { MAX_CALL_REPLAY_KEYS } from "./replay-keys.js";
+
+const MANAGER_REPLAY_KEY_LIMIT = 10_000;
+const logSpy = vi.hoisted(() => {
+  const logEntries: string[] = [];
+  return {
+    logEntries,
+    clearLogEntries: () => {
+      logEntries.length = 0;
+    },
+  };
+});
+
+vi.mock("openclaw/plugin-sdk/runtime-env", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("openclaw/plugin-sdk/runtime-env")>();
+  return {
+    ...actual,
+    createSubsystemLogger: (_subsystem: string) => ({
+      info: (msg: string) => {
+        logSpy.logEntries.push(msg);
+      },
+      warn: (msg: string) => {
+        logSpy.logEntries.push(msg);
+      },
+      error: (msg: string) => {
+        logSpy.logEntries.push(msg);
+      },
+    }),
+  };
+});
 
 const contexts: CallManagerContext[] = [];
 
-function installStateRuntime(): void {
+function installStateRuntime(shouldFail?: () => boolean): void {
   setVoiceCallStateRuntime({
     state: {
       resolveStateDir: () => "",
       openKeyedStore: (() => {
         throw new Error("openKeyedStore is not used by voice-call event tests");
       }) as never,
-      openSyncKeyedStore: (options: OpenKeyedStoreOptions) =>
-        createPluginStateSyncKeyedStoreForTests("voice-call", options),
+      openSyncKeyedStore: (options: OpenKeyedStoreOptions) => {
+        if (shouldFail?.()) {
+          throw new Error("synthetic SQLite persistence failure");
+        }
+        return createPluginStateSyncKeyedStoreForTests("voice-call", options);
+      },
       openChannelIngressQueue: (() => {
         throw new Error("openChannelIngressQueue is not used by voice-call event tests");
+      }) as never,
+      openChannelIngressDrain: (() => {
+        throw new Error("openChannelIngressDrain is not used by voice-call event tests");
       }) as never,
     },
   });
@@ -50,10 +86,8 @@ afterEach(async () => {
       clearTimeout(waiter.timeout);
     }
     ctx.transcriptWaiters.clear();
-    await flushPendingCallRecordWritesForTest();
     fs.rmSync(ctx.storePath, { recursive: true, force: true });
   }
-  clearVoiceCallStateRuntime();
   resetPluginStateStoreForTests();
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -65,7 +99,7 @@ function createContext(overrides: Partial<CallManagerContext> = {}): CallManager
     activeCalls: new Map(),
     providerCallIdMap: new Map(),
     processedEventIds: new Set(),
-    rejectedProviderCallIds: new Set(),
+    rejectedProviderCallIds: new Map(),
     provider: null,
     config: VoiceCallConfigSchema.parse({
       enabled: true,
@@ -151,6 +185,97 @@ function requireFirstActiveCall(ctx: CallManagerContext) {
 }
 
 describe("processEvent (functional)", () => {
+  it.each(["speech", "answered", "terminal"] as const)(
+    "publishes %s side effects only after SQLite persistence succeeds",
+    (kind) => {
+      let failPersistence = true;
+      installStateRuntime(() => failPersistence);
+      const onCallAnswered = vi.fn();
+      const ctx = createContext({ onCallAnswered });
+      const call: CallRecord = {
+        callId: `call-durable-${kind}`,
+        providerCallId: "provider-before",
+        provider: "plivo",
+        direction: "outbound",
+        state: kind === "answered" ? "ringing" : "active",
+        from: "+15550000000",
+        to: "+15550000001",
+        startedAt: Date.now(),
+        transcript: [],
+        processedEventIds: [],
+      };
+      ctx.activeCalls.set(call.callId, call);
+      ctx.providerCallIdMap.set("provider-before", call.callId);
+      const resolve = vi.fn();
+      const reject = vi.fn();
+      if (kind !== "answered") {
+        ctx.transcriptWaiters.set(call.callId, {
+          resolve,
+          reject,
+          timeout: setTimeout(() => {}, 60_000),
+        });
+      }
+      if (kind === "terminal") {
+        ctx.maxDurationTimers.set(
+          call.callId,
+          setTimeout(() => {}, 60_000),
+        );
+      }
+      const base = { id: `event-${kind}`, callId: call.callId, timestamp: Date.now() };
+      const event: NormalizedEvent =
+        kind === "speech"
+          ? { ...base, type: "call.speech", transcript: "durable", isFinal: true }
+          : kind === "answered"
+            ? { ...base, type: "call.answered", providerCallId: "provider-after" }
+            : { ...base, type: "call.ended", reason: "hangup-user" };
+
+      expect(() => processEvent(ctx, event)).toThrow("synthetic SQLite persistence failure");
+      expect(ctx.processedEventIds.has(event.id)).toBe(false);
+      expect(call.processedEventIds).toEqual([]);
+      expect(call.transcript).toEqual([]);
+      expect(call.providerCallId).toBe("provider-before");
+      expect(ctx.providerCallIdMap.has("provider-after")).toBe(false);
+      expect(resolve).not.toHaveBeenCalled();
+      expect(reject).not.toHaveBeenCalled();
+      expect(ctx.maxDurationTimers.has(call.callId)).toBe(kind === "terminal");
+
+      failPersistence = false;
+      processEvent(ctx, event);
+      expect(ctx.processedEventIds.has(event.id)).toBe(true);
+      expect(resolve).toHaveBeenCalledTimes(kind === "speech" ? 1 : 0);
+      expect(reject).toHaveBeenCalledTimes(kind === "terminal" ? 1 : 0);
+      expect(onCallAnswered).toHaveBeenCalledTimes(kind === "answered" ? 1 : 0);
+      expect(ctx.activeCalls.has(call.callId)).toBe(kind !== "terminal");
+    },
+  );
+
+  it.each(["created", "rejected"] as const)(
+    "does not publish %s inbound calls before SQLite persistence succeeds",
+    (kind) => {
+      let failPersistence = true;
+      installStateRuntime(() => failPersistence);
+      const { ctx, hangupCalls } = createRejectingInboundContext();
+      ctx.config.inboundPolicy = kind === "created" ? "open" : "disabled";
+      const event = createInboundInitiatedEvent({
+        id: `event-durable-${kind}`,
+        providerCallId: `provider-durable-${kind}`,
+        from: "+15550000002",
+      });
+
+      expect(() => processEvent(ctx, event)).toThrow("synthetic SQLite persistence failure");
+      expect(ctx.activeCalls.size).toBe(0);
+      expect(ctx.providerCallIdMap.size).toBe(0);
+      expect(ctx.rejectedProviderCallIds.size).toBe(0);
+      expect(ctx.processedEventIds.size).toBe(0);
+      expect(hangupCalls).toHaveLength(0);
+
+      failPersistence = false;
+      expect(processEvent(ctx, event)).toEqual({ kind: "processed" });
+      expect(ctx.activeCalls.size).toBe(kind === "created" ? 1 : 0);
+      expect(hangupCalls).toHaveLength(kind === "rejected" ? 1 : 0);
+    },
+  );
+
   it("calls provider hangup when rejecting inbound call", () => {
     const { ctx, hangupCalls } = createRejectingInboundContext();
     const event = createInboundInitiatedEvent({
@@ -302,7 +427,7 @@ describe("processEvent (functional)", () => {
       timestamp: now + 1,
     };
 
-    processEvent(ctx, event);
+    expect(processEvent(ctx, event)).toEqual({ kind: "ignored", replayable: true });
 
     expect(ctx.processedEventIds.size).toBe(0);
 
@@ -743,6 +868,91 @@ describe("processEvent (functional)", () => {
     expect(replayResult).toEqual({ kind: "ignored" });
   });
 
+  it("bounds committed replay keys in both manager and persisted call owners", () => {
+    const now = Date.now();
+    const managerKeys = Array.from(
+      { length: MANAGER_REPLAY_KEY_LIMIT },
+      (_, index) => `manager-${index}`,
+    );
+    const callKeys = Array.from({ length: MAX_CALL_REPLAY_KEYS }, (_, index) => `call-${index}`);
+    const ctx = createContext({ processedEventIds: new Set(managerKeys) });
+    ctx.activeCalls.set("call-bounded", {
+      callId: "call-bounded",
+      providerCallId: "provider-bounded",
+      provider: "plivo",
+      direction: "outbound",
+      state: "active",
+      from: "+15550000000",
+      to: "+15550000001",
+      startedAt: now,
+      transcript: [],
+      processedEventIds: callKeys,
+      metadata: {},
+    });
+    ctx.providerCallIdMap.set("provider-bounded", "call-bounded");
+
+    const result = processEvent(ctx, {
+      id: "evt-bounded-new",
+      type: "call.dtmf",
+      callId: "call-bounded",
+      providerCallId: "provider-bounded",
+      timestamp: now + 1,
+      digits: "1",
+    });
+
+    const call = ctx.activeCalls.get("call-bounded");
+    expect(result).toEqual({ kind: "processed" });
+    expect(ctx.processedEventIds.size).toBe(MANAGER_REPLAY_KEY_LIMIT);
+    expect(ctx.processedEventIds.has("manager-0")).toBe(false);
+    expect(ctx.processedEventIds.has("evt-bounded-new")).toBe(true);
+    expect(call?.processedEventIds).toHaveLength(MAX_CALL_REPLAY_KEYS);
+    expect(call?.processedEventIds[0]).toBe("call-1");
+    expect(call?.processedEventIds.at(-1)).toBe("evt-bounded-new");
+    expect(
+      processEvent(ctx, {
+        id: "evt-bounded-new",
+        type: "call.dtmf",
+        callId: "call-bounded",
+        providerCallId: "provider-bounded",
+        timestamp: now + 2,
+        digits: "1",
+      }),
+    ).toEqual({ kind: "ignored" });
+  });
+
+  it("bounds rejected provider calls while retaining hangup-once behavior", () => {
+    const rejectedProviderCallIds = new Map<string, symbol>(
+      Array.from(
+        { length: MANAGER_REPLAY_KEY_LIMIT },
+        (_, index) => [`provider-${index}`, Symbol(`provider-${index}`)] as const,
+      ),
+    );
+    const { ctx, hangupCalls } = createRejectingInboundContext();
+    ctx.rejectedProviderCallIds = rejectedProviderCallIds;
+
+    processEvent(
+      ctx,
+      createInboundInitiatedEvent({
+        id: "evt-rejected-new",
+        providerCallId: "provider-new",
+        from: "+15552222222",
+      }),
+    );
+    processEvent(
+      ctx,
+      createInboundInitiatedEvent({
+        id: "evt-rejected-new-replay",
+        providerCallId: "provider-new",
+        from: "+15552222222",
+      }),
+    );
+
+    expect(ctx.rejectedProviderCallIds.size).toBe(MANAGER_REPLAY_KEY_LIMIT);
+    expect(ctx.rejectedProviderCallIds.has("provider-0")).toBe(false);
+    expect(ctx.rejectedProviderCallIds.has("provider-new")).toBe(true);
+    expect(hangupCalls).toHaveLength(1);
+  });
+
   it("keeps retryable call.error events replayable", () => {
     const now = Date.now();
     const ctx = createContext();
@@ -772,7 +982,7 @@ describe("processEvent (functional)", () => {
       retryable: true,
     };
 
-    processEvent(ctx, event);
+    expect(processEvent(ctx, event)).toEqual({ kind: "processed", replayable: true });
     processEvent(ctx, event);
 
     const call = ctx.activeCalls.get("call-retryable-error");
@@ -782,5 +992,104 @@ describe("processEvent (functional)", () => {
     expect(call.state).toBe("active");
     expect(Array.from(ctx.processedEventIds)).toStrictEqual([]);
     expect(call.processedEventIds).toStrictEqual([]);
+  });
+});
+
+describe("processEvent privacy assertions", () => {
+  beforeEach(() => {
+    logSpy.clearLogEntries();
+  });
+
+  function expectCallerRedacted(phone: string, ...expectedMetadata: string[]): void {
+    const logOutput = logSpy.logEntries.join(" ");
+    expect(logOutput).not.toContain(phone);
+    expect(logOutput).toContain("caller=sha256:");
+    for (const metadata of expectedMetadata) {
+      expect(logOutput).toContain(metadata);
+    }
+  }
+
+  it.each([
+    {
+      label: "acceptance",
+      phone: "+15551112222",
+      allowFrom: ["+15551112222"],
+      allowed: true,
+    },
+    {
+      label: "rejection",
+      phone: "+15559999999",
+      allowFrom: ["+15550001111"],
+      allowed: false,
+    },
+  ])("redacts caller phone numbers in allowlist $label logs", ({ phone, allowFrom, allowed }) => {
+    const ctx = createContext({
+      config: VoiceCallConfigSchema.parse({
+        enabled: true,
+        provider: "plivo",
+        fromNumber: "+15550000000",
+        inboundPolicy: "allowlist",
+        allowFrom,
+      }),
+      provider: createProvider(),
+    });
+
+    processEvent(
+      ctx,
+      createInboundInitiatedEvent({
+        id: `evt-privacy-${allowed ? "accept" : "reject"}`,
+        providerCallId: `prov-privacy-${allowed ? "accept" : "reject"}`,
+        from: phone,
+      }),
+    );
+
+    expectCallerRedacted(phone, `allowlisted=${allowed}`);
+  });
+
+  it("redacts caller phone numbers in call record creation logs", () => {
+    const ctx = createContext({
+      config: VoiceCallConfigSchema.parse({
+        enabled: true,
+        provider: "plivo",
+        fromNumber: "+15550000000",
+        inboundPolicy: "open",
+      }),
+    });
+    const phone = "+15554444444";
+    processEvent(
+      ctx,
+      createInboundInitiatedEvent({
+        id: "evt-privacy-create",
+        providerCallId: "prov-privacy-create",
+        from: phone,
+      }),
+    );
+
+    const call = requireFirstActiveCall(ctx);
+    expectCallerRedacted(phone, call.callId);
+  });
+
+  it("redacts caller phone numbers when rejection cannot reach a provider", () => {
+    const ctx = createContext({
+      config: VoiceCallConfigSchema.parse({
+        enabled: true,
+        provider: "plivo",
+        fromNumber: "+15550000000",
+        inboundPolicy: "allowlist",
+        allowFrom: ["+15550001111"],
+      }),
+      provider: null,
+    });
+    const phone = "+15559999999";
+    processEvent(
+      ctx,
+      createInboundInitiatedEvent({
+        id: "evt-privacy-no-provider",
+        providerCallId: "prov-privacy-no-provider",
+        from: phone,
+      }),
+    );
+
+    expectCallerRedacted(phone, "prov-privacy-no-provider");
   });
 });

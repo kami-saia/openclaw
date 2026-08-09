@@ -1,9 +1,11 @@
 // Voice Call plugin module implements runtime behavior.
+import { resolveDefaultAgentId } from "openclaw/plugin-sdk/agent-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { isLoopbackHost } from "openclaw/plugin-sdk/gateway-runtime";
 import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
 import {
+  assertRealtimeVoiceAgentConsultModelSelectionUnlocked,
   consultRealtimeVoiceAgent,
   REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
   resolveRealtimeVoiceAgentConsultTools,
@@ -129,7 +131,7 @@ function createRuntimeResourceLifecycle(params: {
   stop: (opts?: { suppressErrors?: boolean }) => Promise<void>;
 } {
   let tunnelResult: TunnelResult | null = null;
-  let stopped = false;
+  let stopPromise: Promise<void> | null = null;
 
   const runStep = async (step: () => Promise<void>, suppressErrors: boolean) => {
     if (suppressErrors) {
@@ -143,23 +145,25 @@ function createRuntimeResourceLifecycle(params: {
     setTunnelResult: (result) => {
       tunnelResult = result;
     },
-    stop: async (opts) => {
-      if (stopped) {
-        return;
+    stop: (opts) => {
+      if (stopPromise) {
+        return stopPromise;
       }
-      stopped = true;
       const suppressErrors = opts?.suppressErrors ?? false;
-      await runStep(async () => {
-        if (tunnelResult) {
-          await tunnelResult.stop();
-        }
-      }, suppressErrors);
-      await runStep(async () => {
-        await cleanupTailscaleExposure(params.config);
-      }, suppressErrors);
-      await runStep(async () => {
-        await params.webhookServer.stop();
-      }, suppressErrors);
+      stopPromise = (async () => {
+        await runStep(async () => {
+          if (tunnelResult) {
+            await tunnelResult.stop();
+          }
+        }, suppressErrors);
+        await runStep(async () => {
+          await cleanupTailscaleExposure(params.config);
+        }, suppressErrors);
+        await runStep(async () => {
+          await params.webhookServer.stop();
+        }, suppressErrors);
+      })();
+      return stopPromise;
     },
   };
 }
@@ -251,7 +255,7 @@ function listRealtimeAgentIds(config: VoiceCallConfig, coreConfig: OpenClawConfi
 }
 
 async function createRealtimeInstructionsResolver(params: {
-  config: VoiceCallConfig;
+  config: VoiceCallConfig & { agentId: string };
   coreConfig: OpenClawConfig;
   agentRuntime: CoreAgentDeps;
 }): Promise<(call: CallRecord) => string> {
@@ -267,6 +271,7 @@ async function createRealtimeInstructionsResolver(params: {
     config: genericConfig,
     coreConfig: params.coreConfig,
     agentRuntime: params.agentRuntime,
+    agentId: params.config.agentId,
   });
   const entries = await Promise.all(
     listRealtimeAgentIds(params.config, params.coreConfig).map(async (agentId) => {
@@ -275,6 +280,7 @@ async function createRealtimeInstructionsResolver(params: {
         config: { ...params.config, agentId },
         coreConfig: params.coreConfig,
         agentRuntime: params.agentRuntime,
+        agentId,
       });
       return [agentId, instructions] as const;
     }),
@@ -314,8 +320,12 @@ export async function createVoiceCallRuntime(params: {
     debug: console.debug,
   };
 
-  const config = resolveVoiceCallConfig(rawConfig);
   const cfg = fullConfig ?? (coreConfig as OpenClawConfig);
+  const unresolvedConfig = resolveVoiceCallConfig(rawConfig);
+  const configuredAgentId = unresolvedConfig.agentId
+    ? normalizeAgentId(unresolvedConfig.agentId)
+    : resolveDefaultAgentId(cfg);
+  const config = { ...unresolvedConfig, agentId: configuredAgentId };
 
   if (!config.enabled) {
     throw new Error("Voice call disabled. Enable the plugin entry in config.");
@@ -380,6 +390,7 @@ export async function createVoiceCallRuntime(params: {
       realtimeHandler.registerToolHandler(
         REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
         async (args, callId, handlerContext) => {
+          handlerContext.abortSignal?.throwIfAborted();
           const call = manager.getCall(callId);
           if (!call) {
             return { error: `Call "${callId}" not found` };
@@ -396,6 +407,14 @@ export async function createVoiceCallRuntime(params: {
             typeof call.metadata?.requesterSessionKey === "string"
               ? call.metadata.requesterSessionKey
               : undefined;
+          const modelLockParams = {
+            cfg,
+            agentRuntime,
+            agentId,
+            sessionKey,
+            spawnedBy: requesterSessionKey,
+          };
+          assertRealtimeVoiceAgentConsultModelSelectionUnlocked(modelLockParams);
           const fastContext = await resolveRealtimeFastContextConsult({
             cfg,
             agentId,
@@ -404,7 +423,9 @@ export async function createVoiceCallRuntime(params: {
             args,
             logger: log,
           });
+          handlerContext.abortSignal?.throwIfAborted();
           if (fastContext.handled) {
+            assertRealtimeVoiceAgentConsultModelSelectionUnlocked(modelLockParams);
             return fastContext.result;
           }
           const { provider: agentProvider, model } = resolveVoiceResponseModel({
@@ -444,6 +465,7 @@ export async function createVoiceCallRuntime(params: {
               effectiveConfig.realtime.toolPolicy,
             ),
             extraSystemPrompt: REALTIME_VOICE_CONSULT_SYSTEM_PROMPT,
+            abortSignal: handlerContext.abortSignal,
           });
         },
       );
@@ -511,8 +533,8 @@ export async function createVoiceCallRuntime(params: {
       const twilioProvider = provider as TwilioProvider;
       if (ttsRuntime?.textToSpeechTelephony) {
         try {
-          const ttsProvider = createTelephonyTtsProvider({
-            coreConfig,
+          const ttsProvider = await createTelephonyTtsProvider({
+            coreConfig: cfg,
             ttsOverride: config.tts,
             runtime: ttsRuntime,
             logger: log,
@@ -539,7 +561,7 @@ export async function createVoiceCallRuntime(params: {
 
     await manager.initialize(provider, webhookUrl);
 
-    const stop = async () => await lifecycle.stop();
+    const stop = () => lifecycle.stop();
 
     log.info("[voice-call] Runtime initialized");
     log.info(`[voice-call] Webhook URL: ${webhookUrl}`);

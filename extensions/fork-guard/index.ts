@@ -1,13 +1,6 @@
 import { definePluginEntry, type OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
-import type { PluginHookHandlerMap, PluginHookName } from "openclaw/plugin-sdk/plugin-runtime";
 import { parseForkGuardConfig } from "./src/config.js";
 import { analyzeExecToolCall } from "./src/guard.js";
-
-type ToolScopedOn = <K extends PluginHookName>(
-  hookName: K,
-  handler: PluginHookHandlerMap[K],
-  opts?: { priority?: number; toolNames?: string[] },
-) => void;
 
 export function registerForkGuardPlugin(api: OpenClawPluginApi): void {
   const config = parseForkGuardConfig(api.pluginConfig);
@@ -16,8 +9,10 @@ export function registerForkGuardPlugin(api: OpenClawPluginApi): void {
     return;
   }
 
-  const on = api.on as ToolScopedOn;
-  on(
+  // FORK: upstream replaced the untyped `toolNames` scoping option with a typed
+  // `matcher` on PluginHookRegistrationOptions, so the ToolScopedOn cast that
+  // used to be needed here is gone and `api.on` is used directly.
+  api.on(
     "before_tool_call",
     async (event, ctx) => {
       const result = await analyzeExecToolCall({
@@ -28,7 +23,7 @@ export function registerForkGuardPlugin(api: OpenClawPluginApi): void {
       });
       return result;
     },
-    { toolNames: ["exec"] },
+    { matcher: ["exec"] },
   );
 }
 

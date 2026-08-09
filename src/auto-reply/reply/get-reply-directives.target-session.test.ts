@@ -2,8 +2,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionEntry } from "../../config/sessions.js";
 import { SessionWorkStartInvalidatedError } from "../../config/sessions/lifecycle.js";
+import {
+  MODEL_SELECTION_LOCKED_MESSAGE,
+  ModelSelectionLockedError,
+} from "../../sessions/model-overrides.js";
 import { getReplyPayloadMetadata } from "../reply-payload.js";
-import type { TemplateContext } from "../templating.js";
+import type { FinalizedTemplateContext as TemplateContext } from "../templating.js";
 import { resolveReplyDirectives } from "./get-reply-directives.js";
 import { buildTestCtx } from "./test-ctx.js";
 
@@ -186,6 +190,7 @@ async function resolveHelloWithModelDefaults(params: {
   provider?: string;
   model?: string;
   ctx?: Parameters<typeof buildTestCtx>[0];
+  sessionCtx?: Partial<TemplateContext>;
   opts?: Parameters<typeof resolveReplyDirectives>[0]["opts"];
   modelError?: unknown;
 }) {
@@ -228,7 +233,11 @@ async function resolveHelloWithModelDefaults(params: {
       BodyStripped: params.body ?? "hello",
       BodyForAgent: params.body ?? "hello",
       CommandBody: params.body ?? "hello",
+      commandText: params.body ?? "hello",
+      agentText: params.body ?? "hello",
+      rawText: params.body ?? "hello",
       Provider: "whatsapp",
+      ...params.sessionCtx,
     } as TemplateContext,
     sessionEntry: params.sessionEntry ?? makeSessionEntry(),
     sessionStore: {},
@@ -421,6 +430,21 @@ describe("resolveReplyDirectives", () => {
     expect(mocks.applyInlineDirectiveOverrides).not.toHaveBeenCalled();
   });
 
+  it("returns a terminal rejection when locked model preparation cannot preserve its model", async () => {
+    const { result, typing } = await resolveHelloWithModelDefaults({
+      defaultThinking: "off",
+      defaultReasoning: "on",
+      modelError: new ModelSelectionLockedError(),
+    });
+
+    expect(result).toEqual({
+      kind: "reply",
+      reply: { text: MODEL_SELECTION_LOCKED_MESSAGE },
+    });
+    expect(typing.cleanup).toHaveBeenCalledOnce();
+    expect(mocks.applyInlineDirectiveOverrides).not.toHaveBeenCalled();
+  });
+
   it("marks terminal directive replies for delivery under source suppression", async () => {
     mocks.applyInlineDirectiveOverrides.mockResolvedValueOnce({
       kind: "reply",
@@ -602,6 +626,9 @@ describe("resolveReplyDirectives", () => {
         BodyStripped: "hello",
         BodyForAgent: "hello",
         CommandBody: "hello",
+        commandText: "hello",
+        agentText: "hello",
+        rawText: "hello",
         Provider: "whatsapp",
       } as TemplateContext,
       sessionEntry: wrapperSessionEntry,
@@ -677,6 +704,9 @@ describe("resolveReplyDirectives", () => {
         BodyStripped: "/trace on",
         BodyForAgent: "/trace on",
         CommandBody: "/trace on",
+        commandText: "/trace on",
+        agentText: "/trace on",
+        rawText: "/trace on",
         Provider: "telegram",
         Surface: "telegram",
       } as TemplateContext,
@@ -895,6 +925,9 @@ describe("resolveReplyDirectives", () => {
       BodyForAgent: "",
       BodyForCommands: "new session",
       CommandBody: "new session",
+      commandText: "new session",
+      agentText: "",
+      rawText: "new session",
       Provider: "slack",
       Surface: "slack",
     } as TemplateContext;
@@ -948,5 +981,107 @@ describe("resolveReplyDirectives", () => {
     expect(sessionCtx.Body).toBe("");
     expect(sessionCtx.BodyForAgent).toBe("");
     expect(sessionCtx.BodyStripped).toBe("");
+  });
+
+  it("preserves prompt-facing context for transcript-backed text", async () => {
+    const agentText = "trusted provenance\n\nhello";
+    const { result } = await resolveHelloWithModelDefaults({
+      defaultThinking: "off",
+      defaultReasoning: "on",
+      body: "hello",
+      sessionCtx: { commandText: "hello", agentText, rawText: "hello" },
+    });
+
+    expectContinueResult(result, { cleanedBody: agentText });
+  });
+
+  it("does not resurrect a consumed command from the inbound context", async () => {
+    const sessionCtx = {
+      Body: "",
+      BodyStripped: "",
+      commandText: "",
+      agentText: "",
+      rawText: "new session",
+      Provider: "slack",
+      Surface: "slack",
+    } as TemplateContext;
+
+    const directResult = await resolveReplyDirectives({
+      ctx: buildTestCtx({
+        Body: "new session",
+        BodyForCommands: "new session",
+        CommandBody: "new session",
+        Provider: "slack",
+        Surface: "slack",
+      }),
+      cfg: {},
+      agentId: "main",
+      agentDir: "/tmp/main-agent",
+      workspaceDir: "/tmp",
+      agentCfg: {},
+      sessionCtx,
+      sessionEntry: makeSessionEntry(),
+      sessionStore: {},
+      sessionKey: "agent:main:slack:C123",
+      storePath: "/tmp/sessions.json",
+      sessionScope: "per-sender",
+      groupResolution: undefined,
+      isGroup: false,
+      triggerBodyNormalized: "new session",
+      resetTriggered: true,
+      commandAuthorized: true,
+      defaultProvider: "openai",
+      defaultModel: "gpt-4o-mini",
+      aliasIndex: { byAlias: new Map(), byKey: new Map() },
+      provider: "openai",
+      model: "gpt-4o-mini",
+      hasResolvedHeartbeatModelOverride: false,
+      typing: makeTypingController(),
+    });
+
+    expectContinueResult(directResult, { commandSource: "", cleanedBody: "" });
+  });
+
+  it("does not apply or remove directives when the command projection is explicitly empty", async () => {
+    const { result } = await resolveHelloWithModelDefaults({
+      defaultThinking: "off",
+      defaultReasoning: "on",
+      body: "/trace on",
+      commandAuthorized: true,
+      sessionCtx: {
+        commandText: "",
+        agentText: "/trace on",
+        rawText: "/trace on",
+      },
+    });
+
+    expectContinueResult(result, {
+      commandSource: "",
+      cleanedBody: "/trace on",
+    });
+  });
+
+  it("preserves directives and quoted current-message markers inside flat history", async () => {
+    const agentText = [
+      "[Chat messages since your last reply - for context]",
+      "Other: /trace on",
+      "Other: [Current message - respond to this] /model gpt-5.5",
+      "",
+      "[Current message - respond to this]",
+      "Owner: hello /status",
+    ].join("\n");
+    const { result } = await resolveHelloWithModelDefaults({
+      defaultThinking: "off",
+      defaultReasoning: "on",
+      body: "hello",
+      commandAuthorized: true,
+      sessionCtx: {
+        commandText: "hello",
+        agentText,
+        rawText: "hello",
+      },
+    });
+
+    expectContinueResult(result, { cleanedBody: agentText });
   });
 });

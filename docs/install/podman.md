@@ -36,7 +36,7 @@ The model:
     | `OPENCLAW_IMAGE` / `OPENCLAW_PODMAN_IMAGE` | Use an existing/pulled image instead of building `openclaw:local` |
     | `OPENCLAW_IMAGE_APT_PACKAGES` | Install extra apt packages during image build (also accepts legacy `OPENCLAW_DOCKER_APT_PACKAGES`) |
     | `OPENCLAW_IMAGE_PIP_PACKAGES` | Install extra Python packages during image build; pin versions and use only package indexes you trust |
-    | `OPENCLAW_EXTENSIONS` | Pre-install plugin dependencies at build time |
+    | `OPENCLAW_EXTENSIONS` | Compile/package supported selected plugins and install their runtime dependencies |
     | `OPENCLAW_INSTALL_BROWSER` | Pre-install Chromium and Xvfb for browser automation (set to `1`) |
 
     For Quadlet-managed setup instead (Linux + systemd user services only):
@@ -89,6 +89,14 @@ The model:
 </Steps>
 
 The manual launcher reads only a small allowlist of Podman-related keys from `~/.openclaw/.env` and passes explicit runtime env vars to the container; it does not hand the full env file to Podman.
+
+## Agent sandbox backend
+
+This page covers running the Gateway itself in a Podman container. Agent sandboxing is separate. Set `agents.defaults.sandbox.backend: "podman"` to select the native Podman CLI directly. The default `"docker"` backend remains Docker-only.
+
+Podman reuses the same `agents.defaults.sandbox.docker.*` container settings as Docker but executes them through the native `podman` CLI. Browser sandboxes remain Docker-only for now.
+
+See [Sandboxing](/gateway/sandboxing#podman-backend) for the config example and image-build command.
 
 <a id="podman-and-tailscale"></a>
 
@@ -203,5 +211,6 @@ mounted state.
 ## Related
 
 - [Docker](/install/docker)
+- [Sandboxing](/gateway/sandboxing#podman-backend)
 - [Gateway background process](/gateway/background-process)
 - [Gateway troubleshooting](/gateway/troubleshooting)

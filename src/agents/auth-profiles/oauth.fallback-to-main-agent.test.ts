@@ -18,11 +18,14 @@ import {
   saveAuthProfileStore,
 } from "./store.js";
 import type { AuthProfileStore } from "./types.js";
-const { getOAuthApiKeyMock } = vi.hoisted(() => ({
-  getOAuthApiKeyMock: vi.fn(async () => {
-    throw new Error("invalid_grant");
-  }),
-}));
+const { getOAuthApiKeyMock } = vi.hoisted(() => {
+  vi.resetModules();
+  return {
+    getOAuthApiKeyMock: vi.fn(async () => {
+      throw new Error("invalid_grant");
+    }),
+  };
+});
 
 vi.mock("../../llm/oauth.js", () => ({
   getOAuthApiKey: getOAuthApiKeyMock,
@@ -40,7 +43,7 @@ vi.mock("../../plugins/provider-runtime.runtime.js", () => ({
   buildProviderAuthDoctorHintWithPlugin: async () => null,
   formatProviderAuthProfileApiKeyWithPlugin: async (params: { context?: { access?: string } }) =>
     params.context?.access,
-  refreshProviderOAuthCredentialWithPlugin: async () => null,
+  resolveProviderOAuthCredentialWithPlugin: async () => ({ status: "unhandled" }),
 }));
 
 vi.mock("../../plugins/provider-runtime.js", () => ({
@@ -52,6 +55,7 @@ afterAll(() => {
   vi.doUnmock("../cli-credentials.js");
   vi.doUnmock("../../plugins/provider-runtime.runtime.js");
   vi.doUnmock("../../plugins/provider-runtime.js");
+  vi.resetModules();
 });
 
 function createUsableOAuthExpiry(): number {

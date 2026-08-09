@@ -1,5 +1,6 @@
 // Slack plugin module implements sent thread cache behavior.
 import { createPersistentDedupeCache } from "openclaw/plugin-sdk/dedupe-runtime";
+import { createPluginStateErrorReporter } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { getOptionalSlackRuntime } from "./runtime.js";
 
 /**
@@ -30,32 +31,31 @@ const threadParticipation = createPersistentDedupeCache<SlackThreadParticipation
     namespace: PERSISTENT_NAMESPACE,
     maxEntries: PERSISTENT_MAX_ENTRIES,
     openStore: (options) => getOptionalSlackRuntime()?.state.openKeyedStore(options),
-    logError: (error) => {
-      try {
-        getOptionalSlackRuntime()
-          ?.logging.getChildLogger({ plugin: "slack", feature: "thread-participation-state" })
-          .warn("Slack persistent thread participation state failed", { error: String(error) });
-      } catch {
-        // Best effort only: persistent state must never break Slack message handling.
-      }
-    },
+    logError: createPluginStateErrorReporter(
+      getOptionalSlackRuntime,
+      "slack",
+      "thread-participation-state",
+      "Slack persistent thread participation state failed",
+    ),
+    // Restoring participation must not extend its original mention-bypass window.
+    readTimestamp: ({ repliedAt }) => repliedAt,
   },
 });
 
-function makeKey(accountId: string, channelId: string, threadTs: string): string {
-  return `${accountId}:${channelId}:${threadTs}`;
+function makeKey(accountId: string, channelId: string, threadTs: string, teamId?: string): string {
+  return `${accountId}:${teamId ? `${teamId}:` : ""}${channelId}:${threadTs}`;
 }
 
 export function recordSlackThreadParticipation(
   accountId: string,
   channelId: string,
   threadTs: string,
-  opts?: { agentId?: string },
+  opts?: { agentId?: string; teamId?: string },
 ): void {
   if (!accountId || !channelId || !threadTs) {
     return;
   }
-  void threadParticipation.register(makeKey(accountId, channelId, threadTs), {
+  void threadParticipation.register(makeKey(accountId, channelId, threadTs, opts?.teamId), {
     // Stored for future per-agent thread routing; current reads only need presence.
     ...(opts?.agentId ? { agentId: opts.agentId } : {}),
     repliedAt: Date.now(),
@@ -66,23 +66,25 @@ export function hasSlackThreadParticipation(
   accountId: string,
   channelId: string,
   threadTs: string,
+  teamId?: string,
 ): boolean {
   if (!accountId || !channelId || !threadTs) {
     return false;
   }
-  return threadParticipation.peek(makeKey(accountId, channelId, threadTs));
+  return threadParticipation.peek(makeKey(accountId, channelId, threadTs, teamId));
 }
 
 export async function hasSlackThreadParticipationWithPersistence(params: {
   accountId: string;
   channelId: string;
   threadTs: string;
+  teamId?: string;
 }): Promise<boolean> {
   if (!params.accountId || !params.channelId || !params.threadTs) {
     return false;
   }
   return await threadParticipation.lookup(
-    makeKey(params.accountId, params.channelId, params.threadTs),
+    makeKey(params.accountId, params.channelId, params.threadTs, params.teamId),
   );
 }
 

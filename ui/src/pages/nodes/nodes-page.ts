@@ -1,122 +1,220 @@
 import { consume } from "@lit/context";
-import { html, LitElement } from "lit";
+import { initialState, Task } from "@lit/task";
+import { html, type PropertyValues } from "lit";
 import { property, state } from "lit/decorators.js";
-import { titleForRoute, subtitleForRoute } from "../../app-navigation.ts";
-import { applicationContext, type ApplicationContext } from "../../app/context.ts";
+import type { PresenceEntry } from "../../api/types.ts";
+import { subtitleForRoute, titleForRoute } from "../../app-navigation.ts";
+import {
+  applicationContext,
+  type ApplicationContext,
+  type ApplicationGatewaySnapshot,
+} from "../../app/context.ts";
 import { hasOperatorAdminAccess } from "../../app/operator-access.ts";
+import { showConfirmDialog } from "../../components/confirm-dialog.ts";
+import { renderDocsLink } from "../../components/settings-ui.ts";
 import { renderSettingsWorkspace } from "../../components/settings-workspace.ts";
+import { t } from "../../i18n/index.ts";
 import { currentConfigObject } from "../../lib/config/index.ts";
+import { isMissingOperatorReadScopeError } from "../../lib/gateway-errors.ts";
 import {
   approveDevicePairing,
+  approveNodePairingRequest,
   createInitialNodesState,
   loadDevices,
   loadExecApprovals,
   loadNodes,
   rejectDevicePairing,
+  rejectNodePairingRequest,
   removeExecApprovalsFormValue,
+  removeInventoryEntry,
+  removeStaleInventoryEntries,
   revokeDeviceToken,
   rotateDeviceToken,
   saveExecApprovals,
   updateExecApprovalsFormValue,
-  type DevicePairingList,
-  type ExecApprovalsFile,
-  type ExecApprovalsSnapshot,
   type ExecApprovalsTarget,
+  type InventoryRemovalRequest,
   type NodesPageDataState,
 } from "../../lib/nodes/index.ts";
+import {
+  GatewayPageController,
+  type GatewayPageChange,
+} from "../../lit/gateway-page-controller.ts";
+import { OpenClawLightDomElement } from "../../lit/openclaw-element.ts";
+import { PollController } from "../../lit/poll-controller.ts";
+import { SubscriptionsController } from "../../lit/subscriptions-controller.ts";
 import { renderNodes } from "./view.ts";
 
+const NODES_DOCS_URL = "https://docs.openclaw.ai/nodes";
+
 export type NodesRouteData = {
+  // Client identity alone cannot distinguish provider replacement or reconnect epochs.
+  gateway: ApplicationContext["gateway"];
+  gatewaySnapshot: ApplicationGatewaySnapshot;
   nodes: NodesPageDataState;
 };
 
 const NODES_ACTIVE_POLL_INTERVAL_MS = 30_000;
 
-class NodesPage extends LitElement implements NodesPageDataState {
-  override createRenderRoot() {
-    return this;
-  }
+type InventoryRemovalPrompt =
+  | { kind: "entry"; entry: InventoryRemovalRequest }
+  | { kind: "stale"; entries: InventoryRemovalRequest[] };
 
-  @consume({ context: applicationContext, subscribe: false })
+function readPresence(value: unknown): PresenceEntry[] | null {
+  const presence =
+    value && typeof value === "object" ? (value as { presence?: unknown }).presence : null;
+  return Array.isArray(presence) ? (presence as PresenceEntry[]) : null;
+}
+
+function presenceConnectivitySignature(entries: PresenceEntry[]): string {
+  const states = new Map<string, "connected" | "offline">();
+  for (const entry of entries) {
+    const id = (entry.deviceId ?? entry.instanceId)?.trim().toLowerCase();
+    if (!id || entry.mode?.trim().toLowerCase() === "gateway") {
+      continue;
+    }
+    states.set(id, entry.reason?.trim().toLowerCase() === "disconnect" ? "offline" : "connected");
+  }
+  return JSON.stringify([...states].toSorted(([left], [right]) => left.localeCompare(right)));
+}
+
+class NodesPage extends OpenClawLightDomElement {
+  @consume({ context: applicationContext, subscribe: true })
   private context!: ApplicationContext;
 
   @property({ attribute: false }) routeData?: NodesRouteData;
 
-  @state() client: NodesPageDataState["client"] = null;
-  @state() connected = false;
-  @state() nodesLoading = false;
-  @state() nodes: Array<Record<string, unknown>> = [];
-  @state() lastError: string | null = null;
-  @state() chatError: string | null = null;
-  @state() devicesLoading = false;
-  @state() devicesError: string | null = null;
-  @state() devicesList: DevicePairingList | null = null;
+  @state() presence: PresenceEntry[] = [];
+  @state() private nodeState = createInitialNodesState();
   @state() private canPairDevice = false;
-  @state() execApprovalsLoading = false;
-  @state() execApprovalsSaving = false;
-  @state() execApprovalsDirty = false;
-  @state() execApprovalsSnapshot: ExecApprovalsSnapshot | null = null;
-  @state() execApprovalsForm: ExecApprovalsFile | null = null;
-  @state() execApprovalsSelectedAgent: string | null = null;
   @state() private execApprovalsTarget: "gateway" | "node" = "gateway";
   @state() private execApprovalsTargetNodeId: string | null = null;
+  private inventoryRemovalConfirmation: AbortController | null = null;
 
   private routeDataInitialized = false;
-  private stopGatewaySubscription?: () => void;
-  private stopGatewayEvents?: () => void;
-  private stopConfigSubscription?: () => void;
-  private nodesPollInterval: ReturnType<typeof globalThis.setInterval> | null = null;
-
-  override connectedCallback() {
-    super.connectedCallback();
-    this.syncGatewayState();
-    this.stopGatewaySubscription = this.context.gateway.subscribe((snapshot) => {
-      const previousClient = this.client;
-      this.syncGatewayState();
-      if (previousClient !== snapshot.client || !snapshot.connected) {
-        this.resetServerState();
+  private readonly gateway = new GatewayPageController(this, {
+    getGateway: () => this.context?.gateway,
+    onIdentityChange: (change) => this.resetServerState(change.snapshot),
+    invalidateRequests: (change) => {
+      this.nodeState.requestGeneration = this.gateway.epoch;
+      if (!change.identityChanged && change.snapshot.phase !== "connected") {
+        this.resetServerState(change.snapshot);
       }
-      this.syncPolling();
-      this.ensureInitialData();
-    });
-    this.stopGatewayEvents = this.context.gateway.subscribeEvents((event) => {
-      if (event.event === "device.pair.requested" || event.event === "device.pair.resolved") {
-        void loadDevices(this, { quiet: true });
+      void this.presenceTask.run([null, null]);
+    },
+    onSnapshot: (change) => this.handleGatewaySnapshot(change),
+    ensureInitialData: () => this.ensureInitialData(),
+  });
+  private readonly presenceTask = new Task(this, {
+    autoRun: false,
+    // Gateway identity invalidates same-client reconnects and source replacements.
+    args: () =>
+      [
+        this.gateway.connected ? this.gateway.gateway : null,
+        this.gateway.connected ? this.gateway.client : null,
+      ] as const,
+    task: ([gateway, client], { signal }) =>
+      gateway && client ? client.request("system-presence", {}, { signal }) : initialState,
+    onComplete: (response) => {
+      if (Array.isArray(response)) {
+        this.presence = response as PresenceEntry[];
       }
-    });
-    this.stopConfigSubscription = this.context.runtimeConfig.subscribe(() => this.requestUpdate());
-    this.syncPolling();
-    this.ensureInitialData();
-  }
+    },
+    onError: (error) => {
+      if (isMissingOperatorReadScopeError(error)) {
+        this.presence = [];
+      }
+    },
+  });
+  private readonly polling = new PollController(
+    this,
+    NODES_ACTIVE_POLL_INTERVAL_MS,
+    () => {
+      void this.runNodeTask((nodeState) => loadNodes(nodeState, { quiet: true }));
+      void this.runNodeTask((nodeState) => loadDevices(nodeState, { quiet: true }));
+    },
+    false,
+  );
+  private readonly subscriptions = new SubscriptionsController(this)
+    .watch(
+      () => this.context?.runtimeConfig,
+      (runtimeConfig, notify) => runtimeConfig.subscribe(notify),
+    )
+    .effect(
+      () => this.context?.gateway,
+      (gateway) =>
+        gateway.subscribeEvents((event) => {
+          if (this.gateway.gateway !== gateway || this.context.gateway !== gateway) {
+            return;
+          }
+          const presence = event.event === "presence" ? readPresence(event.payload) : null;
+          if (presence) {
+            const connectivityChanged =
+              presenceConnectivitySignature(presence) !==
+              presenceConnectivitySignature(this.presence);
+            void this.presenceTask.run([null, null]);
+            this.presence = presence;
+            if (connectivityChanged) {
+              void this.runNodeTask((nodeState) => loadDevices(nodeState, { quiet: true }));
+              void this.runNodeTask((nodeState) => loadNodes(nodeState, { quiet: true }));
+            }
+          }
+          if (event.event === "device.pair.requested" || event.event === "device.pair.resolved") {
+            void this.runNodeTask((nodeState) => loadDevices(nodeState, { quiet: true }));
+          }
+          if (event.event === "node.pair.requested" || event.event === "node.pair.resolved") {
+            void this.runNodeTask((nodeState) => loadNodes(nodeState, { quiet: true }));
+          }
+        }),
+    );
 
-  override willUpdate(changed: Map<PropertyKey, unknown>) {
+  override willUpdate(changed: PropertyValues<this>) {
     if (changed.has("routeData")) {
       this.applyRouteData();
     }
   }
 
-  override updated(changed: Map<PropertyKey, unknown>) {
+  override updated(changed: PropertyValues<this>) {
     if (changed.has("routeData")) {
       this.ensureInitialData();
     }
   }
 
   override disconnectedCallback() {
-    this.stopPolling();
-    this.stopGatewaySubscription?.();
-    this.stopGatewaySubscription = undefined;
-    this.stopGatewayEvents?.();
-    this.stopGatewayEvents = undefined;
-    this.stopConfigSubscription?.();
-    this.stopConfigSubscription = undefined;
+    this.cancelInventoryRemovalConfirmation();
+    this.subscriptions.clear();
+    void this.presenceTask.run([null, null]);
+    this.presence = [];
+    this.canPairDevice = false;
     super.disconnectedCallback();
   }
 
-  private syncGatewayState() {
-    const gateway = this.context.gateway.snapshot;
-    this.client = gateway.client;
-    this.connected = gateway.connected;
-    this.canPairDevice = gateway.connected && hasOperatorAdminAccess(gateway.hello?.auth ?? null);
+  get requestGeneration(): number {
+    return this.nodeState.requestGeneration;
+  }
+
+  private handleGatewaySnapshot(change: GatewayPageChange) {
+    const snapshot = change.snapshot;
+    this.nodeState.client = snapshot.client;
+    this.nodeState.connected = snapshot.phase === "connected";
+    this.nodeState.requestGeneration = this.gateway.epoch;
+    this.syncGatewayState(snapshot);
+    if (
+      this.routeDataInitialized &&
+      snapshot.phase === "connected" &&
+      snapshot.client &&
+      (change.identityChanged || change.connectionChanged)
+    ) {
+      const initialPresence = readPresence(snapshot.hello?.snapshot);
+      this.presence = initialPresence ?? [];
+      void this.loadPresence();
+    }
+    this.syncPolling();
+  }
+
+  private syncGatewayState(snapshot: ApplicationGatewaySnapshot) {
+    this.canPairDevice =
+      snapshot.phase === "connected" && hasOperatorAdminAccess(snapshot.hello?.auth ?? null);
   }
 
   private applyRouteData() {
@@ -125,82 +223,150 @@ class NodesPage extends LitElement implements NodesPageDataState {
       return;
     }
     this.routeDataInitialized = true;
-    const gateway = this.context.gateway.snapshot;
-    if (data.nodes.client !== gateway.client) {
-      this.syncGatewayState();
+    const snapshot = this.context.gateway.snapshot;
+    if (!this.gateway.isRouteDataCurrent(data)) {
+      this.resetServerState(snapshot);
+      this.presence = readPresence(snapshot.hello?.snapshot) ?? [];
+      void this.loadPresence();
+      this.ensureInitialData();
       return;
     }
-    this.client = gateway.client;
-    this.connected = gateway.connected;
-    this.nodesLoading = data.nodes.nodesLoading;
-    this.nodes = data.nodes.nodes;
-    this.lastError = data.nodes.lastError;
-    this.chatError = data.nodes.chatError ?? null;
-    this.devicesLoading = data.nodes.devicesLoading;
-    this.devicesError = data.nodes.devicesError;
-    this.devicesList = data.nodes.devicesList;
-    this.execApprovalsLoading = data.nodes.execApprovalsLoading;
-    this.execApprovalsSaving = data.nodes.execApprovalsSaving;
-    this.execApprovalsDirty = data.nodes.execApprovalsDirty;
-    this.execApprovalsSnapshot = data.nodes.execApprovalsSnapshot;
-    this.execApprovalsForm = data.nodes.execApprovalsForm;
-    this.execApprovalsSelectedAgent = data.nodes.execApprovalsSelectedAgent;
+    this.nodeState = {
+      ...data.nodes,
+      client: snapshot.client,
+      connected: snapshot.phase === "connected",
+      requestGeneration: this.gateway.epoch,
+    };
+    const initialPresence = readPresence(snapshot.hello?.snapshot);
+    if (initialPresence) {
+      this.presence = initialPresence;
+    }
+    void this.loadPresence();
   }
 
-  private resetServerState() {
-    const next = createInitialNodesState(this.context.gateway.snapshot);
-    this.nodesLoading = next.nodesLoading;
-    this.nodes = next.nodes;
-    this.lastError = next.lastError;
-    this.chatError = next.chatError ?? null;
-    this.devicesLoading = next.devicesLoading;
-    this.devicesError = next.devicesError;
-    this.devicesList = next.devicesList;
-    this.execApprovalsLoading = next.execApprovalsLoading;
-    this.execApprovalsSaving = next.execApprovalsSaving;
-    this.execApprovalsDirty = next.execApprovalsDirty;
-    this.execApprovalsSnapshot = next.execApprovalsSnapshot;
-    this.execApprovalsForm = next.execApprovalsForm;
-    this.execApprovalsSelectedAgent = next.execApprovalsSelectedAgent;
+  private resetServerState(snapshot: ApplicationGatewaySnapshot) {
+    this.cancelInventoryRemovalConfirmation();
+    this.nodeState.requestGeneration += 1;
+    const next = createInitialNodesState({
+      client: snapshot.client,
+      connected: snapshot.phase === "connected",
+    });
+    next.requestGeneration = this.gateway.epoch;
+    this.nodeState = next;
+    void this.presenceTask.run([null, null]);
+    this.presence = [];
+  }
+
+  private async runNodeTask<T>(
+    task: (nodeState: NodesPageDataState) => T | Promise<T>,
+  ): Promise<T> {
+    const nodeState = this.nodeState;
+    try {
+      const result = task(nodeState);
+      if (this.nodeState === nodeState) {
+        this.requestUpdate();
+      }
+      return await result;
+    } finally {
+      if (this.nodeState === nodeState) {
+        this.requestUpdate();
+      }
+    }
   }
 
   private ensureInitialData() {
-    if (!this.connected || !this.client || !this.routeDataInitialized) {
+    const nodeState = this.nodeState;
+    if (!nodeState.connected || !nodeState.client || !this.routeDataInitialized) {
       return;
     }
-    if (!this.nodes.length && !this.nodesLoading) {
-      void loadNodes(this);
+    if (!nodeState.nodes.length && !nodeState.nodesLoading) {
+      void this.runNodeTask((current) => loadNodes(current));
     }
-    if (!this.devicesList && !this.devicesLoading) {
-      void loadDevices(this);
+    if (!nodeState.devicesList && !nodeState.devicesLoading) {
+      void this.runNodeTask((current) => loadDevices(current));
     }
     const config = this.context.runtimeConfig.state;
     if (!config.configSnapshot && !config.configLoading) {
       void this.context.runtimeConfig.refresh();
     }
-    if (!this.execApprovalsSnapshot && !this.execApprovalsLoading) {
-      void loadExecApprovals(this, this.resolveExecApprovalsTarget());
+    if (!nodeState.execApprovalsSnapshot && !nodeState.execApprovalsLoading) {
+      void this.runNodeTask((current) =>
+        loadExecApprovals(current, this.resolveExecApprovalsTarget()),
+      );
     }
   }
 
   private syncPolling() {
-    if (this.connected && this.client) {
-      if (this.nodesPollInterval == null) {
-        this.nodesPollInterval = globalThis.setInterval(() => {
-          void loadNodes(this, { quiet: true });
-        }, NODES_ACTIVE_POLL_INTERVAL_MS);
-      }
+    if (this.gateway.connected && this.gateway.client) {
+      this.polling.start();
       return;
     }
-    this.stopPolling();
+    this.polling.stop();
   }
 
-  private stopPolling() {
-    if (this.nodesPollInterval == null) {
+  private loadPresence(): Promise<void> {
+    const gateway = this.gateway.gateway;
+    const client = this.gateway.client;
+    if (!gateway || !this.gateway.connected || !client) {
+      return Promise.resolve();
+    }
+    return this.presenceTask.run([gateway, client]);
+  }
+
+  private cancelInventoryRemovalConfirmation() {
+    this.inventoryRemovalConfirmation?.abort();
+    this.inventoryRemovalConfirmation = null;
+  }
+
+  private async confirmInventoryRemoval(prompt: InventoryRemovalPrompt) {
+    if (this.inventoryRemovalConfirmation) {
       return;
     }
-    clearInterval(this.nodesPollInterval);
-    this.nodesPollInterval = null;
+    const controller = new AbortController();
+    this.inventoryRemovalConfirmation = controller;
+    const generation = this.requestGeneration;
+    const client = this.gateway.client;
+    const title =
+      prompt.kind === "entry"
+        ? t("nodes.inventory.removePromptTitle", { name: prompt.entry.name })
+        : t(
+            prompt.entries.length === 1
+              ? "nodes.inventory.removeStalePromptTitleOne"
+              : "nodes.inventory.removeStalePromptTitle",
+            { count: String(prompt.entries.length) },
+          );
+    const confirmed = await showConfirmDialog({
+      title,
+      message: t(
+        prompt.kind === "entry"
+          ? "nodes.inventory.removePromptBody"
+          : "nodes.inventory.removeStalePromptBody",
+      ),
+      details:
+        prompt.kind === "entry"
+          ? t("nodes.inventory.deviceId", { id: prompt.entry.id })
+          : undefined,
+      confirmLabel: t("nodes.inventory.remove"),
+      danger: true,
+      signal: controller.signal,
+    });
+    if (this.inventoryRemovalConfirmation === controller) {
+      this.inventoryRemovalConfirmation = null;
+    }
+    if (
+      !confirmed ||
+      controller.signal.aborted ||
+      generation !== this.requestGeneration ||
+      client !== this.gateway.client ||
+      !this.gateway.connected
+    ) {
+      return;
+    }
+    if (prompt.kind === "entry") {
+      void this.runNodeTask((nodeState) => removeInventoryEntry(nodeState, prompt.entry));
+      return;
+    }
+    void this.runNodeTask((nodeState) => removeStaleInventoryEntries(nodeState, prompt.entries));
   }
 
   private resolveExecApprovalsTarget(): ExecApprovalsTarget {
@@ -210,58 +376,84 @@ class NodesPage extends LitElement implements NodesPageDataState {
   }
 
   override render() {
+    const nodes = this.nodeState;
     const config = this.context.runtimeConfig.state;
+    const gatewaySnapshot = this.context.gateway.snapshot;
+    const gatewayVersion =
+      gatewaySnapshot.phase === "connected"
+        ? gatewaySnapshot.hello?.server?.version?.trim() || null
+        : null;
     return html`
       <section class="content-header">
         <div>
           <div class="page-title">${titleForRoute("nodes")}</div>
-          <div class="page-sub">${subtitleForRoute("nodes")}</div>
+          <div class="page-subtitle">
+            ${subtitleForRoute("nodes")} ${renderDocsLink(NODES_DOCS_URL, t("common.learnMore"))}
+          </div>
         </div>
       </section>
       ${renderSettingsWorkspace(
-        this.context.basePath,
         renderNodes({
-          loading: this.nodesLoading,
-          nodes: this.nodes,
-          devicesLoading: this.devicesLoading,
-          devicesError: this.devicesError,
-          devicesList: this.devicesList,
+          loading: nodes.nodesLoading,
+          nodes: nodes.nodes,
+          presence: this.presence,
+          gatewayVersion,
+          lastError: nodes.lastError,
+          devicesLoading: nodes.devicesLoading,
+          devicesError: nodes.devicesError,
+          devicesList: nodes.devicesList,
           canPairDevice: this.canPairDevice,
           configForm: currentConfigObject(config),
           configLoading: config.configLoading,
           configSaving: config.configSaving,
           configDirty: config.configFormDirty,
           configFormMode: config.configFormMode,
-          execApprovalsLoading: this.execApprovalsLoading,
-          execApprovalsSaving: this.execApprovalsSaving,
-          execApprovalsDirty: this.execApprovalsDirty,
-          execApprovalsSnapshot: this.execApprovalsSnapshot,
-          execApprovalsForm: this.execApprovalsForm,
-          execApprovalsSelectedAgent: this.execApprovalsSelectedAgent,
+          execApprovalsLoading: nodes.execApprovalsLoading,
+          execApprovalsSaving: nodes.execApprovalsSaving,
+          execApprovalsDirty: nodes.execApprovalsDirty,
+          execApprovalsSnapshot: nodes.execApprovalsSnapshot,
+          execApprovalsForm: nodes.execApprovalsForm,
+          execApprovalsSelectedAgent: nodes.execApprovalsSelectedAgent,
           execApprovalsTarget: this.execApprovalsTarget,
           execApprovalsTargetNodeId: this.execApprovalsTargetNodeId,
-          onRefresh: () => void loadNodes(this),
-          onDevicesRefresh: () => void loadDevices(this),
           onDevicePairSetupOpen: () => void this.context.overlays.openDevicePairSetup(),
-          onDeviceApprove: (requestId) => void approveDevicePairing(this, requestId),
-          onDeviceReject: (requestId) => void rejectDevicePairing(this, requestId),
+          onDeviceApprove: (requestId) =>
+            void this.runNodeTask((nodeState) => approveDevicePairing(nodeState, requestId)),
+          onDeviceReject: (requestId) =>
+            void this.runNodeTask((nodeState) => rejectDevicePairing(nodeState, requestId)),
+          onNodeApprove: (requestId) =>
+            void this.runNodeTask((nodeState) => approveNodePairingRequest(nodeState, requestId)),
+          onNodeReject: (requestId) =>
+            void this.runNodeTask((nodeState) => rejectNodePairingRequest(nodeState, requestId)),
+          onInventoryRemove: (entry) => void this.confirmInventoryRemoval({ kind: "entry", entry }),
+          onInventoryCleanup: (entries) => {
+            if (entries.length > 0) {
+              void this.confirmInventoryRemoval({ kind: "stale", entries });
+            }
+          },
           onDeviceRotate: (deviceId, role, scopes) =>
-            void rotateDeviceToken(this, {
-              deviceId,
-              gatewayUrl: this.context.gateway.connection.gatewayUrl,
-              role,
-              scopes,
-            }),
+            void this.runNodeTask((nodeState) =>
+              rotateDeviceToken(nodeState, {
+                deviceId,
+                gatewayUrl: this.context.gateway.connection.gatewayUrl,
+                role,
+                scopes,
+              }),
+            ),
           onDeviceRevoke: (deviceId, role) =>
-            void revokeDeviceToken(this, {
-              deviceId,
-              gatewayUrl: this.context.gateway.connection.gatewayUrl,
-              role,
-            }),
+            void this.runNodeTask((nodeState) =>
+              revokeDeviceToken(nodeState, {
+                deviceId,
+                gatewayUrl: this.context.gateway.connection.gatewayUrl,
+                role,
+              }),
+            ),
           onLoadConfig: () =>
             void this.context.runtimeConfig.refresh({ discardPendingChanges: true }),
           onLoadExecApprovals: () =>
-            void loadExecApprovals(this, this.resolveExecApprovalsTarget()),
+            void this.runNodeTask((nodeState) =>
+              loadExecApprovals(nodeState, this.resolveExecApprovalsTarget()),
+            ),
           onBindDefault: (nodeId) => {
             if (nodeId) {
               this.context.runtimeConfig.patchForm(["tools", "exec", "node"], nodeId);
@@ -269,8 +461,14 @@ class NodesPage extends LitElement implements NodesPageDataState {
               this.context.runtimeConfig.removeFormValue(["tools", "exec", "node"]);
             }
           },
-          onBindAgent: (agentIndex, nodeId) => {
-            const path = ["agents", "list", agentIndex, "tools", "exec", "node"];
+          onBindAgent: (agentId, nodeId) => {
+            const target = this.context.runtimeConfig.agentEntry(agentId, {
+              ensure: Boolean(nodeId),
+            });
+            if (!target) {
+              return;
+            }
+            const path = [...target.path, "tools", "exec", "node"];
             if (nodeId) {
               this.context.runtimeConfig.patchForm(path, nodeId);
             } else {
@@ -281,22 +479,27 @@ class NodesPage extends LitElement implements NodesPageDataState {
           onExecApprovalsTargetChange: (kind, nodeId) => {
             this.execApprovalsTarget = kind;
             this.execApprovalsTargetNodeId = nodeId;
-            this.execApprovalsSnapshot = null;
-            this.execApprovalsForm = null;
-            this.execApprovalsDirty = false;
-            this.execApprovalsSelectedAgent = null;
+            nodes.execApprovalsSnapshot = null;
+            nodes.execApprovalsForm = null;
+            nodes.execApprovalsDirty = false;
+            nodes.execApprovalsSelectedAgent = null;
+            this.requestUpdate();
           },
           onExecApprovalsSelectAgent: (agentId) => {
-            this.execApprovalsSelectedAgent = agentId;
+            nodes.execApprovalsSelectedAgent = agentId;
+            this.requestUpdate();
           },
-          onExecApprovalsPatch: (path, value) => updateExecApprovalsFormValue(this, path, value),
-          onExecApprovalsRemove: (path) => removeExecApprovalsFormValue(this, path),
+          onExecApprovalsPatch: (path, value) =>
+            void this.runNodeTask((nodeState) =>
+              updateExecApprovalsFormValue(nodeState, path, value),
+            ),
+          onExecApprovalsRemove: (path) =>
+            void this.runNodeTask((nodeState) => removeExecApprovalsFormValue(nodeState, path)),
           onSaveExecApprovals: () =>
-            void saveExecApprovals(this, this.resolveExecApprovalsTarget()),
+            void this.runNodeTask((nodeState) =>
+              saveExecApprovals(nodeState, this.resolveExecApprovalsTarget()),
+            ),
         }),
-        "nodes",
-        (routeId) => this.context.navigate(routeId),
-        (routeId) => this.context.preload(routeId),
       )}
     `;
   }

@@ -1,63 +1,13 @@
 // Integration proof for tools.effective global sessions scoped to non-default agents.
 import path from "node:path";
+import { expectDefined } from "@openclaw/normalization-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { installGatewayTestHooks, testState, writeSessionStore } from "../test-helpers.js";
 import { getGatewayConfigModule, sessionStoreEntry } from "../test/server-sessions.test-helpers.js";
+import { toolsEffectiveGlobalAgentRuntimeMocks as inventoryMocks } from "./__mocks__/tools-effective.runtime.js";
 import { testing, toolsEffectiveHandlers } from "./tools-effective.js";
 
-const inventoryMocks = vi.hoisted(() => ({
-  resolveEffectiveToolInventory: vi.fn(
-    (params: { agentId: string; modelProvider?: string; modelId?: string }) => ({
-      agentId: params.agentId,
-      profile: "coding",
-      groups: [
-        {
-          id: "core",
-          label: "Built-in tools",
-          source: "core",
-          tools: [
-            {
-              id: "exec",
-              label: "Exec",
-              description: "Run shell commands",
-              source: "core",
-            },
-          ],
-        },
-      ],
-      modelProvider: params.modelProvider,
-      modelId: params.modelId,
-    }),
-  ),
-  resolveEffectiveToolInventoryRuntimeModelContext: vi.fn(() => ({
-    modelApi: "openai-responses",
-    runtimeModel: {
-      id: "work-model",
-      name: "Work model",
-      provider: "openai",
-      api: "openai-responses",
-      baseUrl: "https://api.openai.com/v1",
-    },
-  })),
-}));
-
-vi.mock("./tools-effective.runtime.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./tools-effective.runtime.js")>();
-  return {
-    ...actual,
-    resolveEffectiveToolInventory: inventoryMocks.resolveEffectiveToolInventory,
-    resolveEffectiveToolInventoryRuntimeModelContext:
-      inventoryMocks.resolveEffectiveToolInventoryRuntimeModelContext,
-    peekSessionMcpRuntime: vi.fn(() => undefined),
-    resolveSessionMcpConfigSummary: vi.fn(() => ({ fingerprint: "mcp:0", serverNames: [] })),
-    buildBundleMcpToolsFromCatalog: vi.fn(() => []),
-    applyFinalEffectiveToolPolicy: vi.fn(
-      (params: { bundledTools: unknown[] }) => params.bundledTools,
-    ),
-    getActivePluginRegistryVersion: vi.fn(() => 1),
-    getActivePluginChannelRegistryVersion: vi.fn(() => 1),
-  };
-});
+vi.mock("./tools-effective.runtime.js");
 
 installGatewayTestHooks();
 
@@ -75,6 +25,7 @@ describe("tools.effective global agent integration", () => {
     const storeTemplate = path.join(dir, "{agentId}", "sessions.json");
     testState.sessionStorePath = storeTemplate;
     testState.sessionConfig = { scope: "global" };
+    testState.agentConfig = undefined;
     testState.agentsConfig = { list: [{ id: "main", default: true }, { id: "work" }] };
     mainStorePath = storeTemplate.replace("{agentId}", "main");
     workStorePath = storeTemplate.replace("{agentId}", "work");
@@ -107,12 +58,17 @@ describe("tools.effective global agent integration", () => {
         global: sessionStoreEntry("sess-work-global", {
           modelProvider: "openai",
           model: "work-model",
+          providerOverride: "openai",
+          modelOverride: "work-model",
         }),
       },
     });
 
     const respond = vi.fn();
-    await toolsEffectiveHandlers["tools.effective"]({
+    await expectDefined(
+      toolsEffectiveHandlers["tools.effective"],
+      'toolsEffectiveHandlers["tools.effective"] test invariant',
+    )({
       params: { sessionKey: "global", agentId: "work" },
       respond: respond as never,
       context: { getRuntimeConfig } as never,
@@ -130,6 +86,62 @@ describe("tools.effective global agent integration", () => {
         sessionKey: "global",
         modelProvider: "openai",
         modelId: "work-model",
+      }),
+    );
+  });
+
+  it("uses the hot-reloaded agent default instead of stale runtime identity", async () => {
+    const configModule = await getGatewayConfigModule();
+    testState.agentConfig = { model: { primary: "openai/stale-model" } };
+    configModule.clearRuntimeConfigSnapshot();
+    configModule.clearConfigCache();
+    getRuntimeConfig = configModule.getRuntimeConfig;
+    await writeSessionStore({
+      storePath: workStorePath,
+      agentId: "work",
+      entries: {
+        global: sessionStoreEntry("sess-work-global", {
+          modelProvider: "openai",
+          model: "stale-model",
+        }),
+      },
+    });
+
+    const requestTools = async (id: string) => {
+      const respond = vi.fn();
+      await expectDefined(
+        toolsEffectiveHandlers["tools.effective"],
+        'toolsEffectiveHandlers["tools.effective"] test invariant',
+      )({
+        params: { sessionKey: "global", agentId: "work" },
+        respond: respond as never,
+        context: { getRuntimeConfig } as never,
+        client: null,
+        req: { type: "req", id, method: "tools.effective" },
+        isWebchatConnect: () => false,
+      });
+      expect(respond.mock.calls[0]?.[0]).toBe(true);
+    };
+
+    await requestTools("req-tools-effective-before-reload");
+    expect(inventoryMocks.resolveEffectiveToolInventory).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        modelProvider: "openai",
+        modelId: "stale-model",
+      }),
+    );
+
+    testState.agentConfig = { model: { primary: "anthropic/current-model" } };
+    configModule.clearRuntimeConfigSnapshot();
+    configModule.clearConfigCache();
+    await requestTools("req-tools-effective-after-reload");
+
+    expect(inventoryMocks.resolveEffectiveToolInventory).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        agentId: "work",
+        sessionKey: "global",
+        modelProvider: "anthropic",
+        modelId: "current-model",
       }),
     );
   });
@@ -152,7 +164,10 @@ describe("tools.effective global agent integration", () => {
     });
 
     const respond = vi.fn();
-    await toolsEffectiveHandlers["tools.effective"]({
+    await expectDefined(
+      toolsEffectiveHandlers["tools.effective"],
+      'toolsEffectiveHandlers["tools.effective"] test invariant',
+    )({
       params: { sessionKey: "agent:main:abc", agentId: "work" },
       respond: respond as never,
       context: { getRuntimeConfig } as never,

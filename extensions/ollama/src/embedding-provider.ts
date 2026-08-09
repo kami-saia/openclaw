@@ -12,9 +12,11 @@ import {
 } from "openclaw/plugin-sdk/provider-http";
 import { normalizeProviderId } from "openclaw/plugin-sdk/provider-model-shared";
 import {
+  coerceSecretRef,
   hasConfiguredSecretInput,
   normalizeResolvedSecretInputString,
-} from "openclaw/plugin-sdk/secret-input";
+  resolveConfiguredSecretInputString,
+} from "openclaw/plugin-sdk/secret-input-runtime";
 import {
   formatErrorMessage,
   ssrfPolicyFromHttpBaseUrlAllowedOrigin,
@@ -34,6 +36,15 @@ export type OllamaEmbeddingProvider = {
   embedBatch: (texts: string[], options?: { signal?: AbortSignal }) => Promise<number[][]>;
 };
 
+type MemoryCoreAcquireLocalService = (
+  target: {
+    providerId: string;
+    baseUrl: string;
+    headers?: HeadersInit;
+  },
+  signal?: AbortSignal | null,
+) => Promise<{ release: () => void } | undefined>;
+
 type OllamaEmbeddingOptions = {
   config: OpenClawConfig;
   agentDir?: string;
@@ -48,6 +59,7 @@ type OllamaEmbeddingOptions = {
   local?: unknown;
   outputDimensionality?: number;
   taskType?: unknown;
+  acquireLocalService?: MemoryCoreAcquireLocalService;
 };
 
 export type OllamaEmbeddingClient = {
@@ -56,6 +68,8 @@ export type OllamaEmbeddingClient = {
   ssrfPolicy?: SsrFPolicy;
   model: string;
   outputDimensionality?: number;
+  localServiceTarget?: Parameters<MemoryCoreAcquireLocalService>[0];
+  acquireLocalService?: MemoryCoreAcquireLocalService;
   embedBatch: (texts: string[]) => Promise<number[][]>;
 };
 
@@ -153,15 +167,16 @@ function resolveConfiguredProvider(options: OllamaEmbeddingOptions) {
   const providerId = options.provider?.trim() || "ollama";
   const direct = providers[providerId];
   if (direct) {
-    return direct;
+    return { providerId, config: direct };
   }
   const normalized = normalizeProviderId(providerId);
   for (const [candidateId, candidate] of Object.entries(providers)) {
     if (normalizeProviderId(candidateId) === normalized) {
-      return candidate;
+      return { providerId: candidateId, config: candidate };
     }
   }
-  return providers.ollama;
+  const fallback = providers.ollama;
+  return fallback ? { providerId: "ollama", config: fallback } : undefined;
 }
 
 function resolveMemorySecretInputString(params: {
@@ -189,9 +204,12 @@ type OllamaEmbeddingResolvedKeys = {
 function resolveSourcedOllamaEmbeddingKey(params: {
   configString: string | undefined;
   declared: boolean;
+  resolvedSecretRef?: boolean;
 }): OllamaEmbeddingSourceResolution {
   if (params.configString !== undefined) {
-    if (!isNonSecretApiKeyMarker(params.configString)) {
+    // Resolved SecretRefs are opaque credentials, even when their values happen
+    // to match an ambient env marker or the synthetic local-auth placeholder.
+    if (params.resolvedSecretRef || !isNonSecretApiKeyMarker(params.configString)) {
       return { apiKey: params.configString };
     }
     if (!isKnownEnvApiKeyMarker(params.configString)) {
@@ -200,30 +218,56 @@ function resolveSourcedOllamaEmbeddingKey(params: {
     const envKey = resolveEnvApiKey("ollama")?.apiKey;
     return envKey && !isNonSecretApiKeyMarker(envKey) ? { apiKey: envKey } : "opt-out";
   }
-  if (params.declared) {
-    const envKey = resolveEnvApiKey("ollama")?.apiKey;
-    return envKey && !isNonSecretApiKeyMarker(envKey) ? { apiKey: envKey } : "opt-out";
-  }
-  return "unset";
+  return params.declared ? "opt-out" : "unset";
 }
 
-function resolveOllamaEmbeddingResolvedKeys(
+async function resolveConfiguredOllamaEmbeddingSecret(params: {
+  config: OpenClawConfig;
+  value: unknown;
+  path: string;
+}): Promise<string | undefined> {
+  if (!coerceSecretRef(params.value, params.config.secrets?.defaults)) {
+    return normalizeOptionalSecretInput(params.value);
+  }
+  const resolved = await resolveConfiguredSecretInputString({
+    config: params.config,
+    env: process.env,
+    value: params.value,
+    path: params.path,
+    unresolvedReasonStyle: "detailed",
+  });
+  if (resolved.unresolvedRefReason) {
+    throw new Error(resolved.unresolvedRefReason);
+  }
+  return normalizeOptionalSecretInput(resolved.value);
+}
+
+async function resolveOllamaEmbeddingResolvedKeys(
   options: OllamaEmbeddingOptions,
   providerConfig: ReturnType<typeof resolveConfiguredProvider>,
-): OllamaEmbeddingResolvedKeys {
+  providerOwnsHost: boolean,
+): Promise<OllamaEmbeddingResolvedKeys> {
   const remoteValue = options.remote?.apiKey;
   const remote = resolveSourcedOllamaEmbeddingKey({
     configString: resolveMemorySecretInputString({
       value: remoteValue,
-      path: "agents.*.memorySearch.remote.apiKey",
+      path: "memory.search.remote.apiKey",
     }),
     declared: hasConfiguredSecretInput(remoteValue),
   });
-  const providerValue = providerConfig?.apiKey;
-  const provider = resolveSourcedOllamaEmbeddingKey({
-    configString: normalizeOptionalSecretInput(providerValue),
-    declared: hasConfiguredSecretInput(providerValue),
-  });
+  const providerValue = providerConfig?.config.apiKey;
+  let provider: OllamaEmbeddingSourceResolution = "unset";
+  if (remote === "unset" && providerOwnsHost && providerConfig) {
+    provider = resolveSourcedOllamaEmbeddingKey({
+      configString: await resolveConfiguredOllamaEmbeddingSecret({
+        config: options.config,
+        value: providerValue,
+        path: `models.providers.${providerConfig.providerId}.apiKey`,
+      }),
+      declared: hasConfiguredSecretInput(providerValue),
+      resolvedSecretRef: Boolean(coerceSecretRef(providerValue, options.config.secrets?.defaults)),
+    });
+  }
   const envKey = resolveEnvApiKey("ollama")?.apiKey;
   const env = envKey && !isNonSecretApiKeyMarker(envKey) ? envKey : undefined;
   return { remote, provider, env };
@@ -237,7 +281,7 @@ function resolveOllamaEmbeddingBaseUrl(params: {
   if (remoteBaseUrl) {
     return { baseUrl: resolveOllamaApiBase(remoteBaseUrl), origin: "remote-config" };
   }
-  const providerBaseUrl = readProviderBaseUrl(params.providerConfig);
+  const providerBaseUrl = readProviderBaseUrl(params.providerConfig?.config);
   if (providerBaseUrl) {
     return { baseUrl: resolveOllamaApiBase(providerBaseUrl), origin: "provider-config" };
   }
@@ -272,17 +316,12 @@ function isOllamaCloudBaseUrl(baseUrl: string): boolean {
 function selectOllamaEmbeddingApiKey(params: {
   resolved: OllamaEmbeddingResolvedKeys;
   baseUrl: string;
-  baseUrlOrigin: OllamaEmbeddingBaseUrlOrigin;
-  providerOwnedHost: string;
+  providerOwnsHost: boolean;
 }): string | undefined {
   if (params.resolved.remote !== "unset") {
     return typeof params.resolved.remote === "object" ? params.resolved.remote.apiKey : undefined;
   }
-  const reachesProviderHost =
-    params.baseUrlOrigin === "provider-config" ||
-    params.baseUrlOrigin === "default" ||
-    areOllamaHostsEquivalent(params.baseUrl, params.providerOwnedHost);
-  if (params.resolved.provider !== "unset" && reachesProviderHost) {
+  if (params.resolved.provider !== "unset" && params.providerOwnsHost) {
     return typeof params.resolved.provider === "object"
       ? params.resolved.provider.apiKey
       : undefined;
@@ -293,66 +332,120 @@ function selectOllamaEmbeddingApiKey(params: {
   return undefined;
 }
 
-function resolveOllamaEmbeddingClient(
+async function resolveOllamaEmbeddingClient(
   options: OllamaEmbeddingOptions,
-): OllamaEmbeddingClientConfig {
+): Promise<OllamaEmbeddingClientConfig> {
   const providerConfig = resolveConfiguredProvider(options);
   const { baseUrl, origin: baseUrlOrigin } = resolveOllamaEmbeddingBaseUrl({
     remoteBaseUrl: options.remote?.baseUrl,
     providerConfig,
   });
   const model = normalizeEmbeddingModel(options.model, options.provider);
-  const headerOverrides = Object.assign({}, providerConfig?.headers, options.remote?.headers);
+  const providerOwnedHost = resolveOllamaApiBase(readProviderBaseUrl(providerConfig?.config));
+  // Provider keys and headers belong to this origin only; a remote override
+  // must neither resolve nor inherit another host's configured credentials.
+  const providerOwnsHost =
+    baseUrlOrigin !== "remote-config" || areOllamaHostsEquivalent(baseUrl, providerOwnedHost);
+  const remoteHeaderNames = new Set(
+    Object.keys(options.remote?.headers ?? {}).map((headerName) => headerName.toLowerCase()),
+  );
+  const headerOverrides: Record<string, string> = {};
+  if (providerOwnsHost && providerConfig?.config.headers) {
+    for (const [headerName, headerValue] of Object.entries(providerConfig.config.headers)) {
+      if (remoteHeaderNames.has(headerName.toLowerCase())) {
+        continue;
+      }
+      const resolvedValue = await resolveConfiguredOllamaEmbeddingSecret({
+        config: options.config,
+        value: headerValue,
+        path: `models.providers.${providerConfig.providerId}.headers.${headerName}`,
+      });
+      if (resolvedValue) {
+        headerOverrides[headerName] = resolvedValue;
+      }
+    }
+  }
+  Object.assign(headerOverrides, options.remote?.headers);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...headerOverrides,
   };
-  const apiKey = selectOllamaEmbeddingApiKey({
-    resolved: resolveOllamaEmbeddingResolvedKeys(options, providerConfig),
-    baseUrl,
-    baseUrlOrigin,
-    providerOwnedHost: resolveOllamaApiBase(readProviderBaseUrl(providerConfig)),
-  });
+  // Explicit HTTP auth owns its request; resolving a competing bearer can leak
+  // another tenant's key or fail on a SecretRef that is already inactive.
+  const hasAuthorizationHeader = Object.entries(headers).some(
+    ([name, value]) => name.toLowerCase() === "authorization" && value.trim().length > 0,
+  );
+  const apiKey = hasAuthorizationHeader
+    ? undefined
+    : selectOllamaEmbeddingApiKey({
+        resolved: await resolveOllamaEmbeddingResolvedKeys(
+          options,
+          providerConfig,
+          providerOwnsHost,
+        ),
+        baseUrl,
+        providerOwnsHost,
+      });
   if (apiKey) {
     headers.Authorization = `Bearer ${apiKey}`;
   }
+  const localService = providerConfig?.config.localService;
   return {
     baseUrl,
     headers,
     ssrfPolicy: ssrfPolicyFromHttpBaseUrlAllowedOrigin(baseUrl),
     model,
     outputDimensionality: options.outputDimensionality,
+    ...(localService && baseUrlOrigin !== "remote-config"
+      ? {
+          localServiceTarget: {
+            providerId: providerConfig.providerId,
+            baseUrl: `${baseUrl.replace(/\/+$/, "")}/v1`,
+            headers,
+          },
+          acquireLocalService: options.acquireLocalService,
+        }
+      : {}),
   };
 }
 
 export async function createOllamaEmbeddingProvider(
   options: OllamaEmbeddingOptions,
 ): Promise<{ provider: OllamaEmbeddingProvider; client: OllamaEmbeddingClient }> {
-  const client = resolveOllamaEmbeddingClient(options);
+  const client = await resolveOllamaEmbeddingClient(options);
   const embedUrl = `${client.baseUrl.replace(/\/$/, "")}/api/embed`;
 
   const embedMany = async (input: string | string[], signal?: AbortSignal): Promise<number[][]> => {
-    const json = await withRemoteHttpResponse({
-      url: embedUrl,
-      ssrfPolicy: client.ssrfPolicy,
-      configuredLocalOriginBaseUrl: client.baseUrl,
-      signal,
-      init: {
-        method: "POST",
-        headers: client.headers,
-        body: JSON.stringify({ model: client.model, input }),
-      },
-      onResponse: async (response) => {
-        if (!response.ok) {
-          const detail = await readResponseTextLimited(
-            response,
-            OLLAMA_EMBED_ERROR_BODY_LIMIT_BYTES,
-          ).catch(() => "unknown error");
-          throw new Error(`Ollama embed HTTP ${response.status}: ${detail}`);
-        }
-        return await readOllamaEmbeddingJsonResponse(response);
-      },
-    });
+    const localServiceLease =
+      client.localServiceTarget && client.acquireLocalService
+        ? await client.acquireLocalService(client.localServiceTarget, signal)
+        : undefined;
+    let json: Awaited<ReturnType<typeof readOllamaEmbeddingJsonResponse>>;
+    try {
+      json = await withRemoteHttpResponse({
+        url: embedUrl,
+        ssrfPolicy: client.ssrfPolicy,
+        configuredLocalOriginBaseUrl: client.baseUrl,
+        signal,
+        init: {
+          method: "POST",
+          headers: client.headers,
+          body: JSON.stringify({ model: client.model, input }),
+        },
+        onResponse: async (response) => {
+          if (!response.ok) {
+            const detail = await readResponseTextLimited(
+              response,
+              OLLAMA_EMBED_ERROR_BODY_LIMIT_BYTES,
+            ).catch(() => "unknown error");
+            throw new Error(`Ollama embed HTTP ${response.status}: ${detail}`);
+          }
+          return await readOllamaEmbeddingJsonResponse(response);
+        },
+      });
+    } finally {
+      localServiceLease?.release();
+    }
     if (!Array.isArray(json.embeddings)) {
       throw new Error("Ollama embed response missing embeddings[]");
     }

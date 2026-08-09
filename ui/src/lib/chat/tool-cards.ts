@@ -1,12 +1,16 @@
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 // Control UI chat domain owns pure tool-card extraction rules.
-import { extractCanvasFromText } from "../../../../src/chat/canvas-render.js";
+import {
+  extractCanvasFromDetails,
+  extractCanvasFromText,
+} from "../../../../src/chat/canvas-render.js";
 import {
   isToolCallContentType,
   isToolResultContentType,
   resolveToolUseId,
 } from "../../../../src/chat/tool-content.js";
-import type { ToolCard } from "./chat-types.ts";
+import { redactToolPayloadText } from "../browser-redact.ts";
+import type { ToolCard, ToolCardOutcome } from "./chat-types.ts";
 import { extractTextCached } from "./message-extract.ts";
 import { isToolResultMessage } from "./message-normalizer.ts";
 
@@ -88,7 +92,7 @@ function hasToolErrorStatus(value: unknown): boolean {
   return typeof value === "string" && TOOL_ERROR_STATUSES.has(value.trim().toLowerCase());
 }
 
-export function isToolErrorOutput(outputText: string | undefined): boolean {
+function isToolErrorOutput(outputText: string | undefined): boolean {
   if (!outputText) {
     return false;
   }
@@ -139,6 +143,22 @@ export function isToolCardError(card: ToolCard): boolean {
     return card.isError;
   }
   return isToolErrorOutput(card.outputText);
+}
+
+export function resolveToolCardOutcome(
+  card: ToolCard,
+  runActive: boolean | undefined,
+): ToolCardOutcome {
+  if (isToolCardError(card)) {
+    return "failed";
+  }
+  if (runActive === true && card.live === true && card.completed !== true) {
+    return "running";
+  }
+  if (card.completed === true || (card.live !== true && card.outputText !== undefined)) {
+    return "succeeded";
+  }
+  return "unknown";
 }
 
 export function extractToolPreview(
@@ -242,33 +262,42 @@ export function formatCollapsedToolPreviewText(value: string | undefined): strin
   return truncateUtf16Safe(normalized, 120);
 }
 
-function findFirstUnmatchedCard(
-  cards: ToolCard[],
-  id: string,
-  name: string,
-  fallbackMatchedCards: WeakSet<ToolCard>,
-): ToolCard | undefined {
-  let nameOnlyCandidate: ToolCard | undefined;
-  for (const card of cards) {
-    if (card.id === id) {
-      return card;
+const TOOL_ARGUMENT_PREVIEW_KEYS = [
+  "message",
+  "prompt",
+  "task",
+  "query",
+  "text",
+  "description",
+] as const;
+
+/** First meaningful user-authored line for compact generic tool rows. */
+export function resolveCollapsedToolArgumentPreview(args: unknown): string | undefined {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return undefined;
+  }
+  const record = args as Record<string, unknown>;
+  for (const key of TOOL_ARGUMENT_PREVIEW_KEYS) {
+    const value = record[key];
+    if (typeof value !== "string") {
+      continue;
     }
-    if (
-      !nameOnlyCandidate &&
-      card.name === name &&
-      card.outputText === undefined &&
-      !fallbackMatchedCards.has(card)
-    ) {
-      nameOnlyCandidate = card;
+    const firstLine = value.split(/\r\n?|\n/).find((line) => line.trim().length > 0);
+    const preview = formatCollapsedToolPreviewText(
+      firstLine ? redactToolPayloadText(firstLine) : undefined,
+    );
+    if (preview) {
+      return preview;
     }
   }
-  return nameOnlyCandidate;
+  return undefined;
 }
 
-export function extractToolCards(message: unknown, prefix = "tool"): ToolCard[] {
+function extractToolCards(message: unknown, prefix = "tool"): ToolCard[] {
   const m = message as Record<string, unknown>;
   const content = normalizeContent(m.content);
   const messageIsError = readToolErrorFlag(m);
+  const isLiveToolStream = m["__openclawToolStreamLive"] === true;
   const cards: ToolCard[] = [];
   const fallbackMatchedCards = new WeakSet<ToolCard>();
   const transcriptMessageId = resolveTranscriptMessageId(m);
@@ -288,6 +317,9 @@ export function extractToolCards(message: unknown, prefix = "tool"): ToolCard[] 
         name: resolveToolName(item, m),
         args,
         inputText: serializeToolInput(args),
+        ...(isLiveToolStream
+          ? { live: true, completed: m["__openclawToolStreamResultReceived"] === true }
+          : {}),
         messageId: transcriptMessageId,
       });
       continue;
@@ -297,15 +329,29 @@ export function extractToolCards(message: unknown, prefix = "tool"): ToolCard[] 
       const name = resolveToolName(item, m);
       const cardId = resolveToolCardId(item, m, index, prefix);
       const callId = resolveToolCallId(item, m);
-      const existing = findFirstUnmatchedCard(cards, cardId, name, fallbackMatchedCards);
+      const existing =
+        cards.find((card) => card.id === cardId) ??
+        cards.find(
+          (card) =>
+            // Same-name fallback belongs to legacy blocks missing an explicit identity.
+            (!callId || !card.callId) &&
+            card.name === name &&
+            card.outputText === undefined &&
+            !fallbackMatchedCards.has(card),
+        );
       const text = extractToolText(item);
-      const preview = extractToolPreview(text, name);
+      const details = item.details ?? m.details;
+      const preview = extractCanvasFromDetails(details) ?? extractToolPreview(text, name);
       const isError = readToolErrorFlag(item) ?? messageIsError;
       if (existing) {
         fallbackMatchedCards.add(existing);
         existing.callId ??= callId;
+        existing.completed = true;
         existing.outputText = text;
         existing.preview = preview;
+        if (details !== undefined) {
+          existing.details = details;
+        }
         if (isError !== undefined) {
           existing.isError = isError;
         }
@@ -315,7 +361,9 @@ export function extractToolCards(message: unknown, prefix = "tool"): ToolCard[] 
         id: cardId,
         ...(callId ? { callId } : {}),
         name,
+        completed: true,
         outputText: text,
+        ...(details !== undefined ? { details } : {}),
         messageId: transcriptMessageId,
         ...(isError !== undefined ? { isError } : {}),
         preview,
@@ -342,10 +390,12 @@ export function extractToolCards(message: unknown, prefix = "tool"): ToolCard[] 
       id: resolveToolCardId({}, m, 0, prefix),
       ...(callId ? { callId } : {}),
       name,
+      completed: isToolResultMessage(message) || role === "tool" || role === "function",
       outputText: text,
+      ...(m.details !== undefined ? { details: m.details } : {}),
       messageId: transcriptMessageId,
       ...(messageIsError !== undefined ? { isError: messageIsError } : {}),
-      preview: extractToolPreview(text, name),
+      preview: extractCanvasFromDetails(m.details) ?? extractToolPreview(text, name),
     });
   }
 

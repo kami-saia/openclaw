@@ -32,6 +32,7 @@ export type {
   ArtifactsGetResult,
   ArtifactsListResult,
   ConnectableOpenClawTransport,
+  EnvironmentCreateParams,
   EnvironmentSelection,
   EnvironmentSummary,
   EnvironmentsListResult,
@@ -60,4 +61,8 @@ export type {
   ToolInvokeParams,
   ToolInvokeResult,
   WorkspaceSelection,
+  WorkerEnvironmentMetadata,
+  WorkerEnvironmentProfileSummary,
+  WorkerEnvironmentState,
+  WorkerTunnelStatus,
 } from "./types.js";

@@ -70,10 +70,11 @@ When an NVIDIA API key is configured, setup and model-selection paths fetch
 NVIDIA's public featured-model catalog from
 `https://assets.ngc.nvidia.com/products/api-catalog/featured-models.json` and
 cache the result for 24 hours (first 32 entries, imported as free text-input
-rows). New featured models from build.nvidia.com therefore appear in setup and
-model-selection surfaces without waiting for an OpenClaw release. When the
-live feed is available, the first returned model is the preselected option
-during NVIDIA setup.
+rows). New or republished featured models from build.nvidia.com therefore appear
+in setup and model-selection surfaces after the cache refreshes, without waiting
+for an OpenClaw release. A fresh NVIDIA catalog overrides bundled retirement
+metadata. When the live feed is available, its first model is preselected during
+NVIDIA setup.
 
 The fetch uses a fixed HTTPS host policy for `assets.ngc.nvidia.com`. If no
 NVIDIA API key is configured, or if the feed is unavailable or malformed,
@@ -84,8 +85,6 @@ OpenClaw falls back to the bundled catalog and bundled default below.
 Nemotron 3 Ultra is the default NVIDIA model in OpenClaw. NVIDIA's build page for
 [`nvidia/nemotron-3-ultra-550b-a55b`](https://build.nvidia.com/nvidia/nemotron-3-ultra-550b-a55b)
 lists it as an available free endpoint with a 1M-token context specification.
-The bundled catalog records a 16,384-token max output to match NVIDIA's current
-OpenAI-compatible sample request for the hosted endpoint.
 
 The bundled Ultra row sends
 `chat_template_kwargs: { enable_thinking: false, force_nonempty_content: true }`
@@ -98,15 +97,26 @@ hosted in NVIDIA's catalog when their context, latency, or behavior fits better.
 
 ## Bundled fallback catalog
 
-| Model ref                                  | Name                         | Context   | Max output | Notes                                    |
-| ------------------------------------------ | ---------------------------- | --------- | ---------- | ---------------------------------------- |
-| `nvidia/nvidia/nemotron-3-ultra-550b-a55b` | NVIDIA Nemotron 3 Ultra 550B | 1,000,000 | 16,384     | Default                                  |
-| `nvidia/nvidia/nemotron-3-super-120b-a12b` | NVIDIA Nemotron 3 Super 120B | 1,048,576 | 8,192      |                                          |
-| `nvidia/moonshotai/kimi-k2.5`              | Kimi K2.5                    | 262,144   | 8,192      |                                          |
-| `nvidia/minimaxai/minimax-m2.7`            | Minimax M2.7                 | 196,608   | 8,192      |                                          |
-| `nvidia/z-ai/glm-5.1`                      | GLM 5.1                      | 202,752   | 8,192      |                                          |
-| `nvidia/minimaxai/minimax-m2.5`            | MiniMax M2.5                 | 196,608   | 8,192      | Deprecated; use `minimaxai/minimax-m2.7` |
-| `nvidia/z-ai/glm5`                         | GLM-5                        | 202,752   | 8,192      | Deprecated; use `z-ai/glm-5.1`           |
+The selectable bundled rows snapshot NVIDIA's featured-model catalog. Deprecated
+compatibility rows keep existing exact model references recognizable but stay
+out of model pickers.
+
+| Model ref                                  | Name                  | Context   | Max output |
+| ------------------------------------------ | --------------------- | --------- | ---------- |
+| `nvidia/nvidia/nemotron-3-ultra-550b-a55b` | Nemotron 3 Ultra 550B | 1,048,576 | 8,192      |
+| `nvidia/nvidia/nemotron-3-super-120b-a12b` | Nemotron 3 Super 120B | 1,000,000 | 8,192      |
+| `nvidia/z-ai/glm-5.2`                      | GLM 5.2               | 202,752   | 8,192      |
+| `nvidia/moonshotai/kimi-k2.6`              | Kimi K2.6             | 262,144   | 65,536     |
+| `nvidia/minimaxai/minimax-m3`              | Minimax M3            | 196,608   | 8,192      |
+| `nvidia/deepseek-ai/deepseek-v4-pro`       | DeepSeek V4 Pro       | 262,144   | 16,384     |
+
+The full compatibility catalog also retains these shipped refs for existing
+configurations and migration: `nvidia/qwen/qwen3.5-397b-a17b`,
+`nvidia/moonshotai/kimi-k2.5`, `nvidia/z-ai/glm-5.1`, `nvidia/z-ai/glm5`, and
+`nvidia/minimaxai/minimax-m2.7`. These references stay hidden from bundled and
+offline model pickers unless NVIDIA republishes them in its featured catalog.
+NVIDIA has retired the Qwen endpoint, so requests using its model reference no
+longer work. Migrate existing Qwen configurations to an active model.
 
 ## Advanced configuration
 
@@ -119,10 +129,11 @@ hosted in NVIDIA's catalog when their context, latency, or behavior fits better.
 
   <Accordion title="Catalog and pricing">
     OpenClaw prefers NVIDIA's public featured-model catalog when NVIDIA auth is
-    configured and caches it for 24 hours. The bundled fallback catalog is static
-    and keeps deprecated shipped refs for upgrade compatibility. Costs default
-    to `0` in source since NVIDIA currently offers free API access for the
-    listed models.
+    configured and caches it for 24 hours. The bundled selectable fallback is a
+    static snapshot of NVIDIA's featured-model catalog; deprecated exact-reference
+    compatibility rows stay hidden from that fallback. Fresh featured rows can
+    restore models that NVIDIA has republished. Costs default to `0` in source
+    since NVIDIA currently offers free API access for the listed models.
   </Accordion>
 
   <Accordion title="OpenAI-compatible endpoint">

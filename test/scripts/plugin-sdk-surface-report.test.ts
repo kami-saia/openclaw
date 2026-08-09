@@ -1,5 +1,6 @@
 // Plugin Sdk Surface Report tests cover plugin sdk surface report script behavior.
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   collectPluginSdkSurfaceReport,
@@ -58,19 +59,21 @@ describe("plugin SDK surface report", () => {
   });
 
   it("rejects unknown CLI options before collecting SDK stats", () => {
-    const result = spawnSync(
-      process.execPath,
-      ["scripts/plugin-sdk-surface-report.mjs", "--chekc"],
-      {
-        cwd: process.cwd(),
-        encoding: "utf8",
-      },
-    );
+    for (const args of [["--chekc"], ["chekc", "--help"]]) {
+      const result = spawnSync(
+        process.execPath,
+        ["scripts/plugin-sdk-surface-report.mjs", ...args],
+        {
+          cwd: process.cwd(),
+          encoding: "utf8",
+        },
+      );
 
-    expect(result.status).toBe(1);
-    expect(result.stdout).toBe("");
-    expect(result.stderr.trim()).toBe("Unknown plugin SDK surface report option: --chekc");
-    expect(result.stderr).not.toContain("at ");
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr.trim()).toBe(`Unknown plugin SDK surface report option: ${args[0]}`);
+      expect(result.stderr).not.toContain("at ");
+    }
   });
 
   it("prints help before collecting SDK stats", () => {
@@ -129,7 +132,23 @@ describe("plugin SDK surface report", () => {
     expect(readDefaultPublicSurfaceBudgets()).toEqual(readCurrentPublicSurfaceCounts());
   });
 
-  it("keeps generated package declarations out of source surface counts", () => {
+  it("keeps approval store internals out of the deprecated infra barrel", () => {
+    const source = fs.readFileSync("src/plugin-sdk/infra-runtime.ts", "utf8");
+    expect(source).not.toMatch(/export\s+(?:type\s+)?\*\s+from\s+["'][^"']*exec-approvals/u);
+
+    for (const internalName of [
+      "ensureExecApprovalsSnapshot",
+      "persistAllowAlwaysDecisionLocked",
+      "recordAllowlistMatchesUseLocked",
+      "resolveExecApprovalsLocked",
+      "restoreExecApprovalsSnapshotLocked",
+      "updateExecApprovals",
+    ]) {
+      expect(source).not.toContain(internalName);
+    }
+  });
+
+  it("rejects callable surface growth from the canonical source graph", () => {
     const budget = readDefaultPublicSurfaceBudgets().callableExports;
     const budgetConfig = readPluginSdkSurfaceBudgets({
       OPENCLAW_PLUGIN_SDK_MAX_PUBLIC_FUNCTION_EXPORTS: String(budget - 1),

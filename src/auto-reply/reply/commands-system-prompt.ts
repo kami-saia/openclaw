@@ -9,7 +9,7 @@ import {
   mapSandboxSkillEntriesForPrompt,
   resolveSandboxSkillRuntimeInputs,
 } from "../../agents/embedded-agent-runner/sandbox-skills.js";
-import { canExecRequestNode } from "../../agents/exec-defaults.js";
+import { resolveNodeExecEligibility } from "../../agents/exec-defaults.js";
 import { resolveDefaultModelForAgent } from "../../agents/model-selection.js";
 import { resolveAgentPromptSurfaceForSessionKey } from "../../agents/prompt-surface.js";
 import type { AgentTool } from "../../agents/runtime/index.js";
@@ -45,25 +45,28 @@ function resolveCommandSkillsEligibility(params: {
   sessionKey: string | undefined;
 }): SkillEligibilityContext {
   try {
+    const nodeSkills = resolveNodeExecEligibility({
+      cfg: params.config,
+      sessionEntry: params.sessionEntry,
+      sessionKey: params.sessionKey,
+      agentId: params.agentId,
+    });
     return {
+      nodeSkills,
       remote: getRemoteSkillEligibility({
-        advertiseExecNode: canExecRequestNode({
-          cfg: params.config,
-          sessionEntry: params.sessionEntry,
-          sessionKey: params.sessionKey,
-          agentId: params.agentId,
-        }),
+        advertiseExecNode: nodeSkills.canExec,
       }),
     };
   } catch {
     try {
       return {
+        nodeSkills: { canExec: false },
         remote: getRemoteSkillEligibility({
           advertiseExecNode: false,
         }),
       };
     } catch {
-      return {};
+      return { nodeSkills: { canExec: false } };
     }
   }
 }
@@ -169,6 +172,7 @@ export async function resolveCommandsSystemPromptBundle(
     config: params.cfg,
     sessionKey: params.sessionKey,
     sessionId: targetSessionEntry?.sessionId,
+    chatType: targetSessionEntry?.chatType,
     agentId: sessionAgentId,
   });
   const toolPolicySessionKey = resolveRuntimePolicySessionKey({
@@ -225,7 +229,7 @@ export async function resolveCommandsSystemPromptBundle(
     agentId: sessionAgentId,
   });
   const defaultModelLabel = `${defaultModelRef.provider}/${defaultModelRef.model}`;
-  const { runtimeInfo, userTimezone, userTime, userTimeFormat } = buildSystemPromptParams({
+  const { runtimeInfo, userTimezone, userDate } = buildSystemPromptParams({
     config: params.cfg,
     agentId: sessionAgentId,
     workspaceDir,
@@ -274,8 +278,7 @@ export async function resolveCommandsSystemPromptBundle(
     reasoningTagHint: false,
     toolNames,
     userTimezone,
-    userTime,
-    userTimeFormat,
+    userDate,
     contextFiles: injectedFiles,
     skillsPrompt,
     heartbeatPrompt: undefined,

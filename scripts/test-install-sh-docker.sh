@@ -11,6 +11,25 @@ source "$HARNESS_ROOT/scripts/lib/docker-e2e-package.sh"
 DOCKER_COMMAND_TIMEOUT="${DOCKER_COMMAND_TIMEOUT:-${OPENCLAW_INSTALL_SMOKE_DOCKER_COMMAND_TIMEOUT:-600s}}"
 INSTALL_SMOKE_DOCKER_RUN_TIMEOUT="${OPENCLAW_INSTALL_SMOKE_DOCKER_RUN_TIMEOUT:-2700s}"
 
+normalize_npm_pack_json_file() {
+  local pack_json_file="$1"
+  (
+    cd "$HARNESS_ROOT"
+    node --input-type=module - "$pack_json_file" <<'NODE'
+import fs from "node:fs";
+import { resolveNpmJsonEntries } from "./scripts/lib/npm-json-output.mjs";
+
+const packJsonFile = process.argv[2];
+const parsed = JSON.parse(fs.readFileSync(packJsonFile, "utf8"));
+const entries = resolveNpmJsonEntries(parsed);
+if (entries.length === 0) {
+  throw new Error("npm pack output did not contain a package result");
+}
+fs.writeFileSync(packJsonFile, `${JSON.stringify(entries, null, 2)}\n`, "utf8");
+NODE
+  )
+}
+
 run_install_smoke_container() {
   DOCKER_COMMAND_TIMEOUT="$INSTALL_SMOKE_DOCKER_RUN_TIMEOUT" docker_e2e_docker_run_cmd run "$@"
 }
@@ -303,7 +322,7 @@ process.stdout.write(packageJson.version);
 prepare_update_tarball() {
   local pack_json_file
   local baseline_pack_json_file
-  local package_args
+  local -a package_args
   local package_tgz
   local packed_update_version
   pack_json_file="${UPDATE_DIR}/pack.json"
@@ -311,6 +330,7 @@ prepare_update_tarball() {
   if [[ -n "$UPDATE_PACKAGE_SPEC" ]]; then
     echo "==> Pack update tgz from spec: $UPDATE_PACKAGE_SPEC"
     quiet_npm pack "$UPDATE_PACKAGE_SPEC" --json --pack-destination "$UPDATE_DIR" >"$pack_json_file"
+    normalize_npm_pack_json_file "$pack_json_file"
   else
     echo "==> Build local release artifacts for update smoke"
     if [[ -n "$UPDATE_DIST_IMAGE" ]]; then
@@ -324,12 +344,14 @@ prepare_update_tarball() {
     fi
     UPDATE_EXPECT_VERSION="$(read_candidate_version)"
     package_args=(
-      --allow-unreleased-changelog
       --source-dir "$ROOT_DIR"
       --output-dir "$UPDATE_DIR"
       --pack-json "$pack_json_file"
       --skip-build
     )
+    if [[ "${OPENCLAW_INSTALL_SMOKE_ALLOW_UNRELEASED_CHANGELOG:-true}" == "true" ]]; then
+      package_args+=(--allow-unreleased-changelog)
+    fi
     package_tgz="$(
       node "$HARNESS_ROOT/scripts/package-openclaw-for-docker.mjs" "${package_args[@]}"
     )"
@@ -364,6 +386,7 @@ process.stdout.write(last.version);
 
   echo "==> Pack baseline tgz: ${PACKAGE_NAME}@${UPDATE_BASELINE_VERSION}"
   quiet_npm pack "${PACKAGE_NAME}@${UPDATE_BASELINE_VERSION}" --json --pack-destination "$UPDATE_DIR" >"$baseline_pack_json_file"
+  normalize_npm_pack_json_file "$baseline_pack_json_file"
   BASELINE_TGZ_FILE="$(read_pack_tarball_filename "$baseline_pack_json_file")"
   UPDATE_BASELINE_VERSION="$(
     node -e '
@@ -587,4 +610,4 @@ run_install_smoke_container --rm -t \
   -e OPENCLAW_NO_ONBOARD=1 \
   -e OPENCLAW_NO_PROMPT=1 \
   -e DEBIAN_FRONTEND=noninteractive \
-  "$NONROOT_IMAGE" -lc "curl -fsSL \"$CLI_INSTALL_URL\" | bash -s -- --set-npm-prefix --no-onboard"
+  "$NONROOT_IMAGE" -lc 'set -o pipefail; curl -fsSL --connect-timeout 30 --max-time 300 -- "$OPENCLAW_INSTALL_CLI_URL" | bash -s -- --set-npm-prefix --no-onboard'

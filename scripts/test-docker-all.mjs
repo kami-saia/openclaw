@@ -9,7 +9,6 @@ import { fileURLToPath } from "node:url";
 import {
   DEFAULT_E2E_BARE_IMAGE,
   DEFAULT_E2E_FUNCTIONAL_IMAGE,
-  DEFAULT_E2E_IMAGE,
   DEFAULT_LIVE_RETRIES,
   DEFAULT_PARALLELISM,
   DEFAULT_PROFILE,
@@ -50,9 +49,17 @@ const SHELL_PROCESS_GROUP_EXIT_POLL_MS = 25;
 const MAX_TIMER_TIMEOUT_MS = 2_147_000_000;
 const DEFAULT_TIMINGS_FILE = path.join(ROOT_DIR, ".artifacts/docker-tests/lane-timings.json");
 const DEFAULT_GITHUB_WORKFLOW = "openclaw-live-and-e2e-checks-reusable.yml";
-const IS_MAIN = process.argv[1]
-  ? path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-  : false;
+const IS_MAIN = (() => {
+  if (!process.argv[1]) {
+    return false;
+  }
+  try {
+    // Node resolves ESM URLs through symlinks, but argv keeps the invoked path.
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+})();
 
 function dockerAllUsage() {
   return [
@@ -266,28 +273,19 @@ function shellQuote(value) {
 }
 
 function githubWorkflowRef(env = process.env) {
-  const explicit = env.OPENCLAW_DOCKER_E2E_WORKFLOW_REF;
-  if (explicit) {
-    return explicit;
-  }
-  const refName = env.GITHUB_REF_NAME;
-  if (refName) {
-    return refName;
-  }
-  const ref = env.GITHUB_REF;
-  if (ref?.startsWith("refs/heads/")) {
-    return ref.slice("refs/heads/".length);
-  }
-  if (ref?.startsWith("refs/tags/")) {
-    return ref.slice("refs/tags/".length);
-  }
-  return undefined;
+  return env.OPENCLAW_DOCKER_E2E_WORKFLOW_REF || undefined;
+}
+
+function maybeGhcrImage(value) {
+  return typeof value === "string" && value.startsWith("ghcr.io/") ? value : "";
 }
 
 export function githubWorkflowRerunCommand(laneNames, ref, env = process.env) {
   const workflowRef = githubWorkflowRef(env);
   const releasePath = env.OPENCLAW_DOCKER_ALL_PROFILE === RELEASE_PATH_PROFILE;
   const allowUnreleasedChangelog = env.OPENCLAW_DOCKER_E2E_ALLOW_UNRELEASED_CHANGELOG === "true";
+  const bareImage = maybeGhcrImage(env.OPENCLAW_DOCKER_E2E_BARE_IMAGE);
+  const functionalImage = maybeGhcrImage(env.OPENCLAW_DOCKER_E2E_FUNCTIONAL_IMAGE);
   const fields = [
     "gh workflow run",
     shellQuote(env.OPENCLAW_DOCKER_E2E_WORKFLOW || DEFAULT_GITHUB_WORKFLOW),
@@ -310,15 +308,6 @@ export function githubWorkflowRerunCommand(laneNames, ref, env = process.env) {
   if (allowUnreleasedChangelog) {
     fields.push("-f", "allow_unreleased_changelog=true");
   }
-  if (env.GITHUB_RUN_ID) {
-    fields.push("-f", `package_artifact_run_id=${shellQuote(env.GITHUB_RUN_ID)}`);
-    fields.push(
-      "-f",
-      `package_artifact_name=${shellQuote(
-        env.OPENCLAW_DOCKER_E2E_PACKAGE_ARTIFACT_NAME || "docker-e2e-package",
-      )}`,
-    );
-  }
   if (env.OPENCLAW_UPGRADE_SURVIVOR_BASELINE_SPEC) {
     fields.push(
       "-f",
@@ -337,17 +326,14 @@ export function githubWorkflowRerunCommand(laneNames, ref, env = process.env) {
       `published_upgrade_survivor_scenarios=${shellQuote(env.OPENCLAW_UPGRADE_SURVIVOR_SCENARIOS)}`,
     );
   }
-  if (env.OPENCLAW_DOCKER_E2E_BARE_IMAGE) {
-    fields.push(
-      "-f",
-      `docker_e2e_bare_image=${shellQuote(env.OPENCLAW_DOCKER_E2E_BARE_IMAGE)}`,
-    );
+  if (bareImage) {
+    fields.push("-f", `docker_e2e_bare_image=${shellQuote(bareImage)}`);
   }
-  if (env.OPENCLAW_DOCKER_E2E_FUNCTIONAL_IMAGE) {
-    fields.push(
-      "-f",
-      `docker_e2e_functional_image=${shellQuote(env.OPENCLAW_DOCKER_E2E_FUNCTIONAL_IMAGE)}`,
-    );
+  if (functionalImage) {
+    fields.push("-f", `docker_e2e_functional_image=${shellQuote(functionalImage)}`);
+  }
+  if (bareImage || functionalImage) {
+    fields.push("-f", "shared_image_policy=existing-only");
   }
   return fields.join(" ");
 }
@@ -361,7 +347,7 @@ function buildLaneRerunCommand(name, baseEnv) {
     ["OPENCLAW_DOCKER_ALL_BUILD", build],
     ["OPENCLAW_DOCKER_ALL_PREFLIGHT", "0"],
     ["OPENCLAW_SKIP_DOCKER_BUILD", "1"],
-    ["OPENCLAW_DOCKER_E2E_IMAGE", image || DEFAULT_E2E_IMAGE],
+    ["OPENCLAW_DOCKER_E2E_IMAGE", image || DEFAULT_E2E_FUNCTIONAL_IMAGE],
     ["OPENCLAW_DOCKER_E2E_BARE_IMAGE", baseEnv.OPENCLAW_DOCKER_E2E_BARE_IMAGE],
     ["OPENCLAW_DOCKER_E2E_FUNCTIONAL_IMAGE", baseEnv.OPENCLAW_DOCKER_E2E_FUNCTIONAL_IMAGE],
     ["OPENCLAW_CURRENT_PACKAGE_TGZ", baseEnv.OPENCLAW_CURRENT_PACKAGE_TGZ],
@@ -446,6 +432,9 @@ export async function writeRunSummary(logDir, summary, env = process.env) {
   const file = path.join(logDir, "summary.json");
   const payload = {
     ...summary,
+    // Summary reruns do not carry failure-index commands, so preserve this exact package intent.
+    allowUnreleasedChangelog:
+      env.OPENCLAW_DOCKER_E2E_ALLOW_UNRELEASED_CHANGELOG === "true" ? true : undefined,
     packageArtifactName: env.OPENCLAW_DOCKER_E2E_PACKAGE_ARTIFACT_NAME || undefined,
     finishedAt: new Date().toISOString(),
     github: {
@@ -506,7 +495,7 @@ async function writeFailureIndex(logDir, summary, env) {
         : undefined,
     generatedAt: new Date().toISOString(),
     lanes,
-    note: "Targeted GitHub reruns reuse this run's package artifact and shared Docker images when the generated command includes package_artifact_run_id and docker_e2e_*_image inputs.",
+    note: "Targeted GitHub reruns repack the exact selected ref and reuse only GHCR-backed shared images when the generated command includes docker_e2e_*_image inputs.",
     images: summary.images,
     packageArtifactName: env.OPENCLAW_DOCKER_E2E_PACKAGE_ARTIFACT_NAME || undefined,
     ref,
@@ -1234,7 +1223,7 @@ async function runLanePool(poolLanes, baseEnv, logDir, parallelism, options) {
     while (pending.length > 0 || running.size > 0) {
       let started = false;
       if (!options.failFast || failures.length === 0) {
-        for (let index = 0; index < pending.length; ) {
+        for (let index = 0; index < pending.length;) {
           const candidate = pending[index];
           if (!canStartLane(candidate)) {
             index += 1;
@@ -1478,6 +1467,10 @@ async function main() {
   const preflightCleanup = parseBool(process.env.OPENCLAW_DOCKER_ALL_PREFLIGHT_CLEANUP, true);
   const timingsEnabled = parseBool(process.env.OPENCLAW_DOCKER_ALL_TIMINGS, true);
   const buildEnabled = parseBool(process.env.OPENCLAW_DOCKER_ALL_BUILD, true);
+  const allowFrozenTargetScenarioOmissions = parseBool(
+    process.env.OPENCLAW_ALLOW_FROZEN_TARGET_SCENARIO_OMISSIONS,
+    false,
+  );
   const planJson =
     cliOptions.planJson || parseBool(process.env.OPENCLAW_DOCKER_ALL_PLAN_JSON, false);
   const planReleaseAll = parseBool(process.env.OPENCLAW_DOCKER_ALL_PLAN_RELEASE_ALL, false);
@@ -1529,21 +1522,30 @@ async function main() {
   appendExtension(baseEnv, "codex");
 
   const timingStore = await loadTimingStore(timingsFile, timingsEnabled);
-  const { orderedLanes, orderedTailLanes, plan, scheduledLanes } = resolveDockerE2ePlan({
-    includeOpenWebUI,
-    liveMode,
-    liveRetries,
-    orderLanes,
-    planReleaseAll: planJson && planReleaseAll,
-    profile,
-    releaseChunk,
-    releaseProfile,
-    selectedLaneNames,
-    timingStore,
-    upgradeSurvivorBaselines: process.env.OPENCLAW_UPGRADE_SURVIVOR_BASELINE_SPECS,
-    upgradeSurvivorScenarios: process.env.OPENCLAW_UPGRADE_SURVIVOR_SCENARIOS,
-  });
-  if (scheduledLanes.length === 0) {
+  const { omittedUnsupportedLaneNames, orderedLanes, orderedTailLanes, plan, scheduledLanes } =
+    resolveDockerE2ePlan({
+      includeOpenWebUI,
+      liveMode,
+      liveRetries,
+      orderLanes,
+      planReleaseAll: planJson && planReleaseAll,
+      profile,
+      releaseChunk,
+      releaseProfile,
+      selectedLaneNames,
+      timingStore,
+      upgradeSurvivorBaselines: process.env.OPENCLAW_UPGRADE_SURVIVOR_BASELINE_SPECS,
+      upgradeSurvivorScenarios: process.env.OPENCLAW_UPGRADE_SURVIVOR_SCENARIOS,
+      upgradeSurvivorTargetRoot: process.env.OPENCLAW_UPGRADE_SURVIVOR_TARGET_ROOT,
+      allowFrozenTargetScenarioOmissions,
+      candidatePackageRoot: ROOT_DIR,
+    });
+  if (omittedUnsupportedLaneNames.length > 0 && !allowFrozenTargetScenarioOmissions) {
+    throw new Error(
+      `frozen target scenario omissions require trusted workflow opt-in: ${omittedUnsupportedLaneNames.join(", ")}`,
+    );
+  }
+  if (scheduledLanes.length === 0 && omittedUnsupportedLaneNames.length === 0) {
     throw new Error(
       [
         "resolved zero Docker lanes",
@@ -1556,6 +1558,8 @@ async function main() {
       ].join("; "),
     );
   }
+  const omittedUnsupportedLanes =
+    omittedUnsupportedLaneNames.length > 0 ? omittedUnsupportedLaneNames : undefined;
 
   if (planJson) {
     process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`);
@@ -1603,9 +1607,33 @@ async function main() {
   );
   printLaneManifest("Main", orderedLanes, timingStore);
   printLaneManifest("Tail", orderedTailLanes, timingStore);
+  if (omittedUnsupportedLanes) {
+    console.log(
+      `==> Docker lanes omitted: target lacks ${omittedUnsupportedLanes.join(", ")} scenario support`,
+    );
+  }
   if (dryRun) {
     console.log("==> Dry run complete");
     return;
+  }
+
+  // Planning can report unsupported scenarios, but execution cannot pass when
+  // frozen-target omissions leave no selected lane to run.
+  if (scheduledLanes.length === 0) {
+    await writeSummary({
+      chunk: releaseChunk || undefined,
+      failures: [],
+      lanes: [],
+      omittedUnsupportedLanes,
+      phases,
+      profile,
+      selectedLanes: selectedLaneNames.length > 0 ? selectedLaneNames : undefined,
+      startedAt: runStartedAt,
+      status: "failed",
+    });
+    throw new Error(
+      `resolved zero runnable Docker lanes; frozen target does not support: ${omittedUnsupportedLanes.join(", ")}`,
+    );
   }
 
   await runPhase(
@@ -1694,6 +1722,7 @@ async function main() {
         functional: baseEnv.OPENCLAW_DOCKER_E2E_FUNCTIONAL_IMAGE,
       },
       lanes: allResults,
+      omittedUnsupportedLanes,
       phases,
       profile,
       selectedLanes: selectedLaneNames.length > 0 ? selectedLaneNames : undefined,
@@ -1733,6 +1762,7 @@ async function main() {
         functional: baseEnv.OPENCLAW_DOCKER_E2E_FUNCTIONAL_IMAGE,
       },
       lanes: allResults,
+      omittedUnsupportedLanes,
       phases,
       profile,
       selectedLanes: selectedLaneNames.length > 0 ? selectedLaneNames : undefined,
@@ -1762,6 +1792,7 @@ async function main() {
         functional: baseEnv.OPENCLAW_DOCKER_E2E_FUNCTIONAL_IMAGE,
       },
       lanes: allResults,
+      omittedUnsupportedLanes,
       phases,
       profile,
       selectedLanes: selectedLaneNames.length > 0 ? selectedLaneNames : undefined,
@@ -1780,6 +1811,7 @@ async function main() {
       functional: baseEnv.OPENCLAW_DOCKER_E2E_FUNCTIONAL_IMAGE,
     },
     lanes: allResults,
+    omittedUnsupportedLanes,
     phases,
     profile,
     selectedLanes: selectedLaneNames.length > 0 ? selectedLaneNames : undefined,

@@ -1,7 +1,10 @@
 // Workshop policy helpers validate generated skill drafts against workspace policy.
 import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
+import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
+import { getRuntimeConfig } from "../../config/config.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { PLUGIN_APPROVAL_DESCRIPTION_MAX_LENGTH } from "../../infra/plugin-approvals.js";
+import { logDebug } from "../../logger.js";
 import type { PluginHookBeforeToolCallResult } from "../../plugins/hook-before-tool-call-result.js";
 import { resolveSkillWorkshopConfig } from "./config.js";
 import { resolvePendingSkillProposal } from "./service.js";
@@ -92,7 +95,7 @@ function buildLifecycleApprovalDescription(params: {
   const skillName =
     requestedSkillName.length <= availableSkillNameLength
       ? requestedSkillName
-      : `${requestedSkillName.slice(0, Math.max(0, availableSkillNameLength - 1))}…`;
+      : `${truncateUtf16Safe(requestedSkillName, Math.max(0, availableSkillNameLength - 1))}…`;
   return [fixedLines[0], `${skillPrefix}${skillName}`, ...fixedLines.slice(1)].join("\n");
 }
 
@@ -125,7 +128,12 @@ async function resolveLifecycleApprovalDescription(params: {
       }),
       proposalId: record.id,
     };
-  } catch {
+  } catch (error) {
+    // Approving blind is the failure this record exists to make diagnosable:
+    // the card otherwise looks identical to "there is no more detail".
+    logDebug(
+      `skill-workshop: approval detail unavailable, using generic text: ${error instanceof Error ? error.message : String(error)}`,
+    );
     return { description: params.fallback };
   }
 }
@@ -138,6 +146,19 @@ function lifecycleApprovalTimeoutReason(proposalId?: string): string {
     "Decide in the Skill Workshop UI or run `openclaw skills workshop apply|reject|quarantine <id>`.",
     "Do not retry this tool call in a loop.",
   ].join(" ");
+}
+
+function resolveApprovalConfig(config?: OpenClawConfig): OpenClawConfig | undefined {
+  if (config) {
+    return config;
+  }
+  // Explicit hook config wins. Missing hook config may happen on agent paths;
+  // unreadable runtime config cannot supply an explicit pending override.
+  try {
+    return getRuntimeConfig();
+  } catch {
+    return undefined;
+  }
 }
 
 /** Returns approval policy for skill workshop lifecycle tool calls. */
@@ -154,7 +175,7 @@ export async function resolveSkillWorkshopToolApproval(params: {
   if (!action) {
     return undefined;
   }
-  const config = resolveSkillWorkshopConfig(params.config);
+  const config = resolveSkillWorkshopConfig(resolveApprovalConfig(params.config));
   if (config.approvalPolicy === "auto") {
     return undefined;
   }

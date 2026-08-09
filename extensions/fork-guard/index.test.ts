@@ -21,7 +21,7 @@ describe("fork-guard plugin registration", () => {
     expect(on).toHaveBeenCalledWith(
       "before_tool_call",
       expect.any(Function),
-      expect.objectContaining({ toolNames: ["exec"] }),
+      expect.objectContaining({ matcher: ["exec"] }),
     );
   });
 

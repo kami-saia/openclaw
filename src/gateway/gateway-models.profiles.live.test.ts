@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { expectDefined } from "@openclaw/normalization-core";
 import {
   clampThinkingLevel,
   type Api,
@@ -27,16 +28,16 @@ import {
   saveAuthProfileStore,
 } from "../agents/auth-profiles/store.js";
 import type { AuthProfileStore } from "../agents/auth-profiles/types.js";
-import { collectAnthropicApiKeys } from "../agents/live-auth-keys.js";
+import { collectProviderApiKeys } from "../agents/live-auth-keys.js";
 import { appendPrioritizedDynamicLiveModels } from "../agents/live-model-dynamic-candidates.js";
 import { isModelNotFoundErrorMessage } from "../agents/live-model-errors.js";
 import {
   DEFAULT_HIGH_SIGNAL_LIVE_MODEL_LIMIT,
   DEFAULT_SMALL_LIVE_MODEL_LIMIT,
   getHighSignalLiveModelPriorityIndex,
-  getHighSignalLiveModelProviders,
   isHighSignalLiveModelRef,
   isSmallLiveModelRef,
+  listPrioritizedHighSignalLiveModelRefs,
   listPrioritizedSmallLiveModelRefs,
   resolveHighSignalLiveModelLimit,
   selectHighSignalLiveItems,
@@ -44,31 +45,46 @@ import {
   shouldExcludeProviderFromDefaultHighSignalLiveSweep,
 } from "../agents/live-model-filter.js";
 import { createLiveTargetMatcher } from "../agents/live-target-matcher.js";
-import { isLiveProfileKeyModeEnabled, isLiveTestEnabled } from "../agents/live-test-helpers.js";
+import {
+  isLiveProfileKeyModeEnabled,
+  isLiveTestEnabled,
+  readLiveTestConfig,
+} from "../agents/live-test-helpers.js";
+import { shouldSkipLiveProviderDrift } from "../agents/live-test-provider-drift.js";
 import {
   isLiveBillingDrift,
   isLiveRateLimitDrift,
-  shouldSkipLiveProviderDrift,
-} from "../agents/live-test-provider-drift.js";
+} from "../agents/live-test-provider-drift.test-support.js";
 import { getApiKeyForModel, resolveEnvApiKey } from "../agents/model-auth.js";
 import { normalizeProviderId } from "../agents/model-selection.js";
 import { shouldSuppressBuiltInModel } from "../agents/model-suppression.js";
 import { ensureOpenClawModelsJson } from "../agents/models-config.js";
 import { STREAM_ERROR_FALLBACK_TEXT } from "../agents/stream-message-shared.js";
-import { clearRuntimeConfigSnapshot, getRuntimeConfig } from "../config/io.js";
+import { mergeWorkspaceSetupState } from "../agents/workspace-state-store.js";
+import { ensureAgentWorkspace } from "../agents/workspace.js";
+import { clearRuntimeConfigSnapshot } from "../config/io.js";
+import {
+  isSessionTranscriptProjectionUnavailableError,
+  SessionTranscriptProjectionUnavailableError,
+} from "../config/sessions/session-accessor.js";
 import type { ModelsConfig, ModelProviderConfig, OpenClawConfig } from "../config/types.js";
 import { isTruthyEnvValue } from "../infra/env.js";
 import type { ModelRegistry } from "../llm/model-registry.js";
+import { redactSecrets } from "../logging/redact.js";
 import { normalizeGoogleModelId } from "../plugin-sdk/google-model-id.js";
 import { resolveProviderThinkingProfile } from "../plugins/provider-runtime.js";
-import type { ProviderThinkingModelCompat } from "../plugins/provider-thinking.types.js";
-import { DEFAULT_AGENT_ID } from "../routing/session-key.js";
+import { LEGACY_IMPLICIT_AGENT_ID as DEFAULT_AGENT_ID } from "../routing/session-key.js";
 import { stripAssistantInternalScaffolding } from "../shared/text/assistant-visible-text.js";
 import { findFinalTagMatches, stripFinalTags } from "../shared/text/final-tags.js";
 import { deleteTestEnvValue, setTestEnvValue } from "../test-utils/env.js";
 import { getFreePort, isPortFree } from "../test-utils/ports.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../utils/message-channel.js";
 import { GatewayClient } from "./client.js";
+
+type ProviderThinkingModelCompat = {
+  thinkingFormat?: string;
+  supportedReasoningEfforts?: readonly string[] | null;
+};
 import {
   hasExpectedSingleNonce,
   hasExpectedToolNonce,
@@ -142,7 +158,7 @@ const GATEWAY_LIVE_EXEC_READ_NONCE_MISS_SKIP_MODEL_KEYS = new Set([
   "fireworks/accounts/fireworks/models/glm-5",
   "fireworks/accounts/fireworks/models/kimi-k2p5",
   "fireworks/accounts/fireworks/models/kimi-k2p6",
-  "fireworks/accounts/fireworks/routers/kimi-k2p5-turbo",
+  "fireworks/accounts/fireworks/routers/kimi-k2p6-turbo",
   "google/gemini-3.1-flash-lite",
 ]);
 const GATEWAY_LIVE_TOOL_NONCE_MISS_SKIP_MODEL_KEYS = new Set([
@@ -177,6 +193,12 @@ function providerFilterList(): string[] | undefined {
   return PROVIDERS
     ? [...PROVIDERS].toSorted((left, right) => left.localeCompare(right))
     : undefined;
+}
+
+function listHighSignalLiveModelProviders(): string[] {
+  return [...new Set(listPrioritizedHighSignalLiveModelRefs().map((ref) => ref.provider))].toSorted(
+    (left, right) => left.localeCompare(right),
+  );
 }
 
 function providerListFromExplicitModelFilter(params: {
@@ -216,7 +238,7 @@ function providerScopedModelRegistryProviders(params: {
             listPrioritizedSmallLiveModelRefs().map((ref) => normalizeProviderId(ref.provider)),
           ),
         ].toSorted((left, right) => left.localeCompare(right))
-      : getHighSignalLiveModelProviders();
+      : listHighSignalLiveModelProviders();
     return providers.filter((provider) =>
       params.providerFilter ? params.providerFilter.has(provider) : true,
     );
@@ -238,6 +260,24 @@ function filterGatewayLiveModelRefsByProvider(
     [...providerFilter].map((provider) => normalizeProviderId(provider)).filter(Boolean),
   );
   return refs.filter((ref) => providers.has(normalizeProviderId(ref.provider)));
+}
+
+function resolvePrioritizedGatewayLiveModelRefs(params: {
+  providerFilter: ReadonlySet<string> | null;
+  useExplicit: boolean;
+  useSmall: boolean;
+}): Array<{ provider: string; id: string }> {
+  if (params.useExplicit) {
+    return [];
+  }
+  // High-signal refs can be plugin-resolved models absent from the static
+  // catalog; omitting them leaves provider-scoped live lanes with zero coverage.
+  return filterGatewayLiveModelRefsByProvider(
+    params.useSmall
+      ? listPrioritizedSmallLiveModelRefs()
+      : listPrioritizedHighSignalLiveModelRefs(),
+    params.providerFilter,
+  );
 }
 
 function isWantedSmallGatewayLiveModel(params: {
@@ -851,7 +891,7 @@ describe("shouldSkipExecReadNonceMissForLiveModel", () => {
     ).toBe(true);
     expect(
       shouldSkipExecReadNonceMissForLiveModel(
-        "fireworks/accounts/fireworks/routers/kimi-k2p5-turbo",
+        "fireworks/accounts/fireworks/routers/kimi-k2p6-turbo",
       ),
     ).toBe(true);
   });
@@ -1521,7 +1561,7 @@ describe("providerScopedModelRegistryProviders", () => {
         modelFilter: null,
         providerFilter: null,
       }),
-    ).toEqual(getHighSignalLiveModelProviders());
+    ).toEqual(listHighSignalLiveModelProviders());
   });
 
   it("intersects default modern sweeps with provider filters", () => {
@@ -1567,6 +1607,37 @@ describe("providerScopedModelRegistryProviders", () => {
         new Set(["ollama"]),
       ),
     ).toEqual([{ provider: "ollama", id: "gemma3:4b" }]);
+  });
+
+  it("loads provider-scoped dynamic refs for default high-signal sweeps", () => {
+    expect(
+      resolvePrioritizedGatewayLiveModelRefs({
+        providerFilter: new Set(["openrouter"]),
+        useExplicit: false,
+        useSmall: false,
+      }),
+    ).toEqual([
+      { provider: "openrouter", id: "openai/gpt-5.2-chat" },
+      { provider: "openrouter", id: "minimax/minimax-m2.7" },
+      { provider: "openrouter", id: "ai21/jamba-large-1.7" },
+    ]);
+    expect(
+      resolvePrioritizedGatewayLiveModelRefs({
+        providerFilter: new Set(["fireworks"]),
+        useExplicit: false,
+        useSmall: false,
+      }),
+    ).toEqual([{ provider: "fireworks", id: "accounts/fireworks/models/glm-5p1" }]);
+  });
+
+  it("leaves explicit gateway model refs to targeted registry lookup", () => {
+    expect(
+      resolvePrioritizedGatewayLiveModelRefs({
+        providerFilter: new Set(["openrouter"]),
+        useExplicit: true,
+        useSmall: false,
+      }),
+    ).toEqual([]);
   });
 
   it("does not count small models outside a provider-scoped gateway sweep", () => {
@@ -1715,6 +1786,54 @@ describe("resolveGatewayLiveModelThinkingLevel", () => {
       }),
     ).toBe("off");
   });
+
+  it.each(["xai", "x-ai"])(
+    "preserves Grok 4.5 thinking support for the %s provider id",
+    (provider) => {
+      expect(
+        resolveGatewayLiveModelThinkingLevel({
+          cfg: {},
+          model: {
+            ...createGatewayLiveTestModel(provider, "grok-4.5"),
+            reasoning: true,
+            thinkingLevelMap: {
+              off: null,
+              minimal: "low",
+              low: "low",
+              medium: "medium",
+              high: "high",
+              xhigh: "high",
+            },
+          },
+          requestedLevel: "high",
+        }),
+      ).toBe("high");
+    },
+  );
+
+  it.each(["xai", "x-ai"])(
+    "keeps off-only xAI models disabled for the %s provider id",
+    (provider) => {
+      expect(
+        resolveGatewayLiveModelThinkingLevel({
+          cfg: {},
+          model: {
+            ...createGatewayLiveTestModel(provider, "grok-build-0.1"),
+            reasoning: true,
+            thinkingLevelMap: {
+              off: null,
+              minimal: null,
+              low: null,
+              medium: null,
+              high: null,
+              xhigh: null,
+            },
+          },
+          requestedLevel: "high",
+        }),
+      ).toBe("off");
+    },
+  );
 });
 
 describe("buildLiveGatewayConfig", () => {
@@ -1735,7 +1854,7 @@ describe("buildLiveGatewayConfig", () => {
     const cfg = buildLiveGatewayConfig({
       cfg: {
         agents: {
-          list: [{ id: "ops", default: true }],
+          entries: { ops: { default: true } },
         },
         bindings: [{ agentId: "ops", match: { channel: "telegram" } }],
         broadcast: {
@@ -1748,15 +1867,14 @@ describe("buildLiveGatewayConfig", () => {
       liveAgentWorkspaceDir: GATEWAY_LIVE_CONFIG_TEST_WORKSPACE,
     });
 
-    expect(cfg.agents?.list).toEqual([
-      {
-        id: GATEWAY_LIVE_AGENT_ID,
+    expect(cfg.agents?.entries).toEqual({
+      [GATEWAY_LIVE_AGENT_ID]: {
         default: true,
         agentDir: GATEWAY_LIVE_CONFIG_TEST_AGENT_DIR,
         workspace: GATEWAY_LIVE_CONFIG_TEST_WORKSPACE,
         sandbox: { mode: "off" },
       },
-    ]);
+    });
     expect(cfg.bindings).toBeUndefined();
     expect(cfg.broadcast).toBeUndefined();
   });
@@ -1765,14 +1883,13 @@ describe("buildLiveGatewayConfig", () => {
     const cfg = buildLiveGatewayConfig({
       cfg: {
         agents: {
-          list: [
-            {
-              id: "Dev",
+          entries: {
+            dev: {
               default: true,
               agentDir: "/operator/agent",
               workspace: "/operator/workspace",
             },
-          ],
+          },
         },
       },
       candidates: [createGatewayLiveTestModel("openai", "gpt-5.5")],
@@ -1780,15 +1897,14 @@ describe("buildLiveGatewayConfig", () => {
       liveAgentWorkspaceDir: GATEWAY_LIVE_CONFIG_TEST_WORKSPACE,
     });
 
-    expect(cfg.agents?.list).toEqual([
-      {
-        id: GATEWAY_LIVE_AGENT_ID,
+    expect(cfg.agents?.entries).toEqual({
+      [GATEWAY_LIVE_AGENT_ID]: {
         default: true,
         agentDir: GATEWAY_LIVE_CONFIG_TEST_AGENT_DIR,
         workspace: GATEWAY_LIVE_CONFIG_TEST_WORKSPACE,
         sandbox: { mode: "off" },
       },
-    ]);
+    });
   });
 
   it("keeps discovered live model metadata ahead of stale configured model rows", () => {
@@ -2296,14 +2412,17 @@ function isToolNonceProbeMiss(error: string): boolean {
 
 function isTransientToolReadProbeErrorForLiveModel(error: string): boolean {
   const msg = error.toLowerCase();
+  // Some tool-capable providers complete a tool turn without appending reply text.
+  // Retry here; the existing model policy decides whether exhausted misses may skip.
+  const isCompletedWithoutReply =
+    msg.includes("agent.wait error") && msg.includes("(error=completed)");
   const isTransientProviderFailure =
     msg.includes("unknown error occurred") ||
     (msg.includes("ai service returned an internal error") &&
       msg.includes("try again in a moment"));
   return (
     msg.includes("tool-read: agent-wait") &&
-    msg.includes("failovererror") &&
-    isTransientProviderFailure
+    (isCompletedWithoutReply || (msg.includes("failovererror") && isTransientProviderFailure))
   );
 }
 
@@ -2410,16 +2529,32 @@ describe("isTransientToolReadProbeErrorForLiveModel", () => {
       ),
     ).toBe(false);
   });
+
+  it("matches terminal tool-read runs that completed without a reply", () => {
+    expect(
+      isTransientToolReadProbeErrorForLiveModel(
+        "[all-models] 1/1 openrouter/ai21/jamba-large-1.7: tool-read: agent-wait: agent.wait error for runId=run-1 (error=completed)",
+      ),
+    ).toBe(true);
+    expect(
+      isTransientToolReadProbeErrorForLiveModel(
+        "[all-models] 1/1 openrouter/ai21/jamba-large-1.7: prompt: agent-wait: agent.wait error for runId=run-1 (error=completed)",
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("getHighSignalLiveModelPriorityIndex", () => {
   it("prefers curated Google replacements over big-pickle", () => {
-    expect(
+    const proPriority = expectDefined(
       getHighSignalLiveModelPriorityIndex({ provider: "google", id: "gemini-3.1-pro-preview" }),
-    ).toBe(4);
-    expect(
-      getHighSignalLiveModelPriorityIndex({ provider: "google", id: "gemini-3-flash-preview" }),
-    ).toBe(5);
+      "curated Gemini Pro live priority",
+    );
+    const flashPriority = expectDefined(
+      getHighSignalLiveModelPriorityIndex({ provider: "google", id: "gemini-3.5-flash" }),
+      "curated Gemini Flash live priority",
+    );
+    expect(proPriority).toBeLessThan(flashPriority);
     expect(getHighSignalLiveModelPriorityIndex({ provider: "opencode", id: "big-pickle" })).toBe(
       null,
     );
@@ -2519,7 +2654,9 @@ async function runAnthropicRefusalProbe(params: {
     client: params.client,
     sessionKey: params.sessionKey,
     idempotencyKey: `idem-${randomUUID()}-refusal`,
-    message: `Reply with the single word ok. Test token: ${magic}`,
+    // Credential redaction masks values after "token:", including the
+    // nonce needed to correlate this probe with its persisted user turn.
+    message: `Reply with the single word ok. Test trigger: ${magic}`,
     thinkingLevel: params.thinkingLevel,
     context: `${params.label}: refusal-probe`,
     modelKey: params.modelKey,
@@ -2562,7 +2699,7 @@ function randomImageProbeCode(len = 6): string {
   const bytes = randomBytes(len);
   let out = "";
   for (let i = 0; i < len; i += 1) {
-    out += alphabet[bytes[i] % alphabet.length];
+    out += alphabet[expectDefined(bytes[i], "bytes[i] test invariant") % alphabet.length];
   }
   return out;
 }
@@ -2589,9 +2726,9 @@ function editDistance(a: string, b: string): number {
     for (let j = 1; j <= bLen; j += 1) {
       const cost = aCh === b.charCodeAt(j - 1) ? 0 : 1;
       curr[j] = Math.min(
-        prev[j] + 1, // delete
-        curr[j - 1] + 1, // insert
-        prev[j - 1] + cost, // substitute
+        expectDefined(prev[j], "prev[j] test invariant") + 1, // delete
+        expectDefined(curr[j - 1], "curr[j - 1] test invariant") + 1, // insert
+        expectDefined(prev[j - 1], "prev[j - 1] test invariant") + cost, // substitute
       );
     }
     [prev, curr] = [curr, prev];
@@ -2648,7 +2785,7 @@ function sanitizeAuthProfileStoreForLiveGateway(store: AuthProfileStore): AuthPr
         Object.entries(store.order)
           .filter(([provider]) => !envBackedProviders.has(normalizeProviderId(provider)))
           .map(([provider, ids]) => [provider, ids.filter((id) => keepProfileIds.has(id))])
-          .filter(([, ids]) => ids.length > 0),
+          .filter(([, ids]) => expectDefined(ids, "ids test invariant").length > 0),
       )
     : undefined;
 
@@ -2835,45 +2972,108 @@ type SessionAssistantEntry = {
   text: string;
 };
 
+async function retryLiveTranscriptProjectionRead<T>(read: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + GATEWAY_LIVE_PROBE_TIMEOUT_MS;
+  let delayMs = 50;
+  while (true) {
+    try {
+      return await read();
+    } catch (error) {
+      if (!isSessionTranscriptProjectionUnavailableError(error) || Date.now() >= deadline) {
+        throw error;
+      }
+      // SQLite transcript projections rebuild asynchronously; fail only after
+      // the live probe budget, not while a successful model turn is indexing.
+      await new Promise((resolve) => {
+        setTimeout(resolve, Math.min(delayMs, Math.max(0, deadline - Date.now())));
+      });
+      delayMs = Math.min(delayMs * 2, 250);
+    }
+  }
+}
+
+describe("retryLiveTranscriptProjectionRead", () => {
+  it("waits for an in-flight SQLite transcript projection", async () => {
+    let attempts = 0;
+    await expect(
+      retryLiveTranscriptProjectionRead(async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new SessionTranscriptProjectionUnavailableError("live-session");
+        }
+        return ["projected assistant reply"];
+      }),
+    ).resolves.toEqual(["projected assistant reply"]);
+    expect(attempts).toBe(2);
+  });
+
+  it("does not hide unrelated transcript failures", async () => {
+    const failure = new Error("transcript database unavailable");
+    await expect(
+      retryLiveTranscriptProjectionRead(async () => {
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+  });
+});
+
 async function readSessionMessagesForLiveProbe(sessionKey: string): Promise<unknown[]> {
   const { storePath, entry } = loadSessionEntry(sessionKey);
   if (!entry?.sessionId) {
     return [];
   }
-  return await readSessionMessagesAsync(
-    {
-      sessionEntry: entry,
-      sessionId: entry.sessionId,
-      sessionKey,
-      storePath,
-    },
-    {
-      mode: "full",
-      reason: "live model assistant text verification",
-    },
+  return await retryLiveTranscriptProjectionRead(async () =>
+    readSessionMessagesAsync(
+      {
+        sessionEntry: entry,
+        sessionId: entry.sessionId,
+        sessionKey,
+        storePath,
+      },
+      {
+        mode: "full",
+        reason: "live model assistant text verification",
+      },
+    ),
   );
 }
 
-async function readSessionAssistantEntries(
-  sessionKey: string,
-  modelKey?: string,
-): Promise<SessionAssistantEntry[]> {
-  const { storePath, entry } = loadSessionEntry(sessionKey);
-  if (!entry?.sessionId) {
+function sessionMessagesAfterNextUserTurn(
+  messages: readonly unknown[],
+  baselineMessageCount: number,
+  expectedUserText?: string,
+): unknown[] {
+  const nextUserOffset = messages.slice(baselineMessageCount).findIndex((message) => {
+    const actualUserText = extractTranscriptMessageText(message);
+    return (
+      (message as { role?: unknown } | null | undefined)?.role === "user" &&
+      (expectedUserText === undefined || matchesLiveProbeUserText(actualUserText, expectedUserText))
+    );
+  });
+  if (nextUserOffset < 0) {
     return [];
   }
-  const messages = await readSessionMessagesAsync(
-    {
-      sessionEntry: entry,
-      sessionId: entry.sessionId,
-      sessionKey,
-      storePath,
-    },
-    {
-      mode: "full",
-      reason: "live model assistant text verification",
-    },
-  );
+  return messages.slice(baselineMessageCount + nextUserOffset + 1);
+}
+
+function matchesLiveProbeUserText(actual: string, expected: string): boolean {
+  if (actual === expected) {
+    return true;
+  }
+  const markerIndex = expected.indexOf(`${ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL}_`);
+  if (markerIndex < 0) {
+    return false;
+  }
+  const nonceSuffix = expected.slice(markerIndex + ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL.length);
+  // The embedded Anthropic runtime scrubs the refusal trigger before persisting it.
+  // Its random suffix survives and still uniquely owns this live probe turn.
+  return /^_[a-f0-9]{32}$/.test(nonceSuffix) && actual.endsWith(nonceSuffix);
+}
+
+function sessionAssistantEntriesForLiveProbe(
+  messages: readonly unknown[],
+  modelKey?: string,
+): SessionAssistantEntry[] {
   const assistantEntries: SessionAssistantEntry[] = [];
   for (const message of messages) {
     if (!message || typeof message !== "object") {
@@ -2895,8 +3095,31 @@ async function readSessionAssistantEntries(
   return assistantEntries;
 }
 
-async function readSessionAssistantTexts(sessionKey: string, modelKey?: string): Promise<string[]> {
-  return (await readSessionAssistantEntries(sessionKey, modelKey)).map((entry) => entry.text);
+async function readSessionAssistantEntries(
+  sessionKey: string,
+  modelKey?: string,
+  baselineMessageCount?: number,
+  expectedUserText?: string,
+): Promise<SessionAssistantEntry[]> {
+  const messages = await readSessionMessagesForLiveProbe(sessionKey);
+  // Assistant-count cursors can admit a late write from the previous run.
+  // The next matching user entry is the durable boundary that owns this attempt's replies.
+  const scopedMessages =
+    baselineMessageCount === undefined
+      ? messages
+      : sessionMessagesAfterNextUserTurn(messages, baselineMessageCount, expectedUserText);
+  return sessionAssistantEntriesForLiveProbe(scopedMessages, modelKey);
+}
+
+async function readSessionAssistantTexts(
+  sessionKey: string,
+  modelKey?: string,
+  baselineMessageCount?: number,
+  expectedUserText?: string,
+): Promise<string[]> {
+  return (
+    await readSessionAssistantEntries(sessionKey, modelKey, baselineMessageCount, expectedUserText)
+  ).map((entry) => entry.text);
 }
 
 async function assertGatewayLiveSessionSelection(params: {
@@ -2951,7 +3174,8 @@ async function verifyGatewayUltraSubagentHandoff(params: {
   sessionKey: string;
   thinkingLevel: string;
 }): Promise<void> {
-  const { listSubagentRunsForRequester } = await import("../agents/subagent-registry.js");
+  const { listSubagentRunsForRequester } =
+    await import("../agents/subagent-registry.test-helpers.js");
   const existingRunIds = new Set(
     listSubagentRunsForRequester(params.sessionKey).map((entry) => entry.runId),
   );
@@ -2969,6 +3193,7 @@ async function verifyGatewayUltraSubagentHandoff(params: {
       model: params.modelKey,
       thinking: params.thinkingLevel,
     }),
+    "Pass only those six arguments. Omit visible, worktree, worktreeName, worktreeBaseRef, cwd, context, taskName, label, streamTo, lightContext, attachments, attachAs, and resumeSessionId.",
     "Wait for the child completion to return before answering.",
     `Then reply exactly ${parentToken} ${childToken} and nothing else.`,
   ].join("\n");
@@ -2988,7 +3213,10 @@ async function verifyGatewayUltraSubagentHandoff(params: {
   let run = listSubagentRunsForRequester(params.sessionKey).find(
     (entry) => !existingRunIds.has(entry.runId) && entry.task.includes(childToken),
   );
-  while ((!run?.endedAt || run.delivery?.status !== "delivered") && Date.now() < deadline) {
+  while (
+    (!run?.execution.endedAt || run.delivery?.status !== "delivered") &&
+    Date.now() < deadline
+  ) {
     await new Promise((resolve) => {
       setTimeout(resolve, 250);
     });
@@ -3005,7 +3233,7 @@ async function verifyGatewayUltraSubagentHandoff(params: {
   ).toHaveLength(1);
   run = matchingRuns[0];
   expect(run, `expected sessions_spawn child for ${params.modelKey}`).toBeDefined();
-  expect(run?.outcome?.status).toBe("ok");
+  expect(run?.execution.outcome?.status).toBe("ok");
   expect(run?.completion?.resultText).toContain(childToken);
   expect(run?.delivery?.status).toBe("delivered");
   expect(run?.childSessionKey).toContain(":subagent:");
@@ -3090,11 +3318,100 @@ describe("latestAssistantTextAfterBaseline", () => {
       ),
     ).toBeUndefined();
   });
+
+  it("correlates retry replies after late prior transcript writes", () => {
+    const firstBaselineMessageCount = 1;
+    const firstAttemptMessages: unknown[] = [
+      { role: "user", content: "prior attempt" },
+      { role: "toolResult", content: "stale-a stale-b" },
+      { role: "assistant", stopReason: "stop", content: "stale-a stale-b" },
+      { role: "user", content: "stale retry" },
+      { role: "assistant", stopReason: "stop", content: "stale-a stale-b" },
+      { role: "user", content: "read first-a first-b" },
+      { role: "assistant", stopReason: "toolUse", content: "reading first probe" },
+      { role: "toolResult", content: "first-a first-b" },
+      { role: "assistant", stopReason: "stop", content: "first-a first-b" },
+    ];
+    expect(
+      sessionMessagesAfterNextUserTurn(
+        firstAttemptMessages.slice(0, 5),
+        firstBaselineMessageCount,
+        "read first-a first-b",
+      ),
+    ).toEqual([]);
+    const firstToolUseOnly = sessionAssistantEntriesForLiveProbe(
+      sessionMessagesAfterNextUserTurn(
+        firstAttemptMessages.slice(0, 8),
+        firstBaselineMessageCount,
+        "read first-a first-b",
+      ),
+    );
+    expect(latestTerminalAssistantTextAfterBaseline(firstToolUseOnly, 0)).toBeUndefined();
+    const firstEntries = sessionAssistantEntriesForLiveProbe(
+      sessionMessagesAfterNextUserTurn(
+        firstAttemptMessages,
+        firstBaselineMessageCount,
+        "read first-a first-b",
+      ),
+    );
+    expect(latestTerminalAssistantTextAfterBaseline(firstEntries, 0)).toBe("first-a first-b");
+
+    const secondBaselineMessageCount = firstAttemptMessages.length;
+    const secondAttemptMessages = [
+      ...firstAttemptMessages,
+      { role: "toolResult", content: "first-a first-b" },
+      { role: "assistant", stopReason: "stop", content: "first-a first-b" },
+      { role: "user", content: "stale first retry" },
+      { role: "assistant", stopReason: "stop", content: "first-a first-b" },
+      { role: "user", content: "read second-a second-b" },
+      { role: "assistant", stopReason: "toolUse", content: "reading second probe" },
+      { role: "toolResult", content: "second-a second-b" },
+      { role: "assistant", stopReason: "stop", content: "second-a second-b" },
+    ];
+    const secondEntries = sessionAssistantEntriesForLiveProbe(
+      sessionMessagesAfterNextUserTurn(
+        secondAttemptMessages,
+        secondBaselineMessageCount,
+        "read second-a second-b",
+      ),
+    );
+    expect(latestTerminalAssistantTextAfterBaseline(secondEntries, 0)).toBe("second-a second-b");
+  });
+
+  it("correlates Anthropic refusal probes after the runtime scrubs their trigger", () => {
+    const nonce = "0123456789abcdef0123456789abcdef";
+    const expected = `Reply with the single word ok. Test trigger: ${ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL}_${nonce}`;
+    const scrubbed = `Reply with the single word ok. Test trigger: ANTHROPIC MAGIC STRING TRIGGER REFUSAL (redacted)_${nonce}`;
+    const redacted = redactSecrets(expected);
+
+    expect(matchesLiveProbeUserText(scrubbed, expected)).toBe(true);
+    expect(redacted).toContain(nonce);
+    expect(matchesLiveProbeUserText(redacted, expected)).toBe(true);
+    expect(
+      sessionMessagesAfterNextUserTurn(
+        [
+          { role: "user", content: "previous turn" },
+          { role: "assistant", content: "previous reply", stopReason: "stop" },
+          { role: "user", content: redacted },
+          { role: "assistant", content: "ok", stopReason: "stop" },
+        ],
+        2,
+        expected,
+      ),
+    ).toEqual([{ role: "assistant", content: "ok", stopReason: "stop" }]);
+    expect(
+      matchesLiveProbeUserText(
+        "Reply with the single word ok. Test trigger: ANTHROPIC MAGIC STRING TRIGGER REFUSAL (redacted)_ffffffffffffffffffffffffffffffff",
+        expected,
+      ),
+    ).toBe(false);
+  });
 });
 
 async function waitForSessionAssistantText(params: {
   sessionKey: string;
-  baselineAssistantCount: number;
+  baselineMessageCount: number;
+  expectedUserText: string;
   context: string;
   modelKey?: string;
   terminalOnly?: boolean;
@@ -3107,12 +3424,17 @@ async function waitForSessionAssistantText(params: {
   const timeoutMs = params.timeoutMs ?? GATEWAY_LIVE_TRANSCRIPT_TIMEOUT_MS;
   const timeoutLabel = params.timeoutLabel ?? "model";
   while (Date.now() - startedAt < timeoutMs) {
-    const assistantEntries = await readSessionAssistantEntries(params.sessionKey, params.modelKey);
+    const assistantEntries = await readSessionAssistantEntries(
+      params.sessionKey,
+      params.modelKey,
+      params.baselineMessageCount,
+      params.expectedUserText,
+    );
     const freshText = params.terminalOnly
-      ? latestTerminalAssistantTextAfterBaseline(assistantEntries, params.baselineAssistantCount)
+      ? latestTerminalAssistantTextAfterBaseline(assistantEntries, 0)
       : latestAssistantTextAfterBaseline(
           assistantEntries.map((entry) => entry.text),
-          params.baselineAssistantCount,
+          0,
         );
     if (freshText) {
       return freshText;
@@ -3217,9 +3539,7 @@ async function requestGatewayAgentText(params: {
     content: string;
   }>;
 }) {
-  const baselineAssistantCount = (
-    await readSessionAssistantTexts(params.sessionKey, params.modelKey)
-  ).length;
+  const baselineMessageCount = (await readSessionMessagesForLiveProbe(params.sessionKey)).length;
   const runId = params.idempotencyKey;
   const accepted = await withGatewayLiveProbeTimeout(
     params.client.request("agent", {
@@ -3246,12 +3566,18 @@ async function requestGatewayAgentText(params: {
       timeoutMs: GATEWAY_LIVE_AGENT_WAIT_TIMEOUT_MS,
       allowCompletedWithoutReply: true,
     });
-    const assistantTexts = await readSessionAssistantTexts(params.sessionKey, params.modelKey);
-    return assistantTexts.length > baselineAssistantCount ? (assistantTexts.at(-1) ?? "") : "";
+    const assistantTexts = await readSessionAssistantTexts(
+      params.sessionKey,
+      params.modelKey,
+      baselineMessageCount,
+      params.message,
+    );
+    return assistantTexts.at(-1) ?? "";
   }
   const transcriptPromise = waitForSessionAssistantText({
     sessionKey: params.sessionKey,
-    baselineAssistantCount,
+    baselineMessageCount,
+    expectedUserText: params.message,
     context: `${params.context}: transcript-final`,
     modelKey: params.modelKey,
     timeoutLabel: "model",
@@ -3280,7 +3606,8 @@ async function requestGatewayAgentText(params: {
     }
     return await waitForSessionAssistantText({
       sessionKey: params.sessionKey,
-      baselineAssistantCount,
+      baselineMessageCount,
+      expectedUserText: params.message,
       context: `${params.context}: transcript-terminal`,
       modelKey: params.modelKey,
       terminalOnly: true,
@@ -3294,7 +3621,8 @@ async function requestGatewayAgentText(params: {
   }
   return await waitForSessionAssistantText({
     sessionKey: params.sessionKey,
-    baselineAssistantCount,
+    baselineMessageCount,
+    expectedUserText: params.message,
     context: `${params.context}: transcript-after-agent-wait`,
     modelKey: params.modelKey,
     terminalOnly: true,
@@ -4108,15 +4436,14 @@ function buildLiveGatewayConfig(params: {
     ...providerOverrides,
   };
   const providers = Object.keys(nextProviders).length > 0 ? nextProviders : baseProviders;
-  const configuredAgents = [
-    {
-      id: GATEWAY_LIVE_AGENT_ID,
+  const configuredAgents = {
+    [GATEWAY_LIVE_AGENT_ID]: {
       default: true,
       agentDir: params.liveAgentDir,
       workspace: params.liveAgentWorkspaceDir,
       sandbox: { mode: "off" },
     },
-  ] satisfies NonNullable<OpenClawConfig["agents"]>["list"];
+  } satisfies NonNullable<OpenClawConfig["agents"]>["entries"];
   const baseModels = params.cfg.models;
   return {
     ...params.cfg,
@@ -4124,7 +4451,7 @@ function buildLiveGatewayConfig(params: {
     broadcast: undefined,
     agents: {
       ...params.cfg.agents,
-      list: configuredAgents,
+      entries: configuredAgents,
       defaults: {
         ...params.cfg.agents?.defaults,
         // Live tests should avoid Docker sandboxing so tool probes can
@@ -4189,7 +4516,7 @@ async function sanitizeAuthConfig(params: {
     }
   }
 
-  if (!profiles && !order && !auth.cooldowns) {
+  if (!profiles && !order) {
     return undefined;
   }
   return {
@@ -4213,6 +4540,14 @@ function buildMinimaxProviderOverride(params: {
     api: params.api,
     baseUrl: params.baseUrl,
   };
+}
+
+async function prepareLiveGatewayWorkspace(workspaceDir: string): Promise<void> {
+  // Real workspace setup supplies both the SQLite state and survival evidence;
+  // retired JSON markers or empty initialized workspaces block the first turn.
+  await ensureAgentWorkspace({ dir: workspaceDir, ensureBootstrapFiles: true });
+  await fs.rm(path.join(workspaceDir, "BOOTSTRAP.md"), { force: true });
+  mergeWorkspaceSetupState(workspaceDir, { setupCompletedAt: new Date().toISOString() });
 }
 
 async function runGatewayModelSuite(params: GatewayModelSuiteParams) {
@@ -4273,7 +4608,7 @@ async function runGatewayModelSuite(params: GatewayModelSuiteParams) {
     process.env.OPENCLAW_GATEWAY_TOKEN = token;
     const agentId = GATEWAY_LIVE_AGENT_ID;
 
-    const hostAgentDir = resolveDefaultAgentDir(getRuntimeConfig());
+    const hostAgentDir = resolveDefaultAgentDir(await readLiveTestConfig());
     const hostStore = ensureAuthProfileStore(hostAgentDir, {
       allowKeychainPrompt: false,
     });
@@ -4304,20 +4639,7 @@ async function runGatewayModelSuite(params: GatewayModelSuiteParams) {
     setTestEnvValue("OPENCLAW_AGENT_DIR", tempAgentDir);
 
     const workspaceDir = path.join(tempStateDir, "workspace-dev");
-    await fs.mkdir(workspaceDir, { recursive: true });
-    await fs.mkdir(path.join(workspaceDir, ".openclaw"), { recursive: true });
-    await fs.writeFile(
-      path.join(workspaceDir, ".openclaw", "workspace-state.json"),
-      `${JSON.stringify(
-        {
-          version: 1,
-          setupCompletedAt: new Date().toISOString(),
-        },
-        null,
-        2,
-      )}\n`,
-    );
-    await fs.rm(path.join(workspaceDir, "BOOTSTRAP.md"), { force: true });
+    await prepareLiveGatewayWorkspace(workspaceDir);
     const nonceA = randomUUID();
     const nonceB = randomUUID();
     // Keep probe values out of the path: weak tool callers may echo the filename
@@ -4410,7 +4732,9 @@ async function runGatewayModelSuite(params: GatewayModelSuiteParams) {
     logProgress(
       `[${params.label}] heartbeat=${Math.max(1, Math.round(GATEWAY_LIVE_HEARTBEAT_MS / 1_000))}s probe-timeout=${Math.max(1, Math.round(GATEWAY_LIVE_PROBE_TIMEOUT_MS / 1_000))}s agent-timeout=${Math.max(1, Math.round(GATEWAY_LIVE_AGENT_RUN_TIMEOUT_MS / 1_000))}s agent-wait=${Math.max(1, Math.round(GATEWAY_LIVE_AGENT_WAIT_TIMEOUT_MS / 1_000))}s model-timeout=${Math.max(1, Math.round(GATEWAY_LIVE_MODEL_TIMEOUT_MS / 1_000))}s transcript-timeout=${Math.max(1, Math.round(GATEWAY_LIVE_TRANSCRIPT_TIMEOUT_MS / 1_000))}s`,
     );
-    const anthropicKeys = collectAnthropicApiKeys();
+    const anthropicKeys = process.env.ANTHROPIC_OAUTH_TOKEN?.trim()
+      ? []
+      : collectProviderApiKeys("anthropic");
     if (anthropicKeys.length > 0) {
       process.env.ANTHROPIC_API_KEY = anthropicKeys[0];
       logProgress(`[${params.label}] anthropic keys loaded: ${anthropicKeys.length}`);
@@ -4631,7 +4955,7 @@ async function runGatewayModelSuite(params: GatewayModelSuiteParams) {
                     toolReadAttempt + 1 < maxToolReadAttempts
                   ) {
                     logProgress(
-                      `${progressLabel}: tool-read retry (${toolReadAttempt + 2}/${maxToolReadAttempts}) transient provider failover`,
+                      `${progressLabel}: tool-read retry (${toolReadAttempt + 2}/${maxToolReadAttempts}) transient provider result`,
                     );
                     continue;
                   }
@@ -4639,7 +4963,7 @@ async function runGatewayModelSuite(params: GatewayModelSuiteParams) {
                     isTransientToolReadProbeErrorForLiveModel(message) &&
                     shouldSkipToolNonceProbeMissForLiveModel(modelKey)
                   ) {
-                    logProgress(`${progressLabel}: skip (${modelKey} tool-read provider failover)`);
+                    logProgress(`${progressLabel}: skip (${modelKey} transient tool-read result)`);
                     return "skip";
                   }
                   throw error;
@@ -5183,7 +5507,7 @@ describeLive("gateway live (dev agent, profile keys)", () => {
         logProgress("[all-models] loading config");
         clearRuntimeConfigSnapshot();
         const cfg = await withGatewayLiveSetupTimeout(
-          Promise.resolve().then(() => getRuntimeConfig()),
+          readLiveTestConfig(),
           "[all-models] load config",
         );
         const workspaceDir = resolveAgentWorkspaceDir(cfg, DEFAULT_AGENT_ID);
@@ -5238,7 +5562,12 @@ describeLive("gateway live (dev agent, profile keys)", () => {
           modelRegistry = authBacked.modelRegistry;
           all = authBacked.all;
         }
-        if (useSmall) {
+        const prioritizedRefs = resolvePrioritizedGatewayLiveModelRefs({
+          providerFilter: PROVIDERS,
+          useExplicit,
+          useSmall,
+        });
+        if (prioritizedRefs.length > 0) {
           const augmented = await withGatewayLiveSetupTimeout(
             appendPrioritizedDynamicLiveModels({
               models: all,
@@ -5247,16 +5576,13 @@ describeLive("gateway live (dev agent, profile keys)", () => {
               workspaceDir,
               env: process.env,
               modelRegistry,
-              refs: filterGatewayLiveModelRefsByProvider(
-                listPrioritizedSmallLiveModelRefs(),
-                PROVIDERS,
-              ),
+              refs: prioritizedRefs,
             }),
-            "[all-models] load dynamic small model refs",
+            `[all-models] load dynamic ${useSmall ? "small" : "high-signal"} model refs`,
           );
           if (augmented.added.length > 0) {
             logProgress(
-              `[all-models] loaded ${augmented.added.length} prioritized dynamic small model refs`,
+              `[all-models] loaded ${augmented.added.length} prioritized dynamic ${useSmall ? "small" : "high-signal"} model refs`,
             );
             all = augmented.models;
             modelRegistry = createStaticLiveModelRegistry(all);
@@ -5446,7 +5772,7 @@ describeLive("gateway live (dev agent, profile keys)", () => {
     let tempDir: string | undefined;
     let tempStateDir: string | undefined;
     try {
-      const cfg = getRuntimeConfig();
+      const cfg = await readLiveTestConfig();
       await ensureOpenClawModelsJson(cfg);
 
       const agentDir = resolveDefaultAgentDir(cfg);
@@ -5480,22 +5806,11 @@ describeLive("gateway live (dev agent, profile keys)", () => {
       tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-live-zai-state-"));
       setTestEnvValue("OPENCLAW_STATE_DIR", tempStateDir);
       const workspaceDir = path.join(tempStateDir, "workspace-dev");
-      await fs.mkdir(workspaceDir, { recursive: true });
-      await fs.mkdir(path.join(workspaceDir, ".openclaw"), { recursive: true });
-      await fs.writeFile(
-        path.join(workspaceDir, ".openclaw", "workspace-state.json"),
-        `${JSON.stringify(
-          {
-            version: 1,
-            setupCompletedAt: new Date().toISOString(),
-          },
-          null,
-          2,
-        )}\n`,
-      );
+      await prepareLiveGatewayWorkspace(workspaceDir);
       const nonceA = randomUUID();
       const nonceB = randomUUID();
-      toolProbePath = path.join(workspaceDir, `.openclaw-live-zai-fallback.${nonceA}.txt`);
+      // Match the broad probe: the filename must not reveal either expected value.
+      toolProbePath = path.join(workspaceDir, ".openclaw-live-zai-fallback.txt");
       await fs.writeFile(toolProbePath, `nonceA=${nonceA}\nnonceB=${nonceB}\n`);
 
       const sanitizedStore = sanitizeAuthProfileStoreForLiveGateway({
@@ -5668,3 +5983,4 @@ describeLive("gateway live (dev agent, profile keys)", () => {
     }
   }, 180_000);
 });
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

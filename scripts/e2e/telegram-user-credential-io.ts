@@ -1,9 +1,15 @@
 // Telegram User Credential Io script supports OpenClaw repository automation.
 import { spawn, spawnSync } from "node:child_process";
-import { readBoundedResponseText } from "../lib/bounded-response.ts";
+import { readBoundedResponseText } from "../lib/bounded-response.mjs";
 import { resolveWindowsTaskkillPath } from "../lib/windows-taskkill.mjs";
 
 export type JsonObject = Record<string, unknown>;
+
+type RunTaskkill = (
+  command: string,
+  args: string[],
+  options: { stdio: "ignore" },
+) => { error?: Error; status: number | null };
 
 type FetchJsonParams = {
   fetchImpl?: (url: string, init: RequestInit) => Promise<Response>;
@@ -256,7 +262,7 @@ export function signalChildProcessTree(
     useProcessGroup = platform !== "win32",
   }: {
     platform?: NodeJS.Platform;
-    runTaskkill?: typeof spawnSync;
+    runTaskkill?: RunTaskkill;
     useProcessGroup?: boolean;
   } = {},
 ) {

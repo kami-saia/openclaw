@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { expectDefined } from "@openclaw/normalization-core";
 import { describe, expect, it } from "vitest";
 import {
   DEPENDENCY_EVIDENCE_REPORTS,
@@ -144,20 +145,50 @@ describe("generate-dependency-release-evidence", () => {
     const artifactArgs = ["--output-dir", "evidence", ...requiredArgs];
     const duplicateCases = [
       ["--root", ["--root", "repo-a", "--root", "repo-b", ...artifactArgs]],
-      ["--output-dir", ["--output-dir", "evidence-a", "--output-dir", "evidence-b", ...requiredArgs]],
+      [
+        "--output-dir",
+        ["--output-dir", "evidence-a", "--output-dir", "evidence-b", ...requiredArgs],
+      ],
       [
         "--release-ref",
-        ["--output-dir", "evidence", "--release-ref", "v2026.5.13", "--release-ref", "v2026.5.14", "--npm-dist-tag", "latest"],
+        [
+          "--output-dir",
+          "evidence",
+          "--release-ref",
+          "v2026.5.13",
+          "--release-ref",
+          "v2026.5.14",
+          "--npm-dist-tag",
+          "latest",
+        ],
       ],
       [
         "--npm-dist-tag",
-        ["--output-dir", "evidence", "--release-ref", "v2026.5.13", "--npm-dist-tag", "latest", "--npm-dist-tag", "beta"],
+        [
+          "--output-dir",
+          "evidence",
+          "--release-ref",
+          "v2026.5.13",
+          "--npm-dist-tag",
+          "latest",
+          "--npm-dist-tag",
+          "beta",
+        ],
       ],
       ["--base-ref", [...artifactArgs, "--base-ref", "origin/main", "--base-ref", "HEAD~1"]],
-      ["--github-output", [...artifactArgs, "--github-output", "first.out", "--github-output", "second.out"]],
+      [
+        "--github-output",
+        [...artifactArgs, "--github-output", "first.out", "--github-output", "second.out"],
+      ],
       [
         "--github-step-summary",
-        [...artifactArgs, "--github-step-summary", "first.md", "--github-step-summary", "second.md"],
+        [
+          ...artifactArgs,
+          "--github-step-summary",
+          "first.md",
+          "--github-step-summary",
+          "second.md",
+        ],
       ],
     ] satisfies Array<[string, string[]]>;
 
@@ -175,12 +206,14 @@ describe("generate-dependency-release-evidence", () => {
   });
 
   it("reports CLI argument errors without a Node stack trace", () => {
-    const result = runCli("--wat");
+    for (const args of [["--wat"], ["wat", "--help"]]) {
+      const result = runCli(...args);
 
-    expect(result.status).toBe(1);
-    expect(result.stdout).toBe("");
-    expect(result.stderr.trim()).toBe("Unsupported argument: --wat");
-    expectNoNodeStack(result.stderr);
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr.trim()).toBe(`Unsupported argument: ${args[0]}`);
+      expectNoNodeStack(result.stderr);
+    }
   });
 
   it("falls back to fetching tags when local previous-release resolution misses", () => {
@@ -211,7 +244,12 @@ describe("generate-dependency-release-evidence", () => {
       }),
     ).toBe("v2026.5.1");
     expect(calls.map(({ args }) => args[0])).toEqual(["describe", "fetch", "describe"]);
-    expect(calls[1].args).toEqual(["fetch", "--tags", "--force", "origin"]);
+    expect(expectDefined(calls[1], "release tag fetch call").args).toEqual([
+      "fetch",
+      "--tags",
+      "--force",
+      "origin",
+    ]);
   });
 
   it("collects report counts and renders human summaries", async () => {

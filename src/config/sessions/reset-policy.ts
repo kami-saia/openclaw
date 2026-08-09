@@ -1,8 +1,11 @@
-// Session reset policy resolves daily/idle freshness for direct, group, and thread sessions.
-import type { SessionConfig, SessionResetConfig } from "../types.base.js";
+// Session reset policy resolves automatic freshness for direct, group, and thread sessions.
+import type { SessionConfig, SessionResetConfig, SessionResetMode } from "../types.base.js";
 import { DEFAULT_IDLE_MINUTES } from "./types.js";
 
-export type SessionResetMode = "daily" | "idle" | "never";
+// FORK: "never" is our alias for upstream's disabled "none" mode (live configs persist it).
+// The union itself lives in ../types.base.ts so config and policy agree on one source of truth.
+export type { SessionResetMode };
+type SessionStaleReason = Exclude<SessionResetMode, "none" | "never">;
 export type SessionResetType = "direct" | "group" | "thread";
 
 export type SessionResetPolicy = {
@@ -16,14 +19,23 @@ export type SessionFreshness = {
   fresh: boolean;
   dailyResetAt?: number;
   idleExpiresAt?: number;
-  staleReason?: SessionResetMode;
+  staleReason?: SessionStaleReason;
 };
 
-export const DEFAULT_RESET_MODE: SessionResetMode = "never";
+// FORK: upstream's default is now "none" = no automatic reset, which is exactly what our
+// "never" meant, so the fork divergence is retired. "never" survives ONLY as a config-compat
+// alias (live configs persist `session.reset.mode: "never"`) and is normalized to "none" at
+// resolve time. Do not reintroduce a "never" default.
+const DEFAULT_RESET_MODE: SessionResetMode = "none";
 export const DEFAULT_RESET_AT_HOUR = 4;
 
+/** Normalizes the legacy fork alias "never" onto upstream's disabled mode. */
+function normalizeResetMode(mode: SessionResetMode | undefined): SessionResetMode | undefined {
+  return mode === "never" ? "none" : mode;
+}
+
 /** Returns the most recent daily reset boundary for the supplied wall-clock time. */
-export function resolveDailyResetAtMs(now: number, atHour: number): number {
+function resolveDailyResetAtMs(now: number, atHour: number): number {
   const normalizedAtHour = normalizeResetAtHour(atHour);
   const resetAt = new Date(now);
   resetAt.setHours(normalizedAtHour, 0, 0, 0);
@@ -42,25 +54,21 @@ export function resolveSessionResetPolicy(params: {
 }): SessionResetPolicy {
   const sessionCfg = params.sessionCfg;
   const baseReset = params.resetOverride ?? sessionCfg?.reset;
-  // Backward compat: accept legacy "dm" key as alias for "direct".
-  const typeReset = params.resetOverride
-    ? undefined
-    : (sessionCfg?.resetByType?.[params.resetType] ??
-      (params.resetType === "direct"
-        ? (sessionCfg?.resetByType as { dm?: SessionResetConfig } | undefined)?.dm
-        : undefined));
-  const hasExplicitReset = Boolean(baseReset || sessionCfg?.resetByType);
-  const legacyIdleMinutes = params.resetOverride ? undefined : sessionCfg?.idleMinutes;
-  const configured = Boolean(baseReset || typeReset || legacyIdleMinutes != null);
-  // Legacy `idleMinutes` implied idle reset only when no modern reset block was configured.
+  const typeReset = params.resetOverride ? undefined : sessionCfg?.resetByType?.[params.resetType];
+  const configured = Boolean(baseReset || typeReset);
+  const baseMode = normalizeResetMode(baseReset?.mode);
+  const typeMode = normalizeResetMode(typeReset?.mode);
+  const inheritedTypeMode = typeReset && baseMode !== "none" ? baseMode : undefined;
   const mode =
-    typeReset?.mode ??
-    baseReset?.mode ??
-    (!hasExplicitReset && legacyIdleMinutes != null ? "idle" : DEFAULT_RESET_MODE);
+    typeMode ??
+    inheritedTypeMode ??
+    (typeReset ? "daily" : undefined) ??
+    baseMode ??
+    (baseReset ? "daily" : DEFAULT_RESET_MODE);
   const atHour = normalizeResetAtHour(
     typeReset?.atHour ?? baseReset?.atHour ?? DEFAULT_RESET_AT_HOUR,
   );
-  const idleMinutesRaw = typeReset?.idleMinutes ?? baseReset?.idleMinutes ?? legacyIdleMinutes;
+  const idleMinutesRaw = typeReset?.idleMinutes ?? baseReset?.idleMinutes;
 
   let idleMinutes: number | undefined;
   if (idleMinutesRaw != null) {
@@ -83,7 +91,12 @@ export function evaluateSessionFreshness(params: {
   now: number;
   policy: SessionResetPolicy;
 }): SessionFreshness {
-  if (params.policy.mode === "never") {
+  // Older releases persisted updatedAt=0 as an explicit pending reset marker.
+  // Honor that one-time tombstone even when automatic resets are disabled.
+  if (params.updatedAt === 0) {
+    return { fresh: false };
+  }
+  if (params.policy.mode === "none") {
     return { fresh: true };
   }
   const updatedAt = resolveTimestamp(params.updatedAt, params.now) ?? 0;

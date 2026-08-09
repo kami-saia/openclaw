@@ -1,6 +1,22 @@
 // Validates the current runtime against OpenClaw's Node engine floor.
 import process from "node:process";
-import { defaultRuntime, type RuntimeEnv } from "../runtime.js";
+import { format } from "node:util";
+import { expectDefined } from "@openclaw/normalization-core";
+import { formatConsoleDiagnosticBlock } from "../logging/json-console-line.js";
+import type { RuntimeEnv } from "../runtime.js";
+
+// Runtime validation precedes console capture. Keep this direct sink aligned
+// with configured JSONL output without pulling in the full logger.
+const defaultRuntime: RuntimeEnv = {
+  log: (...args) => console.log(...args),
+  error: (...args) => {
+    const message = format(...args);
+    process.stderr.write(formatConsoleDiagnosticBlock({ level: "error", message: `${message}\n` }));
+  },
+  exit: (code) => {
+    process.exit(code);
+  },
+};
 
 type RuntimeKind = "bun" | "node" | "unknown";
 
@@ -17,11 +33,12 @@ const MINIMUM_ENGINE_RE = /^\s*>=\s*v?(\d+\.\d+\.\d+)\s*$/i;
 const ENGINE_CLAUSE_RE = /^\s*>=\s*v?(\d+\.\d+\.\d+)(?:\s+<\s*v?(\d+(?:\.\d+\.\d+)?))?\s*$/i;
 
 /** Runtime facts included in startup/runtime-version diagnostics. */
-export type RuntimeDetails = {
+type RuntimeDetails = {
   kind: RuntimeKind;
   version: string | null;
   execPath: string | null;
   pathEnv: string;
+  hasNodeSqlite: boolean;
 };
 
 const SEMVER_RE = /(\d+)\.(\d+)\.(\d+)/;
@@ -37,9 +54,9 @@ export function parseSemver(version: string | null): Semver | null {
   }
   const [, major, minor, patch] = match;
   return {
-    major: Number.parseInt(major, 10),
-    minor: Number.parseInt(minor, 10),
-    patch: Number.parseInt(patch, 10),
+    major: Number.parseInt(expectDefined(major, "runtime guard major"), 10),
+    minor: Number.parseInt(expectDefined(minor, "runtime guard minor"), 10),
+    patch: Number.parseInt(expectDefined(patch, "runtime guard patch"), 10),
   };
 }
 
@@ -58,7 +75,7 @@ export function isAtLeast(version: Semver | null, minimum: Semver): boolean {
 }
 
 /** Reads current process runtime metadata for startup support checks. */
-export function detectRuntime(): RuntimeDetails {
+function detectRuntime(): RuntimeDetails {
   const bunVersion = process.versions?.bun;
   const kind: RuntimeKind = bunVersion ? "bun" : process.versions?.node ? "node" : "unknown";
   const version = bunVersion ?? process.versions?.node ?? null;
@@ -68,15 +85,34 @@ export function detectRuntime(): RuntimeDetails {
     version,
     execPath: process.execPath ?? null,
     pathEnv: process.env.PATH ?? "(not set)",
+    hasNodeSqlite: currentRuntimeProvidesNodeSqlite(),
   };
 }
 
+// Bun >=1.4 (Rust rewrite) ships node:sqlite; older Buns do not. Feature-probe
+// instead of version-gating so the guard tracks the actual runtime capability.
+function currentRuntimeProvidesNodeSqlite(): boolean {
+  try {
+    return Boolean(process.getBuiltinModule?.("node:sqlite"));
+  } catch {
+    return false;
+  }
+}
+
 /** Returns whether a detected runtime meets OpenClaw's minimum runtime contract. */
-export function runtimeSatisfies(details: RuntimeDetails): boolean {
+function runtimeSatisfies(details: RuntimeDetails): boolean {
   if (details.kind === "node") {
     return isSupportedNodeVersion(details.version);
   }
+  if (details.kind === "bun") {
+    return details.hasNodeSqlite;
+  }
   return false;
+}
+
+/** Returns whether the current process runtime satisfies OpenClaw's engine contract. */
+export function isCurrentRuntimeSupported(): boolean {
+  return runtimeSatisfies(detectRuntime());
 }
 
 /** Checks a Node version label against OpenClaw's supported Node version range. */
@@ -98,7 +134,7 @@ export function isSupportedNodeVersion(version: string | null): boolean {
 }
 
 /** Parses simple package `engines.node` ranges of the form `>=x.y.z`. */
-export function parseMinimumNodeEngine(engine: string | null): Semver | null {
+function parseMinimumNodeEngine(engine: string | null): Semver | null {
   if (!engine) {
     return null;
   }

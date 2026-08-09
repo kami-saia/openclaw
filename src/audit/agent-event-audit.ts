@@ -4,20 +4,21 @@ import { asDateTimestampMs } from "@openclaw/normalization-core/number-coercion"
 import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import {
   AGENT_RUN_TERMINAL_RETRY_GRACE_MS,
-  buildAgentRunTerminalOutcome,
+  buildAgentRunTerminalOutcomeFromLifecycleEvent,
+  classifyAgentRunTerminalOutcome,
   mergeAgentRunTerminalOutcome,
   type AgentRunTerminalOutcome,
 } from "../agents/agent-run-terminal-outcome.js";
-import { normalizeAgentRunTimeoutPhase } from "../agents/run-timeout-attribution.js";
 import { isAllowedToolCallName } from "../agents/tool-call-shared.js";
 import type { AgentEventPayload } from "../infra/agent-events.js";
 import type { TrustedToolExecutionEvent } from "../infra/diagnostic-events.js";
+import { pruneMapToMaxSize } from "../infra/map-size.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
 import type {
-  AuditEventErrorCode,
   AuditEventInput,
-  AuditEventStatus,
+  AgentRunFinishedAuditTerminal,
+  ToolActionAuditEventInput,
 } from "./audit-event-types.js";
 import { createAuditEventWriter, type AuditEventWriter } from "./audit-event-writer.js";
 
@@ -28,6 +29,12 @@ const runProvenance = new Map<
 const MAX_TRACKED_RUN_PROVENANCE = 1_024;
 const log = createSubsystemLogger("audit/events");
 let persistenceFailureWarned = false;
+
+export type AgentEventAuditRecorder = {
+  record: (event: AgentEventPayload) => void;
+  recordTool: (event: TrustedToolExecutionEvent) => void;
+  stop: () => Promise<void>;
+};
 
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
@@ -53,6 +60,17 @@ function auditToolCallId(value: unknown): string | undefined {
   return `sha256:${createHash("sha256").update(toolCallId).digest("hex")}`;
 }
 
+function legacyAuditSourceId(params: {
+  runId: string;
+  sourceSequence: number;
+  occurredAt: number;
+  action: string;
+}): string {
+  // Preserve the original store-owned identity byte-for-byte so replayed
+  // run/tool events still deduplicate after the versioned contract refactor.
+  return `${params.runId}:${params.sourceSequence}:${params.occurredAt}:${params.action}`;
+}
+
 function rememberRunProvenance(
   runId: string,
   provenance: {
@@ -64,13 +82,7 @@ function rememberRunProvenance(
 ): void {
   runProvenance.delete(runId);
   runProvenance.set(runId, provenance);
-  while (runProvenance.size > MAX_TRACKED_RUN_PROVENANCE) {
-    const oldestRunId = runProvenance.keys().next().value;
-    if (oldestRunId === undefined) {
-      break;
-    }
-    runProvenance.delete(oldestRunId);
-  }
+  pruneMapToMaxSize(runProvenance, MAX_TRACKED_RUN_PROVENANCE);
 }
 
 function resolveProvenance(
@@ -105,59 +117,25 @@ function resolveToolProvenance(
   };
 }
 
+const AUDIT_TERMINAL_BY_CLASSIFICATION = {
+  success: { status: "succeeded" as const },
+  timeout: { status: "timed_out" as const, errorCode: "run_timed_out" as const },
+  cancellation: { status: "cancelled" as const, errorCode: "run_cancelled" as const },
+  failure: { status: "failed" as const, errorCode: "run_failed" as const },
+};
+
 function classifyRunTerminal(
   data: Record<string, unknown>,
   phase: "end" | "error",
 ): {
   outcome: AgentRunTerminalOutcome;
-  status: AuditEventStatus;
-  errorCode?: AuditEventErrorCode;
-} {
-  const stopReason = nonEmptyString(data.stopReason);
-  const timeoutPhase = normalizeAgentRunTimeoutPhase(data.timeoutPhase);
-  const terminalStatus = normalizeOptionalLowercaseString(data.status);
-  const explicitlyTimedOut =
-    stopReason === "timeout" ||
-    timeoutPhase !== undefined ||
-    terminalStatus === "timeout" ||
-    terminalStatus === "timed_out";
-  const explicitlyCancelled =
-    !explicitlyTimedOut &&
-    (data.aborted === true ||
-      stopReason === "aborted" ||
-      terminalStatus === "cancelled" ||
-      terminalStatus === "canceled" ||
-      terminalStatus === "aborted");
-  // The terminal helper accepts wait statuses, so normalize explicit lifecycle
-  // cancellation to its canonical stop signal without persisting the raw reason.
-  const outcomeStopReason = explicitlyCancelled && !explicitlyTimedOut ? "stop" : stopReason;
-  const outcome = buildAgentRunTerminalOutcome({
-    status: explicitlyTimedOut
-      ? "timeout"
-      : phase === "error"
-        ? "error"
-        : explicitlyCancelled
-          ? "error"
-          : "ok",
-    stopReason: outcomeStopReason,
-    livenessState: data.livenessState,
-    timeoutPhase,
-    providerStarted: data.providerStarted,
-    startedAt: data.startedAt,
-    endedAt: data.endedAt,
-  });
-  if (outcome.reason === "cancelled" || outcome.reason === "aborted") {
-    return { outcome, status: "cancelled", errorCode: "run_cancelled" };
-  }
-  if (outcome.reason === "hard_timeout" || outcome.reason === "timed_out") {
-    return { outcome, status: "timed_out", errorCode: "run_timed_out" };
-  }
+} & AgentRunFinishedAuditTerminal {
+  const outcome = buildAgentRunTerminalOutcomeFromLifecycleEvent({ phase, data });
   if (outcome.reason === "blocked") {
     return { outcome, status: "blocked", errorCode: "run_blocked" };
   }
-  return outcome.reason === "completed"
-    ? { outcome, status: "succeeded" }
-    : { outcome, status: "failed", errorCode: "run_failed" };
+  const terminal = AUDIT_TERMINAL_BY_CLASSIFICATION[classifyAgentRunTerminalOutcome(outcome)];
+  return { outcome, ...terminal };
 }
 
 type AgentAuditProjection = {
@@ -174,12 +152,20 @@ function projectAgentEvent(event: AgentEventPayload): AgentAuditProjection | und
   const provenance = resolveProvenance(runId, event);
   if (event.stream === "lifecycle" && phase === "start") {
     rememberRunProvenance(runId, provenance);
+    const occurredAt = asDateTimestampMs(event.data.startedAt) ?? event.ts;
+    const action = "agent.run.started" as const;
     return {
       input: {
+        sourceId: legacyAuditSourceId({
+          runId,
+          sourceSequence: event.seq,
+          occurredAt,
+          action,
+        }),
         sourceSequence: event.seq,
-        occurredAt: asDateTimestampMs(event.data.startedAt) ?? event.ts,
+        occurredAt,
         kind: "agent_run",
-        action: "agent.run.started",
+        action,
         status: "started",
         actorType: provenance.actorType,
         actorId: provenance.agentId,
@@ -193,12 +179,20 @@ function projectAgentEvent(event: AgentEventPayload): AgentAuditProjection | und
   if (event.stream === "lifecycle" && (phase === "end" || phase === "error")) {
     rememberRunProvenance(runId, provenance);
     const { outcome, ...terminal } = classifyRunTerminal(event.data, phase);
+    const occurredAt = asDateTimestampMs(event.data.endedAt) ?? event.ts;
+    const action = "agent.run.finished" as const;
     return {
       input: {
+        sourceId: legacyAuditSourceId({
+          runId,
+          sourceSequence: event.seq,
+          occurredAt,
+          action,
+        }),
         sourceSequence: event.seq,
-        occurredAt: asDateTimestampMs(event.data.endedAt) ?? event.ts,
+        occurredAt,
         kind: "agent_run",
-        action: "agent.run.finished",
+        action,
         ...terminal,
         actorType: provenance.actorType,
         actorId: provenance.agentId,
@@ -213,15 +207,10 @@ function projectAgentEvent(event: AgentEventPayload): AgentAuditProjection | und
   return undefined;
 }
 
-/** Return a metadata-only audit input for supported run lifecycle events. */
-export function projectAgentEventToAudit(event: AgentEventPayload): AuditEventInput | undefined {
-  return projectAgentEvent(event)?.input;
-}
-
 /** Project the complete trusted tool-execution lifecycle without private diagnostic content. */
-export function projectToolExecutionEventToAudit(
+function projectToolExecutionEventToAudit(
   event: TrustedToolExecutionEvent,
-): AuditEventInput | undefined {
+): ToolActionAuditEventInput | undefined {
   // Schema quarantine describes tool availability before invocation. Without
   // a call identity it must not become a durable tool-action claim.
   if (
@@ -238,6 +227,34 @@ export function projectToolExecutionEventToAudit(
   }
   const toolCallId = auditToolCallId(event.toolCallId);
   const provenance = resolveToolProvenance(runId, event);
+  const occurredAt = asDateTimestampMs(event.sourceTimestampMs) ?? event.ts;
+  const attribution = {
+    sourceSequence: event.seq,
+    occurredAt,
+    kind: "tool_action" as const,
+    actorType: provenance.actorType,
+    actorId: provenance.agentId,
+    agentId: provenance.agentId,
+    ...(provenance.sessionKey ? { sessionKey: provenance.sessionKey } : {}),
+    ...(provenance.sessionId ? { sessionId: provenance.sessionId } : {}),
+    runId,
+    ...(toolCallId ? { toolCallId } : {}),
+    toolName,
+  };
+  if (event.type === "tool.execution.started") {
+    const action = "tool.action.started" as const;
+    return {
+      sourceId: legacyAuditSourceId({
+        runId,
+        sourceSequence: event.seq,
+        occurredAt,
+        action,
+      }),
+      ...attribution,
+      action,
+      status: "started",
+    };
+  }
   const errorCategory =
     event.type === "tool.execution.error"
       ? normalizeOptionalLowercaseString(event.errorCategory)
@@ -260,34 +277,28 @@ export function projectToolExecutionEventToAudit(
   // Unknown is an explicit dependency boundary, not a failed-run inference.
   // Keep it authoritative when enclosing run provenance says cancel or timeout.
   const terminal =
-    event.type === "tool.execution.started"
-      ? { status: "started" as const }
-      : event.type === "tool.execution.completed"
-        ? { status: "succeeded" as const }
-        : event.type === "tool.execution.blocked"
-          ? { status: "blocked" as const, errorCode: "tool_blocked" as const }
-          : diagnosticErrorCode === "tool_outcome_unknown"
-            ? { status: "unknown" as const, errorCode: "tool_outcome_unknown" as const }
-            : toolCancelled
-              ? { status: "cancelled" as const, errorCode: "tool_cancelled" as const }
-              : toolTimedOut
-                ? { status: "timed_out" as const, errorCode: "tool_timed_out" as const }
-                : { status: "failed" as const, errorCode: "tool_failed" as const };
+    event.type === "tool.execution.completed"
+      ? { status: "succeeded" as const }
+      : event.type === "tool.execution.blocked"
+        ? { status: "blocked" as const, errorCode: "tool_blocked" as const }
+        : diagnosticErrorCode === "tool_outcome_unknown"
+          ? { status: "unknown" as const, errorCode: "tool_outcome_unknown" as const }
+          : toolCancelled
+            ? { status: "cancelled" as const, errorCode: "tool_cancelled" as const }
+            : toolTimedOut
+              ? { status: "timed_out" as const, errorCode: "tool_timed_out" as const }
+              : { status: "failed" as const, errorCode: "tool_failed" as const };
+  const action = "tool.action.finished" as const;
   return {
-    sourceSequence: event.seq,
-    occurredAt: asDateTimestampMs(event.sourceTimestampMs) ?? event.ts,
-    kind: "tool_action",
-    action:
-      event.type === "tool.execution.started" ? "tool.action.started" : "tool.action.finished",
+    sourceId: legacyAuditSourceId({
+      runId,
+      sourceSequence: event.seq,
+      occurredAt,
+      action,
+    }),
+    ...attribution,
+    action,
     ...terminal,
-    actorType: provenance.actorType,
-    actorId: provenance.agentId,
-    agentId: provenance.agentId,
-    ...(provenance.sessionKey ? { sessionKey: provenance.sessionKey } : {}),
-    ...(provenance.sessionId ? { sessionId: provenance.sessionId } : {}),
-    runId,
-    ...(toolCallId ? { toolCallId } : {}),
-    toolName,
   };
 }
 
@@ -296,11 +307,7 @@ export function createAgentEventAuditRecorder(options?: {
   writer?: AuditEventWriter;
   stateDir?: string;
   terminalSettleMs?: number;
-}): {
-  record: (event: AgentEventPayload) => void;
-  recordTool: (event: TrustedToolExecutionEvent) => void;
-  stop: () => Promise<void>;
-} {
+}): AgentEventAuditRecorder {
   const writer =
     options?.writer ??
     createAuditEventWriter({
@@ -431,9 +438,4 @@ export function createAgentEventAuditRecorder(options?: {
       await writer.stop();
     },
   };
-}
-
-export function resetAgentEventAuditForTest(): void {
-  runProvenance.clear();
-  persistenceFailureWarned = false;
 }

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { resolveNpmJsonEntries } from "../../lib/npm-json-output.mjs";
 import { sleep as delay } from "../../lib/sleep.mjs";
 import { readPositiveIntEnv } from "./env-limits.ts";
 import { exists, readJson } from "./filesystem.ts";
@@ -28,7 +29,14 @@ export async function packageBuildCommitFromTgz(tgzPath: string): Promise<string
 }
 
 function resolveNpmPackTarballFilename(value: unknown): string {
-  const filename = typeof value === "string" ? value.trim() : "";
+  const result = resolveNpmJsonEntries(value).at(-1);
+  const filename =
+    result &&
+    typeof result === "object" &&
+    "filename" in result &&
+    typeof result.filename === "string"
+      ? result.filename.trim()
+      : "";
   if (
     !filename.endsWith(".tgz") ||
     filename.includes("\0") ||
@@ -145,7 +153,7 @@ export async function packOpenClaw(input: {
       ],
       { quiet: true },
     ).stdout;
-    const packed = resolveNpmPackTarballFilename(JSON.parse(output).at(-1)?.filename);
+    const packed = resolveNpmPackTarballFilename(JSON.parse(output));
     const tgzPath = path.join(input.destination, packed);
     const version = await packageVersionFromTgz(tgzPath);
     say(`Packed ${tgzPath}`);
@@ -304,4 +312,5 @@ export const testing = {
   acquirePackageLock,
   removeStalePackageLock,
   readLockOwner,
+  resolveNpmPackTarballFilename,
 };

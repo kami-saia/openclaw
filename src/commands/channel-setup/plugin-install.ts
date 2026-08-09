@@ -8,7 +8,7 @@ import {
   resolveConfiguredChannelPluginIds,
   resolveDiscoverableScopedChannelPluginIds,
 } from "../../plugins/channel-plugin-ids.js";
-import { loadOpenClawPlugins } from "../../plugins/loader.js";
+import { loadPluginRegistryHandle } from "../../plugins/loader.js";
 import { createPluginLoaderLogger } from "../../plugins/logger.js";
 import type { PluginRegistry } from "../../plugins/registry.js";
 import type { RuntimeEnv } from "../../runtime.js";
@@ -49,6 +49,7 @@ export async function ensureChannelSetupPluginInstalled(params: {
   workspaceDir?: string;
   promptInstall?: boolean;
   autoConfirmSingleSource?: boolean;
+  beforePersistentEffect?: () => Promise<void>;
 }): Promise<InstallResult> {
   const result = await ensureOnboardingPluginInstalled({
     cfg: params.cfg,
@@ -59,6 +60,9 @@ export async function ensureChannelSetupPluginInstalled(params: {
     ...(params.promptInstall !== undefined ? { promptInstall: params.promptInstall } : {}),
     ...(params.autoConfirmSingleSource !== undefined
       ? { autoConfirmSingleSource: params.autoConfirmSingleSource }
+      : {}),
+    ...(params.beforePersistentEffect
+      ? { beforePersistentEffect: params.beforePersistentEffect }
       : {}),
   });
   return {
@@ -74,7 +78,6 @@ function loadChannelSetupPluginRegistry(params: {
   runtime: RuntimeEnv;
   workspaceDir?: string;
   onlyPluginIds?: string[];
-  activate?: boolean;
   forceSetupOnlyChannelPlugins?: boolean;
 }): PluginRegistry {
   const autoEnabled = applyPluginAutoEnable({ config: params.cfg, env: process.env });
@@ -91,7 +94,7 @@ function loadChannelSetupPluginRegistry(params: {
       env: process.env,
     });
   const log = createSubsystemLogger("plugins");
-  return loadOpenClawPlugins({
+  return loadPluginRegistryHandle({
     config: resolvedConfig,
     activationSourceConfig: params.cfg,
     autoEnabledReasons: autoEnabled.autoEnabledReasons,
@@ -101,7 +104,7 @@ function loadChannelSetupPluginRegistry(params: {
     onlyPluginIds,
     includeSetupOnlyChannelPlugins: true,
     forceSetupOnlyChannelPlugins: params.forceSetupOnlyChannelPlugins,
-    activate: params.activate,
+    channelPluginLoadIntent: "setup",
   });
 }
 
@@ -155,6 +158,5 @@ export function loadChannelSetupPluginRegistrySnapshotForChannel(params: {
   return loadChannelSetupPluginRegistry({
     ...params,
     ...(scopedPluginId ? { onlyPluginIds: [scopedPluginId] } : {}),
-    activate: false,
   });
 }

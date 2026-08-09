@@ -1,8 +1,5 @@
 /** Session-manager scoped runtime state for compaction safeguard configuration. */
-import type {
-  AgentCompactionIdentifierPolicy,
-  AgentCompactionMode,
-} from "../../config/types.agent-defaults.js";
+import type { AgentCompactionIdentifierPolicy } from "../../config/types.agent-defaults.js";
 import type { Model } from "../../llm/types.js";
 import { createSessionManagerRuntimeRegistry } from "./session-manager-runtime-registry.js";
 
@@ -10,7 +7,7 @@ import { createSessionManagerRuntimeRegistry } from "./session-manager-runtime-r
 type CompactionSafeguardRuntimeValue = {
   maxHistoryShare?: number;
   contextWindowTokens?: number;
-  identifierPolicy?: AgentCompactionIdentifierPolicy;
+  identifierPolicy?: AgentCompactionIdentifierPolicy | "custom";
   identifierInstructions?: string;
   customInstructions?: string;
   /**
@@ -19,7 +16,6 @@ type CompactionSafeguardRuntimeValue = {
    * (extensionRunner.initialize() is never called in that path).
    */
   model?: Model;
-  compactionMode?: AgentCompactionMode;
   recentTurnsPreserve?: number;
   workspaceDir?: string;
   postCompactionSections?: string[];
@@ -53,14 +49,9 @@ export function setCompactionSafeguardCancelReason(
   const current = getCompactionSafeguardRuntime(sessionManager);
   const trimmed = reason?.trim();
 
-  if (!current) {
-    if (!trimmed) {
-      return;
-    }
-    setCompactionSafeguardRuntime(sessionManager, { cancelReason: trimmed });
+  if (!current && !trimmed) {
     return;
   }
-
   const next = { ...current };
   if (trimmed) {
     next.cancelReason = trimmed;

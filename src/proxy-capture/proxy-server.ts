@@ -4,13 +4,15 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import net from "node:net";
+import { StringDecoder } from "node:string_decoder";
 import { URL } from "node:url";
+import { isTruthyEnvValue } from "../infra/env.js";
 import { ensureDebugProxyCa } from "./ca.js";
 import type { DebugProxySettings } from "./env.js";
+import { redactedCaptureHeaders } from "./header-redaction.js";
 import { getDebugProxyCaptureStore } from "./store.sqlite.js";
 import type { CaptureEventRecord } from "./types.js";
 
-const TRUTHY_ENV = new Set(["1", "true", "yes", "on"]);
 const DEBUG_PROXY_DIRECT_CONNECT_OVERRIDE =
   "OPENCLAW_DEBUG_PROXY_ALLOW_DIRECT_CONNECT_WITH_MANAGED_PROXY";
 const CAPTURE_BODY_PREVIEW_BYTES = 8192;
@@ -23,10 +25,6 @@ type BodyPreviewCapture = {
   truncated: boolean;
 };
 
-function isTruthyEnvValue(value: string | undefined): boolean {
-  return TRUTHY_ENV.has((value ?? "").trim().toLowerCase());
-}
-
 function isManagedProxyActive(env: NodeJS.ProcessEnv = process.env): boolean {
   return isTruthyEnvValue(env["OPENCLAW_PROXY_ACTIVE"]);
 }
@@ -35,7 +33,7 @@ function allowsDirectConnectWithManagedProxy(env: NodeJS.ProcessEnv = process.en
   return isTruthyEnvValue(env[DEBUG_PROXY_DIRECT_CONNECT_OVERRIDE]);
 }
 
-export function assertDebugProxyDirectUpstreamAllowed(env: NodeJS.ProcessEnv = process.env): void {
+function assertDebugProxyDirectUpstreamAllowed(env: NodeJS.ProcessEnv = process.env): void {
   if (!isManagedProxyActive(env) || allowsDirectConnectWithManagedProxy(env)) {
     return;
   }
@@ -70,7 +68,7 @@ function createProxyCaptureRecorder(params: {
   };
 }
 
-export function parseConnectTarget(rawTarget: string | undefined): {
+function parseConnectTarget(rawTarget: string | undefined): {
   hostname: string;
   port: number;
 } {
@@ -138,7 +136,9 @@ function finishBodyPreviewCapture(capture: BodyPreviewCapture): {
   metaJson?: string;
 } {
   return {
-    dataText: Buffer.concat(capture.chunks, capture.previewBytes).toString("utf8"),
+    // write(), unlike end(), omits an incomplete trailing code point introduced
+    // by the byte cap instead of injecting a replacement character into the preview.
+    dataText: new StringDecoder("utf8").write(Buffer.concat(capture.chunks, capture.previewBytes)),
     metaJson: capture.truncated
       ? JSON.stringify({
           bodyBytes: capture.totalBytes,
@@ -244,22 +244,79 @@ export async function startDebugProxyServer(params: {
         },
         (upstreamRes) => {
           const responseCapture = createBodyPreviewCapture();
-          upstreamRes.on("data", (chunk) => {
-            const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-            appendBodyPreviewCapture(responseCapture, buffer);
-            res.write(buffer);
-          });
-          upstreamRes.on("end", () => {
+          let upstreamFinished = false;
+          let upstreamFailed = false;
+          let responseFinished = false;
+          let downstreamFailed = false;
+          let pausedForDownstream = false;
+          const resumeUpstreamResponse = () => {
+            pausedForDownstream = false;
+            if (!res.destroyed && !res.writableEnded && !upstreamRes.destroyed) {
+              upstreamRes.resume();
+            }
+          };
+          const handleDownstreamFailure = (error?: Error) => {
+            if (downstreamFailed || responseFinished || upstreamFailed) {
+              return;
+            }
+            downstreamFailed = true;
+            res.off("drain", resumeUpstreamResponse);
+            recordTargetEvent({
+              direction: "local",
+              kind: "error",
+              errorText: error?.message ?? "Downstream response closed before completion",
+            });
+            upstream.destroy();
+            upstreamRes.destroy();
+          };
+          res.on("finish", () => {
+            if (!upstreamFinished || downstreamFailed || upstreamFailed) {
+              return;
+            }
+            responseFinished = true;
+            res.off("drain", resumeUpstreamResponse);
             recordTargetEvent({
               direction: "inbound",
               kind: "response",
               status: upstreamRes.statusCode ?? undefined,
-              headersJson: JSON.stringify(upstreamRes.headers),
+              headersJson: JSON.stringify(redactedCaptureHeaders(upstreamRes.headers)),
               ...finishBodyPreviewCapture(responseCapture),
             });
-            res.end();
+          });
+          res.on("error", handleDownstreamFailure);
+          res.on("close", () => handleDownstreamFailure());
+          upstreamRes.on("data", (chunk) => {
+            const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            appendBodyPreviewCapture(responseCapture, buffer);
+            if (res.destroyed || res.writableEnded) {
+              handleDownstreamFailure();
+              return;
+            }
+            try {
+              if (!res.write(buffer) && !pausedForDownstream) {
+                pausedForDownstream = true;
+                upstreamRes.pause();
+                res.once("drain", resumeUpstreamResponse);
+              }
+            } catch (error) {
+              handleDownstreamFailure(error instanceof Error ? error : new Error(String(error)));
+            }
+          });
+          upstreamRes.on("end", () => {
+            upstreamFinished = true;
+            res.off("drain", resumeUpstreamResponse);
+            if (!res.destroyed && !res.writableEnded) {
+              res.end();
+            } else if (!res.writableFinished) {
+              handleDownstreamFailure();
+            }
           });
           upstreamRes.on("error", (error) => {
+            if (downstreamFailed || responseFinished || upstreamFailed) {
+              return;
+            }
+            upstreamFailed = true;
+            res.off("drain", resumeUpstreamResponse);
             recordTargetEvent({
               direction: "inbound",
               kind: "error",
@@ -277,7 +334,7 @@ export async function startDebugProxyServer(params: {
         recordTargetEvent({
           direction: "outbound",
           kind: "request",
-          headersJson: JSON.stringify(req.headers),
+          headersJson: JSON.stringify(redactedCaptureHeaders(req.headers)),
           ...finishBodyPreviewCapture(requestCapture),
         });
       });
@@ -329,7 +386,7 @@ export async function startDebugProxyServer(params: {
       flowId,
       host: hostname,
       path: req.url ?? "",
-      headersJson: JSON.stringify(req.headers),
+      headersJson: JSON.stringify(redactedCaptureHeaders(req.headers)),
     });
     try {
       assertDebugProxyDirectUpstreamAllowed();

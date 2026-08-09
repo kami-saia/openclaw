@@ -16,7 +16,10 @@ MUTED='\033[38;2;90;100;128m'       # text-muted    #5a6480
 NC='\033[0m' # No Color
 
 DEFAULT_TAGLINE="All your chats, one OpenClaw."
-NODE_DEFAULT_MAJOR=24
+NODE_DEFAULT_MAJOR=26
+# Homebrew ships the current Node line as plain "node" (no versioned node@26
+# formula exists); versioned formulas only cover LTS lines like node@24.
+NODE_BREW_FORMULA="node"
 NODE_MIN_MAJOR=22
 NODE_22_MIN_MINOR=22
 NODE_22_MIN_PATCH=3
@@ -53,10 +56,12 @@ trap abort_install_int INT
 trap abort_install_term TERM
 
 mktempfile() {
-    local f
+    local output_var="${1:?output variable required}" f
     f="$(mktemp)"
+    # Assign into caller scope; command substitution would lose this cleanup
+    # registration in its subshell.
     TMPFILES+=("$f")
-    echo "$f"
+    printf -v "$output_var" '%s' "$f"
 }
 
 resolve_openclaw_effective_home() {
@@ -108,21 +113,64 @@ detect_downloader() {
 download_file() {
     local url="$1"
     local output="$2"
+    local redirect_mode="${3:-follow}"
     if [[ -z "$DOWNLOADER" ]]; then
         detect_downloader
     fi
     if [[ "$DOWNLOADER" == "curl" ]]; then
-        curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 1 --retry-connrefused -o "$output" "$url"
+        if [[ "$redirect_mode" == "deny" ]]; then
+            curl -fsSL --max-redirs 0 --proto '=https' --tlsv1.2 \
+                --speed-limit 1 --speed-time 30 \
+                --retry 3 --retry-delay 1 --retry-connrefused \
+                -o "$output" "$url"
+            return
+        fi
+        # Bound post-connect stalls without imposing a total download duration.
+        curl -fsSL --proto '=https' --tlsv1.2 \
+            --speed-limit 1 --speed-time 30 \
+            --retry 3 --retry-delay 1 --retry-connrefused \
+            -o "$output" "$url"
+        return
+    fi
+    if [[ "$redirect_mode" == "deny" ]]; then
+        wget -q --max-redirect=0 --https-only --secure-protocol=TLSv1_2 --tries=3 --timeout=20 -O "$output" "$url"
         return
     fi
     wget -q --https-only --secure-protocol=TLSv1_2 --tries=3 --timeout=20 -O "$output" "$url"
 }
 
+# Managed setup endpoints must return a non-empty script with a raw shebang.
+# This is a response-shape check, not an authenticity or completeness check.
+validate_downloaded_script() {
+    local file="$1" url="$2"
+    if [[ ! -s "$file" ]]; then
+        ui_error "Downloaded script is empty: ${url}"
+        return 1
+    fi
+    # Check the first two raw bytes are '#!' (0x23 0x21) BEFORE command
+    # substitution, which strips NUL/control bytes and could false-accept
+    # a file whose raw content does not actually start with a shebang.
+    local raw_magic
+    raw_magic="$(od -An -tx1 -N2 "$file" | tr -d ' ')"
+    if [[ "$raw_magic" != "2321" ]]; then
+        ui_error "Downloaded file does not look like a shell script (no shebang): ${url}"
+        return 1
+    fi
+}
+
+download_validated_script() {
+    local url="$1" output="$2"
+    # These fixed executable-script endpoints must not redirect: Wget's
+    # --https-only only filters recursive traversal, not ordinary redirects.
+    download_file "$url" "$output" deny || return 1
+    validate_downloaded_script "$output" "$url"
+}
+
 run_remote_bash() {
     local url="$1"
     local tmp
-    tmp="$(mktempfile)"
-    download_file "$url" "$tmp"
+    mktempfile tmp
+    download_validated_script "$url" "$tmp" || return 1
     /bin/bash "$tmp"
 }
 
@@ -142,6 +190,14 @@ is_non_interactive_shell() {
     return 1
 }
 
+# Returns true when stdin should be isolated from the script stream.
+# Checks stdin directly (not stdout) and respects NO_PROMPT so that
+# stdout redirection (e.g. install.sh > log.txt) does not suppress
+# interactive prompts.
+needs_stdin_isolation() {
+    [[ ! -t 0 ]] || [[ "${NO_PROMPT:-0}" == "1" ]]
+}
+
 has_controlling_tty() {
     if [[ ! -r /dev/tty || ! -w /dev/tty ]]; then
         return 1
@@ -150,6 +206,39 @@ has_controlling_tty() {
         return 1
     fi
     return 0
+}
+
+has_visible_prompt_output() {
+    [[ -t 1 ]]
+}
+
+resolve_subprocess_stdin_path() {
+    local prompt_output_visible="${1:-0}"
+    if [[ "${NO_PROMPT:-0}" == "1" ]]; then
+        echo "/dev/null"
+        return 0
+    fi
+    if ! needs_stdin_isolation; then
+        return 1
+    fi
+    if has_controlling_tty && [[ "$prompt_output_visible" == "1" ]]; then
+        echo "/dev/tty"
+    else
+        echo "/dev/null"
+    fi
+}
+
+run_with_safe_stdin() {
+    local stdin_path=""
+    local prompt_output_visible=0
+    if has_visible_prompt_output; then
+        prompt_output_visible=1
+    fi
+    if stdin_path="$(resolve_subprocess_stdin_path "$prompt_output_visible")"; then
+        "$@" < "$stdin_path"
+    else
+        "$@"
+    fi
 }
 
 gum_is_tty() {
@@ -483,15 +572,25 @@ run_with_spinner() {
 
     if [[ -n "$GUM" ]] && gum_is_tty && ! is_shell_function "${1:-}"; then
         local gum_err gum_out
-        gum_err="$(mktempfile)"
-        gum_out="$(mktempfile)"
-        if "$GUM" spin --spinner dot --title "$title" -- "$@" >"$gum_out" 2>"$gum_err"; then
+        mktempfile gum_err
+        mktempfile gum_out
+        local gum_status=0
+        if needs_stdin_isolation; then
+            "$GUM" spin --spinner dot --title "$title" -- "$@" < /dev/null >"$gum_out" 2>"$gum_err" || gum_status=$?
+        else
+            "$GUM" spin --spinner dot --title "$title" -- "$@" >"$gum_out" 2>"$gum_err" || gum_status=$?
+        fi
+        if [[ "$gum_status" -eq 0 ]]; then
             if is_gum_raw_mode_failure "$gum_out" || is_gum_raw_mode_failure "$gum_err"; then
                 GUM=""
                 GUM_STATUS="skipped"
                 GUM_REASON="gum raw mode unavailable"
                 ui_warn "Spinner unavailable in this terminal; continuing without spinner"
-                "$@"
+                if needs_stdin_isolation; then
+                    "$@" < /dev/null
+                else
+                    "$@"
+                fi
                 return $?
             fi
             if [[ -s "$gum_out" ]]; then
@@ -499,13 +598,16 @@ run_with_spinner() {
             fi
             return 0
         fi
-        local gum_status=$?
         if is_gum_raw_mode_failure "$gum_err" || is_gum_raw_mode_failure "$gum_out"; then
             GUM=""
             GUM_STATUS="skipped"
             GUM_REASON="gum raw mode unavailable"
             ui_warn "Spinner unavailable in this terminal; continuing without spinner"
-            "$@"
+            if needs_stdin_isolation; then
+                "$@" < /dev/null
+            else
+                "$@"
+            fi
             return $?
         fi
         if [[ -s "$gum_err" ]]; then
@@ -514,7 +616,11 @@ run_with_spinner() {
         return "$gum_status"
     fi
 
-    "$@"
+    if needs_stdin_isolation; then
+        "$@" < /dev/null
+    else
+        "$@"
+    fi
 }
 
 run_quiet_step() {
@@ -527,7 +633,7 @@ run_quiet_step() {
     fi
 
     local log
-    log="$(mktempfile)"
+    mktempfile log
     local showed_progress=false
 
     local cmd_exit=0
@@ -546,7 +652,11 @@ run_quiet_step() {
         # Keep users informed even when gum spinner cannot run (for example shell functions).
         ui_info "${title}"
         showed_progress=true
-        "$@" >"$log" 2>&1 || cmd_exit=$?
+        if needs_stdin_isolation; then
+            "$@" < /dev/null >"$log" 2>&1 || cmd_exit=$?
+        else
+            "$@" >"$log" 2>&1 || cmd_exit=$?
+        fi
         if (( cmd_exit == 0 )); then
             return 0
         fi
@@ -917,7 +1027,7 @@ run_npm_global_install() {
     LAST_NPM_INSTALL_CMD="${cmd_display% }"
 
     if [[ "$VERBOSE" == "1" ]]; then
-        "${cmd[@]}" 2>&1 | tee "$log"
+        "${cmd[@]}" < /dev/null 2>&1 | tee "$log"
         return $?
     fi
 
@@ -931,7 +1041,7 @@ run_npm_global_install() {
     fi
 
     ui_info "Installing OpenClaw package"
-    "${cmd[@]}" >"$log" 2>&1
+    "${cmd[@]}" < /dev/null >"$log" 2>&1
 }
 
 extract_npm_debug_log_path() {
@@ -1016,7 +1126,7 @@ print_npm_failure_diagnostics() {
 install_openclaw_npm() {
     local spec="$1"
     local log
-    log="$(mktempfile)"
+    mktempfile log
     if ! run_npm_global_install "$spec" "$log"; then
         local attempted_build_tool_fix=false
         if auto_install_build_tools_for_npm_failure "$log"; then
@@ -1077,8 +1187,6 @@ TAGLINES+=("I run on caffeine, JSON5, and the audacity of \"it worked on my mach
 TAGLINES+=("Gateway online—please keep hands, feet, and appendages inside the shell at all times.")
 TAGLINES+=("I speak fluent bash, mild sarcasm, and aggressive tab-completion energy.")
 TAGLINES+=("One CLI to rule them all, and one more restart because you changed the port.")
-TAGLINES+=("If it works, it's automation; if it breaks, it's a \"learning opportunity.\"")
-TAGLINES+=("Pairing codes exist because even bots believe in consent—and good security hygiene.")
 TAGLINES+=("Your .env is showing; don't worry, I'll pretend I didn't see it.")
 TAGLINES+=("I'll do the boring stuff while you dramatically stare at the logs like it's cinema.")
 TAGLINES+=("I'm not saying your workflow is chaotic... I'm just bringing a linter and a helmet.")
@@ -1089,13 +1197,10 @@ TAGLINES+=("Hot reload for config, cold sweat for deploys.")
 TAGLINES+=("I'm the assistant your terminal demanded, not the one your sleep schedule requested.")
 TAGLINES+=("I keep secrets like a vault... unless you print them in debug logs again.")
 TAGLINES+=("Automation with claws: minimal fuss, maximal pinch.")
-TAGLINES+=("I'm basically a Swiss Army knife, but with more opinions and fewer sharp edges.")
 TAGLINES+=("If you're lost, run doctor; if you're brave, run prod; if you're wise, run tests.")
 TAGLINES+=("Your task has been queued; your dignity has been deprecated.")
-TAGLINES+=("I can't fix your code taste, but I can fix your build and your backlog.")
 TAGLINES+=("I'm not magic—I'm just extremely persistent with retries and coping strategies.")
 TAGLINES+=("It's not \"failing,\" it's \"discovering new ways to configure the same thing wrong.\"")
-TAGLINES+=("Give me a workspace and I'll give you fewer tabs, fewer toggles, and more oxygen.")
 TAGLINES+=("I read logs so you can keep pretending you don't have to.")
 TAGLINES+=("If something's on fire, I can't extinguish it—but I can write a beautiful postmortem.")
 TAGLINES+=("I'll refactor your busywork like it owes me money.")
@@ -1105,13 +1210,10 @@ TAGLINES+=("I'm like tmux: confusing at first, then suddenly you can't live with
 TAGLINES+=("I can run local, remote, or purely on vibes—results may vary with DNS.")
 TAGLINES+=("If you can describe it, I can probably automate it—or at least make it funnier.")
 TAGLINES+=("Your config is valid, your assumptions are not.")
-TAGLINES+=("I don't just autocomplete—I auto-commit (emotionally), then ask you to review (logically).")
-TAGLINES+=("Less clicking, more shipping, fewer \"where did that file go\" moments.")
 TAGLINES+=("Claws out, commit in—let's ship something mildly responsible.")
 TAGLINES+=("I'll butter your workflow like a lobster roll: messy, delicious, effective.")
 TAGLINES+=("Shell yeah—I'm here to pinch the toil and leave you the glory.")
 TAGLINES+=("If it's repetitive, I'll automate it; if it's hard, I'll bring jokes and a rollback plan.")
-TAGLINES+=("Because texting yourself reminders is so 2024.")
 TAGLINES+=("WhatsApp, but make it ✨engineering✨.")
 TAGLINES+=("Turning \"I'll reply later\" into \"my bot replied instantly\".")
 TAGLINES+=("The only crab in your contacts you actually want to hear from. 🦞")
@@ -1128,7 +1230,6 @@ TAGLINES+=("WhatsApp automation without the \"please accept our new privacy poli
 TAGLINES+=("Chat APIs that don't require a Senate hearing.")
 TAGLINES+=("Because Threads wasn't the answer either.")
 TAGLINES+=("Your messages, your servers, Meta's tears.")
-TAGLINES+=("iMessage green bubble energy, but for everyone.")
 TAGLINES+=("Siri's competent cousin.")
 TAGLINES+=("Works on Android. Crazy concept, we know.")
 TAGLINES+=("No \$999 stand required.")
@@ -1670,8 +1771,11 @@ promote_supported_node_binary() {
         "/usr/bin/node"
         "/usr/local/bin/node"
         "/opt/homebrew/bin/node"
-        "/opt/homebrew/opt/node@${NODE_DEFAULT_MAJOR}/bin/node"
-        "/usr/local/opt/node@${NODE_DEFAULT_MAJOR}/bin/node"
+        "/opt/homebrew/opt/${NODE_BREW_FORMULA}/bin/node"
+        "/usr/local/opt/${NODE_BREW_FORMULA}/bin/node"
+        # Keep-alive for installs provisioned when node@24 was the default.
+        "/opt/homebrew/opt/node@24/bin/node"
+        "/usr/local/opt/node@24/bin/node"
     )
 
     for candidate in "${candidates[@]}"; do
@@ -1728,7 +1832,7 @@ ensure_macos_default_node_active() {
 
     local brew_node_prefix=""
     if command -v brew &> /dev/null; then
-        brew_node_prefix="$(brew --prefix "node@${NODE_DEFAULT_MAJOR}" 2>/dev/null || true)"
+        brew_node_prefix="$(brew --prefix "${NODE_BREW_FORMULA}" 2>/dev/null || true)"
         if [[ -n "$brew_node_prefix" && -x "${brew_node_prefix}/bin/node" ]]; then
             export PATH="${brew_node_prefix}/bin:$PATH"
             refresh_shell_command_cache
@@ -1744,9 +1848,9 @@ ensure_macos_default_node_active() {
     active_version="$(node -v 2>/dev/null || echo "missing")"
 
     if [[ -z "$brew_node_prefix" || ! -x "${brew_node_prefix}/bin/node" ]]; then
-        ui_error "Homebrew node@${NODE_DEFAULT_MAJOR} is not installed on disk"
+        ui_error "Homebrew ${NODE_BREW_FORMULA} is not installed on disk"
         echo "The previous 'brew install' step appears to have failed."
-        echo "Re-run 'brew install node@${NODE_DEFAULT_MAJOR}' directly or rerun the installer with --verbose to see the underlying error."
+        echo "Re-run 'brew install ${NODE_BREW_FORMULA}' directly or rerun the installer with --verbose to see the underlying error."
         return 1
     fi
 
@@ -1892,11 +1996,11 @@ install_node_with_apk() {
 install_node() {
     if [[ "$OS" == "macos" ]]; then
         ui_info "Installing Node.js via Homebrew"
-        if ! run_quiet_step "Installing node@${NODE_DEFAULT_MAJOR}" brew install "node@${NODE_DEFAULT_MAJOR}"; then
-            echo "Re-run with --verbose or run 'brew install node@${NODE_DEFAULT_MAJOR}' directly, then rerun the installer."
+        if ! run_quiet_step "Installing ${NODE_BREW_FORMULA}" brew install "${NODE_BREW_FORMULA}"; then
+            echo "Re-run with --verbose or run 'brew install ${NODE_BREW_FORMULA}' directly, then rerun the installer."
             exit 1
         fi
-        brew link "node@${NODE_DEFAULT_MAJOR}" --overwrite --force 2>/dev/null || true
+        brew link "${NODE_BREW_FORMULA}" --overwrite --force 2>/dev/null || true
         if ! ensure_macos_default_node_active; then
             exit 1
         fi
@@ -1931,9 +2035,10 @@ install_node() {
 
         ui_info "Installing Node.js via NodeSource"
         if command -v apt-get &> /dev/null; then
-            local tmp
-            tmp="$(mktempfile)"
-            run_required_step "Downloading NodeSource setup script" download_file "https://deb.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x" "$tmp"
+            local tmp setup_url
+            setup_url="https://deb.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x"
+            mktempfile tmp
+            run_required_step "Downloading NodeSource setup script" download_validated_script "$setup_url" "$tmp"
             if is_root; then
                 run_required_step "Configuring NodeSource repository" bash "$tmp"
                 run_required_step "Installing Node.js" apt_get_install nodejs
@@ -1942,9 +2047,10 @@ install_node() {
                 run_required_step "Installing Node.js" apt_get_install nodejs
             fi
         elif command -v dnf &> /dev/null; then
-            local tmp
-            tmp="$(mktempfile)"
-            run_required_step "Downloading NodeSource setup script" download_file "https://rpm.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x" "$tmp"
+            local tmp setup_url
+            setup_url="https://rpm.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x"
+            mktempfile tmp
+            run_required_step "Downloading NodeSource setup script" download_validated_script "$setup_url" "$tmp"
             if is_root; then
                 run_required_step "Configuring NodeSource repository" bash "$tmp"
                 run_required_step "Installing Node.js" dnf install -y -q nodejs
@@ -1953,9 +2059,10 @@ install_node() {
                 run_required_step "Installing Node.js" sudo dnf install -y -q nodejs
             fi
         elif command -v yum &> /dev/null; then
-            local tmp
-            tmp="$(mktempfile)"
-            run_required_step "Downloading NodeSource setup script" download_file "https://rpm.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x" "$tmp"
+            local tmp setup_url
+            setup_url="https://rpm.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x"
+            mktempfile tmp
+            run_required_step "Downloading NodeSource setup script" download_validated_script "$setup_url" "$tmp"
             if is_root; then
                 run_required_step "Configuring NodeSource repository" bash "$tmp"
                 run_required_step "Installing Node.js" yum install -y -q nodejs
@@ -2067,7 +2174,7 @@ fix_npm_permissions() {
     ui_warn "The installer will switch npm's user prefix to ${HOME}/.npm-global; npm normally writes that setting to ~/.npmrc."
     ui_info "Configuring npm for user-local installs"
     mkdir -p "$HOME/.npm-global"
-    npm config set prefix "$HOME/.npm-global"
+    npm config set prefix "$HOME/.npm-global" < /dev/null
     ui_warn "Avoid sudo npm i -g for future OpenClaw updates; use npm i -g openclaw@latest so npm keeps using this user prefix instead of a different global prefix."
 
     persist_shell_path_prepend "$HOME/.npm-global/bin" "\$HOME/.npm-global/bin" || true
@@ -2308,6 +2415,21 @@ checkout_git_openclaw_ref() {
     fi
 
     ui_error "Requested git version not found: ${ref}"
+    return 1
+}
+
+validate_git_checkout_head() {
+    local repo_dir="$1"
+
+    if [[ ! -d "$repo_dir/.git" ]]; then
+        return 0
+    fi
+    if git --git-dir="$repo_dir/.git" --work-tree="$repo_dir" rev-parse --verify --quiet 'HEAD^{commit}' >/dev/null 2>&1; then
+        return 0
+    fi
+
+    ui_error "Git checkout has no commit: ${repo_dir}"
+    ui_info "Move or remove this incomplete checkout, then retry the installer."
     return 1
 }
 
@@ -2766,6 +2888,7 @@ install_openclaw_from_git() {
     ensure_pnpm
     ensure_pnpm_binary_for_scripts
 
+    validate_git_checkout_head "$repo_dir" || return 1
     if [[ ! -d "$repo_dir" ]]; then
         mkdir -p "$(dirname "$repo_dir")"
         run_quiet_step "Cloning OpenClaw" git clone "$repo_url" "$repo_dir"
@@ -2983,7 +3106,7 @@ maybe_open_dashboard() {
     if ! "$claw" dashboard --help >/dev/null 2>&1; then
         return 0
     fi
-    "$claw" dashboard || true
+    run_with_safe_stdin "$claw" dashboard || true
 }
 
 has_openclaw_config() {
@@ -3434,7 +3557,7 @@ main() {
             if (( doctor_ok )); then
                 should_open_dashboard=true
                 ui_info "Updating plugins"
-                OPENCLAW_UPDATE_IN_PROGRESS=1 "$claw" plugins update --all || true
+                OPENCLAW_UPDATE_IN_PROGRESS=1 run_with_safe_stdin "$claw" plugins update --all || true
             else
                 ui_warn "Doctor failed; skipping plugin updates"
             fi
@@ -3466,7 +3589,7 @@ main() {
                 ui_info "Gateway daemon detected; would restart (${user_claw} daemon restart)"
             else
                 ui_info "Gateway daemon detected; restarting"
-                if OPENCLAW_UPDATE_IN_PROGRESS=1 "$claw" daemon restart >/dev/null 2>&1; then
+                if OPENCLAW_UPDATE_IN_PROGRESS=1 "$claw" daemon restart < /dev/null >/dev/null 2>&1; then
                     ui_success "Gateway restarted"
                 else
                     ui_warn "Gateway restart failed; try: ${user_claw} daemon restart"

@@ -1,9 +1,18 @@
 // Tests queue drain restart behavior when follow-up runs chain together.
 import { importFreshModule } from "openclaw/plugin-sdk/test-fixtures";
 import { describe, expect, it, vi } from "vitest";
+import {
+  getActiveGatewayRootWorkCount,
+  isGatewaySubordinateWorkAdmissionClosed,
+  resetGatewayWorkAdmission,
+  tryBeginGatewayRootWorkAdmission,
+  tryBeginGatewaySuspendAdmission,
+} from "../../process/gateway-work-admission.js";
+import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
+import { captureEnv, setTestEnvValue } from "../../test-utils/env.js";
 import type { FollowupRun, QueueSettings } from "./queue.js";
 import {
-  clearFollowupQueue,
+  clearSessionQueues,
   enqueueFollowupRun,
   FollowupRunDeferredError,
   scheduleFollowupDrain,
@@ -13,11 +22,87 @@ import {
   createQueueTestRun as createRun,
   installQueueRuntimeErrorSilencer,
 } from "./queue.test-helpers.js";
-import { getExistingFollowupQueue } from "./queue/state.js";
+import { resetRecentQueuedMessageIdDedupe } from "./queue/enqueue.test-support.js";
+import { clearFollowupQueue, getExistingFollowupQueue } from "./queue/state.js";
 
 installQueueRuntimeErrorSilencer();
 
 describe("followup queue drain restart after idle window", () => {
+  it("keeps a detached drain on a live root after its enqueue request returns", async () => {
+    resetGatewayWorkAdmission();
+    const key = `test-detached-drain-root-${Date.now()}`;
+    const settings: QueueSettings = { mode: "followup", debounceMs: 0, cap: 50 };
+    const parentReleased = createDeferred<void>();
+    const drained = createDeferred<void>();
+    const parent = tryBeginGatewayRootWorkAdmission();
+    if (!parent) {
+      throw new Error("expected parent Gateway work admission");
+    }
+    let suspensionStarted = false;
+    let subordinateAdmissionClosed: boolean | undefined;
+    let activeRootCountDuringDrain: number | undefined;
+
+    try {
+      await parent.run(async () => {
+        enqueueFollowupRun(key, createRun({ prompt: "detached" }), settings);
+        scheduleFollowupDrain(key, async () => {
+          await parentReleased.promise;
+          const suspension = tryBeginGatewaySuspendAdmission(() => {});
+          suspensionStarted = suspension !== null;
+          try {
+            subordinateAdmissionClosed = isGatewaySubordinateWorkAdmissionClosed();
+            activeRootCountDuringDrain = getActiveGatewayRootWorkCount();
+          } finally {
+            suspension?.rollback();
+            drained.resolve();
+          }
+        });
+      });
+
+      parent.release();
+      parentReleased.resolve();
+      await drained.promise;
+
+      expect(suspensionStarted).toBe(true);
+      expect(subordinateAdmissionClosed).toBe(false);
+      expect(activeRootCountDuringDrain).toBe(1);
+      await vi.waitFor(() => {
+        expect(getActiveGatewayRootWorkCount()).toBe(0);
+      });
+    } finally {
+      parent.release();
+      parentReleased.resolve();
+      clearSessionQueues([key]);
+      resetGatewayWorkAdmission();
+    }
+  });
+
+  it("releases a detached drain root when its queue is cleared during debounce", async () => {
+    resetGatewayWorkAdmission();
+    const env = captureEnv(["OPENCLAW_TEST_FAST"]);
+    setTestEnvValue("OPENCLAW_TEST_FAST", "0");
+    const key = `test-cleared-debounce-root-${Date.now()}`;
+    const settings: QueueSettings = { mode: "followup", debounceMs: 60_000, cap: 50 };
+
+    try {
+      enqueueFollowupRun(key, createRun({ prompt: "clear during debounce" }), settings);
+      scheduleFollowupDrain(key, async () => {});
+      await vi.waitFor(() => {
+        expect(getActiveGatewayRootWorkCount()).toBe(1);
+      });
+
+      clearSessionQueues([key]);
+
+      await vi.waitFor(() => {
+        expect(getActiveGatewayRootWorkCount()).toBe(0);
+      });
+    } finally {
+      clearSessionQueues([key]);
+      env.restore();
+      resetGatewayWorkAdmission();
+    }
+  });
+
   it("does not retain stale callbacks when scheduleFollowupDrain runs with an empty queue", async () => {
     const key = `test-no-stale-callback-${Date.now()}`;
     const settings: QueueSettings = { mode: "followup", debounceMs: 0, cap: 50 };
@@ -173,13 +258,12 @@ describe("followup queue drain restart after idle window", () => {
       import.meta.url,
       "./queue/enqueue.js?scope=restart-b",
     );
-    const { clearSessionQueues } = await import("./queue.js");
     const key = `test-idle-window-cross-module-${Date.now()}`;
     const calls: FollowupRun[] = [];
     const settings: QueueSettings = { mode: "followup", debounceMs: 0, cap: 50 };
     const firstProcessed = createDeferred<void>();
 
-    enqueueB.resetRecentQueuedMessageIdDedupe();
+    resetRecentQueuedMessageIdDedupe();
 
     try {
       const runFollowup = async (run: FollowupRun) => {
@@ -217,7 +301,7 @@ describe("followup queue drain restart after idle window", () => {
     } finally {
       clearSessionQueues([key]);
       drainA.clearFollowupDrainCallback(key);
-      enqueueB.resetRecentQueuedMessageIdDedupe();
+      resetRecentQueuedMessageIdDedupe();
     }
   });
 
@@ -313,38 +397,100 @@ describe("followup queue drain restart after idle window", () => {
     expect(freshCalls[0]?.prompt).toBe("wait-for-lane");
   });
 
-  it("preserves overflow summaries across deferred retries", async () => {
-    const key = `test-deferred-summary-retry-${Date.now()}`;
-    const prompts: string[] = [];
-    const settings: QueueSettings = {
-      mode: "followup",
-      debounceMs: 0,
-      cap: 1,
-      dropPolicy: "summarize",
-    };
-    const retried = createDeferred<void>();
-    let attempts = 0;
+  it.each([
+    [true, "external_user", true],
+    [true, "inter_session", false],
+    [true, "internal_system", false],
+    [false, "external_user", false],
+  ] as const)(
+    "preserves overflow summaries and human ownership for %s/%s",
+    async (senderIsOwner, kind, owner) => {
+      const key = `test-deferred-summary-retry-${Date.now()}`;
+      const prompts: string[] = [];
+      const followups: FollowupRun[] = [];
+      const inputProvenance = { kind, sourceTool: "test" };
+      const settings: QueueSettings = {
+        mode: "followup",
+        debounceMs: 0,
+        cap: 1,
+        dropPolicy: "summarize",
+      };
+      const retried = createDeferred<void>();
+      let attempts = 0;
 
-    const runFollowup = async (run: FollowupRun) => {
-      attempts++;
-      prompts.push(run.prompt);
-      if (attempts === 1) {
-        throw new FollowupRunDeferredError("reply lane busy");
+      const runFollowup = async (run: FollowupRun) => {
+        attempts++;
+        prompts.push(run.prompt);
+        followups.push(run);
+        if (attempts === 1) {
+          throw new FollowupRunDeferredError("reply lane busy");
+        }
+        retried.resolve();
+      };
+
+      for (const prompt of ["dropped while busy", "kept while busy"]) {
+        const followup = createRun({ prompt });
+        followup.run.senderIsOwner = senderIsOwner;
+        followup.run.inputProvenance = inputProvenance;
+        enqueueFollowupRun(key, followup, settings);
       }
-      retried.resolve();
-    };
+      scheduleFollowupDrain(key, runFollowup);
 
-    enqueueFollowupRun(key, createRun({ prompt: "dropped while busy" }), settings);
-    enqueueFollowupRun(key, createRun({ prompt: "kept while busy" }), settings);
-    scheduleFollowupDrain(key, runFollowup);
+      await retried.promise;
 
-    await retried.promise;
+      expect(attempts).toBe(2);
+      for (const run of followups) {
+        expect(run).toMatchObject({
+          run: { senderIsOwner, inputProvenance },
+          userTurnTranscriptRecorder: {
+            message: { provenance: inputProvenance, __openclaw: { senderIsOwner: owner } },
+          },
+        });
+      }
+      expect(prompts[0]).toContain("Dropped 1 message");
+      expect(prompts[0]).toContain("dropped while busy");
+      expect(prompts[1]).toContain("Dropped 1 message");
+      expect(prompts[1]).toContain("dropped while busy");
+    },
+  );
 
-    expect(attempts).toBe(2);
-    expect(prompts[0]).toContain("Dropped 1 message");
-    expect(prompts[0]).toContain("dropped while busy");
-    expect(prompts[1]).toContain("Dropped 1 message");
-    expect(prompts[1]).toContain("dropped while busy");
+  it.each([
+    [true, "external_user", true],
+    [true, "inter_session", false],
+    [true, "internal_system", false],
+    [false, "external_user", false],
+  ] as const)("keeps collected human ownership for %s/%s", async (senderIsOwner, kind, owner) => {
+    const key = `test-collected-human-owner-${Date.now()}`;
+    const inputProvenance = { kind, sourceTool: "test" };
+    const settings: QueueSettings = { mode: "collect", debounceMs: 0 };
+    const collected = createDeferred<FollowupRun>();
+    for (const prompt of ["first", "second"]) {
+      const followup = createRun({ prompt });
+      followup.run.senderIsOwner = senderIsOwner;
+      followup.run.inputProvenance = inputProvenance;
+      followup.userTurnTranscriptRecorder = createUserTurnTranscriptRecorder({
+        input: { text: prompt, senderIsOwner, provenance: inputProvenance },
+        target: {
+          agentId: followup.run.agentId,
+          sessionId: followup.run.sessionId,
+          sessionKey: key,
+          sessionEntry: undefined,
+        },
+      });
+      enqueueFollowupRun(key, followup, settings);
+    }
+    scheduleFollowupDrain(key, async (run) => collected.resolve(run));
+    const followup = await collected.promise;
+    expect(followup.run.senderIsOwner).toBe(senderIsOwner);
+    for (const message of [
+      followup.userTurnTranscriptRecorder?.message,
+      await followup.userTurnTranscriptRecorder?.resolveMessage(),
+    ]) {
+      expect(message).toMatchObject({
+        provenance: inputProvenance,
+        __openclaw: { senderIsOwner: owner },
+      });
+    }
   });
 
   it("merges overflow summaries added while a deferred retry is waiting", async () => {
@@ -438,7 +584,6 @@ describe("followup queue drain restart after idle window", () => {
       setImmediate(resolve);
     });
 
-    const { clearSessionQueues } = await import("./queue.js");
     clearSessionQueues([key]);
 
     enqueueFollowupRun(key, createRun({ prompt: "after-clear" }), settings);
