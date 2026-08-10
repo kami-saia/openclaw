@@ -1847,7 +1847,15 @@ describe("qa test file scenario runner", () => {
     );
 
     expect(result.executionKind).toBe("script");
-    expect(result.results[0]).toMatchObject({ status: "blocked" });
+    // FORK: the two visual cells are always blocked by --skip-visual-proof, but the CLI cell runs
+    // `node openclaw.mjs --help`, which only succeeds in a tree that has been built. With
+    // allowBlockedEvidence the run is "pass" as soon as any cell passes, so hardcoding "blocked"
+    // silently asserts "this repo has no dist/". Derive the expectation from the evidence instead.
+    const cliEntry = evidence.entries.find((entry) => entry.test.id === "ux-matrix.cli.entrypoint-help");
+    expect(cliEntry).toBeDefined();
+    expect(result.results[0]).toMatchObject({
+      status: cliEntry?.result.status === "pass" ? "pass" : "blocked",
+    });
     expect(result.results[0]?.producerEvidence?.entries).toHaveLength(3);
     expect(evidence.entries.map((entry) => entry.test.id)).toEqual([
       "ux-matrix.qa-lab.producer-artifact-fixture",
