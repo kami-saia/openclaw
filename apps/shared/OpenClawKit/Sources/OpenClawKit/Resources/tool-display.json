@@ -1137,13 +1137,6 @@
         "model"
       ]
     },
-    "compact": {
-      "emoji": "🗜️",
-      "title": "Compact",
-      "detailKeys": [
-        "summary"
-      ]
-    },
     "sessions_yield": {
       "emoji": "⏸️",
       "title": "Yield",
