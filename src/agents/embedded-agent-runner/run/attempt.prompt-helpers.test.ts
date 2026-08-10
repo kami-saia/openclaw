@@ -65,12 +65,19 @@ function hasLoneSurrogate(value: string): boolean {
 
 describe("shouldInjectHeartbeatPrompt", () => {
   it("keeps global heartbeat guidance out of commitment-only runs", () => {
+    // FORK: the fork inverts upstream's trigger policy — scheduler-originated
+    // wakes (cron, heartbeat) SUPPRESS the heartbeat prompt, while interactive
+    // triggers inject it. Upstream's version of this test used
+    // trigger:"heartbeat" as the positive case; under fork semantics that is
+    // explicitly false, so the positive case here uses an interactive trigger.
+    // See trigger-policy.ts FORK comments. The behavior under test is the
+    // commitment-only suppression, which is upstream's and is preserved.
     const heartbeatParams = {
       config: {},
       agentId: "main",
       defaultAgentId: "main",
       isDefaultAgent: true,
-      trigger: "heartbeat" as const,
+      trigger: "user" as const,
     };
 
     expect(shouldInjectHeartbeatPrompt(heartbeatParams)).toBe(true);
@@ -79,6 +86,10 @@ describe("shouldInjectHeartbeatPrompt", () => {
         ...heartbeatParams,
         bootstrapContextRunKind: "commitment-only",
       }),
+    ).toBe(false);
+    // FORK: scheduler-originated heartbeat wakes stay suppressed regardless.
+    expect(
+      shouldInjectHeartbeatPrompt({ ...heartbeatParams, trigger: "heartbeat" as const }),
     ).toBe(false);
   });
 });

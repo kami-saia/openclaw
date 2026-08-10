@@ -9,7 +9,6 @@ import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   testing,
-  buildQaForcedRuntimeEnvPatch,
   buildQaRuntimeEnv,
   resolveQaControlUiRoot,
   startQaGatewayChild,
@@ -99,17 +98,18 @@ function requireAuthProfile(
 
 describe("forced runtime environment", () => {
   it("pins forced Codex mock runs to the managed provider endpoint", () => {
+    const modelCatalogPath = "/tmp/qa-codex-model-catalog.json";
     expect(
-      buildQaForcedRuntimeEnvPatch({
+      testing.buildQaForcedRuntimeEnvPatch({
         forcedRuntime: "codex",
         providerMode: "mock-openai",
         providerBaseUrl: "http://127.0.0.1:44080/v1/",
+        codexModelCatalogPath: modelCatalogPath,
       }),
     ).toEqual({
       OPENCLAW_BUILD_PRIVATE_QA: "1",
       OPENCLAW_QA_FORCE_RUNTIME: "codex",
-      OPENCLAW_CODEX_APP_SERVER_ARGS:
-        "app-server -c openai_base_url=http://127.0.0.1:44080/v1 --listen stdio://",
+      OPENCLAW_CODEX_APP_SERVER_ARGS: `app-server -c openai_base_url=http://127.0.0.1:44080/v1 -c ${JSON.stringify(`model_catalog_json=${modelCatalogPath}`)} -c sandbox_workspace_write.exclude_tmpdir_env_var=true -c sandbox_workspace_write.exclude_slash_tmp=true --listen stdio://`,
       OPENAI_API_KEY: ["qa", "mock", "openai", "key"].join("-"),
       CODEX_API_KEY: ["qa", "mock", "openai", "key"].join("-"),
     });
@@ -117,11 +117,21 @@ describe("forced runtime environment", () => {
 
   it("fails closed when a forced Codex mock run lacks its managed endpoint", () => {
     expect(() =>
-      buildQaForcedRuntimeEnvPatch({
+      testing.buildQaForcedRuntimeEnvPatch({
         forcedRuntime: "codex",
         providerMode: "mock-openai",
       }),
     ).toThrow("forced Codex mock QA requires the managed mock provider URL");
+  });
+
+  it("fails closed when a forced Codex mock run lacks its staged model catalog", () => {
+    expect(() =>
+      testing.buildQaForcedRuntimeEnvPatch({
+        forcedRuntime: "codex",
+        providerMode: "mock-openai",
+        providerBaseUrl: "http://127.0.0.1:44080/v1/",
+      }),
+    ).toThrow("forced Codex mock QA requires the staged native model catalog");
   });
 });
 
