@@ -126,7 +126,11 @@ import {
 } from "./tools/cron-tool.js";
 import { wrapToolWithGatewayCallerIdentity } from "./tools/gateway-caller-context.js";
 
-const MEMORY_FLUSH_ALLOWED_TOOL_NAMES = new Set(["read", "write"]);
+// FORK: `compact` joins the flush-run allowlist so the pre-compaction turn can
+// summarize itself in-session (agent compaction) instead of handing the
+// transcript to a detached stranger model. The tool only exists when
+// agents.defaults.compaction.mode === "agent".
+const MEMORY_FLUSH_ALLOWED_TOOL_NAMES = new Set(["read", "write", "compact"]);
 
 type GuardContainerMount = {
   containerRoot: string;
@@ -450,6 +454,13 @@ type OpenClawCodingToolsOptions = {
   senderIsOwner?: boolean;
   /** Auth profiles already loaded for this run; used for prompt-time tool availability. */
   authProfileStore?: AuthProfileStore;
+  /** FORK: live session handles for the agent-driven `compact` tool. */
+  compactToolRuntime?: {
+    getSessionManager?: () => unknown;
+    getSessionStoreContext?: () => unknown;
+    updateAgentMessagesAfterCompaction?: (toolCallId: string, resultText: string) => void;
+    withSessionWriteLock?: <T>(run: () => Promise<T> | T) => Promise<T>;
+  };
   /** Callback invoked when sessions_yield tool is called. */
   onYield?: (message: string) => Promise<void> | void;
   /** Optional instrumentation callback for tool preparation stage timing. */
@@ -1056,6 +1067,12 @@ function createOpenClawCodingToolsInternal(options?: OpenClawCodingToolsOptions)
             requesterSenderId: options?.senderId,
             senderIsOwner: options?.senderIsOwner,
             authProfileStore: options?.authProfileStore,
+            // FORK: agent compaction tool runtime handles.
+            getSessionManager: options?.compactToolRuntime?.getSessionManager as never,
+            getSessionStoreContext: options?.compactToolRuntime?.getSessionStoreContext as never,
+            updateAgentMessagesAfterCompaction:
+              options?.compactToolRuntime?.updateAgentMessagesAfterCompaction,
+            withSessionWriteLock: options?.compactToolRuntime?.withSessionWriteLock,
             sessionId: options?.sessionId,
             conversationRecall: options?.conversationRecall,
             oneShotCliRun: options?.oneShotCliRun,
@@ -1099,7 +1116,7 @@ function createOpenClawCodingToolsInternal(options?: OpenClawCodingToolsOptions)
   }
   const unavailableCoreToolReason =
     isMemoryFlushRun && memoryFlushWritePath
-      ? "memory-triggered compaction runs expose only read and append-only write"
+      ? "memory-triggered compaction runs expose only read, append-only write, and compact"
       : undefined;
   const toolsForMessageProvider = filterToolsByMessageProvider(
     toolsForMemoryFlush,

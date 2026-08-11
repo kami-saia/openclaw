@@ -323,6 +323,17 @@ export type AgentDefaultsConfig = {
   /** Owner for ambient OpenClaw system-agent/Custodian inference. */
   systemAgent?: {
     agentId?: string;
+    /**
+     * FORK: upstream arms system-agent approval only on the Control UI chat
+     * path, so an operator on a delegated surface (Discord/CLI) can never
+     * approve a mutation and sees no card at all. When true, delegated chats
+     * reuse the SAME host-side approval classifier the UI uses: consent is
+     * read from the operator's own message text, never from a model assertion.
+     * The model still cannot self-approve (the registered operation hash is
+     * re-checked in system-agent-tool.ts) and unattended wizard/TUI setup
+     * navigation stays refused.
+     */
+    trustDelegatedOperatorApproval?: boolean;
   };
   /** Max concurrent agent runs across all conversations. Default: min(16, max(8, available CPU parallelism)). */
   maxConcurrent?: number;
@@ -355,7 +366,7 @@ export type AgentDefaultsConfig = {
   sandbox?: AgentSandboxConfig;
 };
 
-export type AgentCompactionMode = "default" | "safeguard";
+export type AgentCompactionMode = "default" | "safeguard" | "agent";
 export type AgentCompactionPostIndexSyncMode = "off" | "async" | "await";
 export type AgentCompactionIdentifierPolicy = "strict" | "off";
 export type AgentCompactionQualityGuardConfig = {

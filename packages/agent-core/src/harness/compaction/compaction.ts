@@ -576,7 +576,18 @@ function createSummarizationOptions(
   signal: AbortSignal | undefined,
   thinkingLevel: ThinkingLevel | undefined,
 ): SimpleStreamOptions {
-  const options: SimpleStreamOptions = { maxTokens, signal, apiKey, headers };
+  // FORK: compaction is a single-shot call with no higher-level retry budget
+  // (compaction-diag shows attempt=1 maxAttempts=1). The Anthropic/OpenAI SDK
+  // clients default to maxRetries: 0 in this codebase, so a transient provider
+  // 403/5xx kills compaction outright even when the transport marks the
+  // response x-should-retry=true. Give summarization its own retry budget.
+  const options: SimpleStreamOptions = {
+    maxTokens,
+    signal,
+    apiKey,
+    headers,
+    maxRetries: 4,
+  };
   const fableReasoning =
     (model.api === "anthropic-messages" || model.api === "bedrock-converse-stream") &&
     resolveClaudeFable5ModelIdentity(model) !== undefined;

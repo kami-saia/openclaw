@@ -44,6 +44,8 @@ export function prepareEmbeddedAttemptToolBase(params: {
   effectiveCwd: string;
   effectiveWorkspace: string;
   markCoreToolStage: (name: string) => void;
+  /** FORK: live session handles for the agent-driven `compact` tool. */
+  compactToolRuntime?: OpenClawCodingToolsOptions["compactToolRuntime"];
   onYield: NonNullable<OpenClawCodingToolsOptions["onYield"]>;
   resolvedWorkspace: string;
   runAbortController: AbortController;
@@ -201,6 +203,7 @@ export function prepareEmbeddedAttemptToolBase(params: {
     : (() => {
         const allTools = createOpenClawCodingTools({
           agentId: params.sessionAgentId,
+          ...(params.compactToolRuntime ? { compactToolRuntime: params.compactToolRuntime } : {}),
           ...buildEmbeddedAttemptToolRunContext({ ...attempt, trace: params.runTrace }),
           messageChannel: attempt.messageChannel,
           clientCaps: attempt.clientCaps,

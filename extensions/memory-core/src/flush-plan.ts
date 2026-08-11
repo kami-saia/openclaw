@@ -65,6 +65,33 @@ const DEFAULT_MEMORY_FLUSH_SYSTEM_PROMPT = [
   `You may reply, but usually ${SILENT_REPLY_TOKEN} is correct.`,
 ].join(" ");
 
+// FORK: agent compaction (agents.defaults.compaction.mode === "agent").
+// The same pre-compaction turn drives compaction itself: the model calls
+// `compact({ summary })` and the tool writes memory/YYYY-MM-DD.md
+// programmatically, so there is no detached summarizer and no `write` call.
+const AGENT_COMPACTION_PROMPT = [
+  "Pre-compaction turn. This session is about to be compacted.",
+  "Call the `compact` tool once with a complete structured summary of this conversation.",
+  "The tool records the summary to today's memory file for you; do not call `write`.",
+  "Include, in this order: goal; constraints and preferences; decisions;",
+  "corrections and retractions; open threads and next steps; critical context",
+  "(paths, ids, commands, numbers, exact error strings).",
+  "Preserve decisions, corrections, retractions, and any user statement that",
+  "changed direction verbatim, as written.",
+  "Write it so a fresh instance of you could resume mid-task without asking anything.",
+  `After the tool returns, reply ${SILENT_REPLY_TOKEN}.`,
+].join(" ");
+
+const AGENT_COMPACTION_SYSTEM_PROMPT = [
+  "Pre-compaction turn (agent compaction).",
+  "You are summarizing your own conversation; older messages are replaced by",
+  "what you pass to `compact`. Anything you omit is lost permanently.",
+  "Losing identity, user preferences, corrections, or in-flight work is the",
+  "failure mode; length is not.",
+  "Do not write memory files by hand during this turn; `compact` persists the summary.",
+  `You may reply, but usually ${SILENT_REPLY_TOKEN} is correct.`,
+].join(" ");
+
 function formatDateStampInTimezone(nowMs: number, timezone: string): string {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: timezone,
@@ -142,10 +169,13 @@ export function buildMemoryFlushPlan(
   const dateStamp = formatDateStampInTimezone(nowMs, userTimezone);
   const relativePath = `memory/${dateStamp}.md`;
 
-  const promptBase = ensureNoReplyHint(ensureMemoryFlushSafetyHints(DEFAULT_MEMORY_FLUSH_PROMPT));
-  const systemPrompt = ensureNoReplyHint(
-    ensureMemoryFlushSafetyHints(DEFAULT_MEMORY_FLUSH_SYSTEM_PROMPT),
-  );
+  const agentCompaction = cfg?.agents?.defaults?.compaction?.mode === "agent";
+  const promptBase = agentCompaction
+    ? ensureNoReplyHint(AGENT_COMPACTION_PROMPT)
+    : ensureNoReplyHint(ensureMemoryFlushSafetyHints(DEFAULT_MEMORY_FLUSH_PROMPT));
+  const systemPrompt = agentCompaction
+    ? ensureNoReplyHint(AGENT_COMPACTION_SYSTEM_PROMPT)
+    : ensureNoReplyHint(ensureMemoryFlushSafetyHints(DEFAULT_MEMORY_FLUSH_SYSTEM_PROMPT));
 
   return {
     softThresholdTokens,

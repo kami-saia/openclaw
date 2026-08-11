@@ -221,6 +221,9 @@ export async function recoverEmbeddedRunAttempt(input: {
     attemptCompactionCount,
     prepareCurrentTranscriptRetry: sessionPromptState.continueFromCurrentTranscript,
     prepareCompactedTranscriptRetry: sessionPromptState.prepareCompactedTranscriptRetry,
+    // FORK: agent-compaction overflow fallback resend prompt.
+    prepareAgentOverflowRetry: (prompt: string) =>
+      sessionPromptState.activateInternalPrompt(prompt, true),
   });
   if (overflowRecovery.action === "retry") {
     return retry();

@@ -22,6 +22,11 @@ import {
   type ToolSearchCatalogToolExecutor,
 } from "../../tool-search.js";
 import { log } from "../logger.js";
+// FORK: overflow fallback session-manager registry.
+import {
+  registerAgentOverflowSessionManager,
+  unregisterAgentOverflowSessionManager,
+} from "./agent-overflow-fallback.js";
 import {
   createEmbeddedAttemptExternalAbortController,
   type EmbeddedAttemptAbortStatePort,
@@ -108,6 +113,14 @@ export async function runEmbeddedAttempt(
   let bundleLspRuntime: Awaited<ReturnType<typeof createBundleLspToolRuntime>> | undefined;
   let toolSearchCatalogRef: ToolSearchCatalogRef | undefined;
   let toolSearchCatalogApplied = false;
+  // FORK: late-bound live handles for the agent-driven `compact` tool. The tool
+  // set is constructed before the session/session-manager/lock exist, so the
+  // tool closes over this ref instead of the values.
+  const compactLive: {
+    sessionManager?: unknown;
+    session?: { agent?: { state?: { messages?: unknown[] } } };
+    withLock?: <T>(run: () => Promise<T> | T) => Promise<T>;
+  } = {};
   const cleanupEmbeddedPrepResourcesAfterEarlyExit = async () => {
     if (toolSearchCatalogApplied) {
       clearToolSearchCatalog({
@@ -203,6 +216,50 @@ export async function runEmbeddedAttempt(
         prepareEmbeddedAttemptToolBase({
           agentDir,
           attempt: params,
+          compactToolRuntime: {
+            getSessionManager: () => compactLive.sessionManager,
+            withSessionWriteLock: (run) =>
+              compactLive.withLock ? compactLive.withLock(run) : Promise.resolve(run()),
+            updateAgentMessagesAfterCompaction: (toolCallId, resultText) => {
+              const manager = compactLive.sessionManager as
+                | { buildSessionContext: () => { messages: unknown[] } }
+                | undefined;
+              const state = compactLive.session?.agent?.state;
+              if (!manager || !state) {
+                return;
+              }
+              try {
+                const ctx = manager.buildSessionContext();
+                const messages = [...(ctx.messages as Array<Record<string, unknown>>)];
+                const last = messages.at(-1);
+                const lastContent =
+                  last && Array.isArray(last.content)
+                    ? (last.content as Array<Record<string, unknown>>)
+                    : [];
+                // The SDK appends the assistant toolCall before execute() and the
+                // real toolResult after it returns; swapping state mid-execute
+                // would orphan the toolCall and transcript-repair would replace
+                // it with a synthetic error, killing the turn.
+                const hasOrphan =
+                  Boolean(last) &&
+                  last?.role === "assistant" &&
+                  lastContent.some((b) => b?.type === "toolCall" && b?.id === toolCallId);
+                if (hasOrphan) {
+                  messages.push({
+                    role: "toolResult",
+                    toolCallId,
+                    toolName: "compact",
+                    content: [{ type: "text", text: resultText }],
+                    isError: false,
+                    timestamp: Date.now(),
+                  });
+                }
+                state.messages = messages as never;
+              } catch {
+                /* best-effort: compaction already landed on disk */
+              }
+            },
+          },
           effectiveCwd,
           effectiveWorkspace,
           markCoreToolStage: (name) => corePluginToolStages.mark(name),
@@ -445,9 +502,14 @@ export async function runEmbeddedAttempt(
               },
               onSessionCreated: (createdSession) => {
                 session = createdSession;
+                compactLive.session = createdSession as never;
               },
               onSessionManagerCreated: (createdSessionManager) => {
                 sessionManager = createdSessionManager;
+                compactLive.sessionManager = createdSessionManager;
+                // FORK: publish for the overflow fallback, which runs outside
+                // this closure in the recovery path.
+                registerAgentOverflowSessionManager(params.runId, createdSessionManager);
               },
               onSessionSettleTrackerReady: (build) => {
                 buildAbortSettlePromise = build;
@@ -561,6 +623,8 @@ export async function runEmbeddedAttempt(
   } finally {
     externalAbortController.dispose();
     clearToolActivityRun(params.runId);
+    // FORK: drop the overflow-fallback session manager handle for this run.
+    unregisterAgentOverflowSessionManager(params.runId);
     try {
       await cleanupEmbeddedPrepResourcesAfterEarlyExit();
     } catch (cleanupErr) {

@@ -174,10 +174,10 @@ describe("tool-policy-pipeline", () => {
       allow: ["apply_patch", "wat"],
       label: "tools.allow",
       unavailableCoreToolReason:
-        "memory-triggered compaction runs expose only read and append-only write",
+        "memory-triggered compaction runs expose only read, append-only write, and compact",
     });
     expect(warnings).toEqual([
-      "tools: tools.allow allowlist contains unknown entries (apply_patch, wat). Some entries are shipped core tools but unavailable here: memory-triggered compaction runs expose only read and append-only write; other entries won't match any tool unless the plugin is enabled.",
+      "tools: tools.allow allowlist contains unknown entries (apply_patch, wat). Some entries are shipped core tools but unavailable here: memory-triggered compaction runs expose only read, append-only write, and compact; other entries won't match any tool unless the plugin is enabled.",
     ]);
   });
 

@@ -140,7 +140,9 @@ export const AgentDefaultsSchema = z
     compaction: z
       .object({
         enabled: z.boolean().optional(),
-        mode: z.union([z.literal("default"), z.literal("safeguard")]).optional(),
+        mode: z
+          .union([z.literal("default"), z.literal("safeguard"), z.literal("agent")])
+          .optional(),
         provider: z.string().optional(),
         thinkingLevel: AgentThinkingLevelSchema.optional(),
         keepRecentTokens: z.number().int().positive().optional(),
@@ -204,6 +206,12 @@ export const AgentDefaultsSchema = z
     systemAgent: z
       .object({
         agentId: z.string().trim().min(1).optional(),
+        // FORK: upstream locks delegated chats (Discord/CLI/etc) out of the
+        // host-side approval classifier entirely, so an operator on a non-UI
+        // surface can never approve a mutation. When true, delegated chats use
+        // the SAME host-side classifier as the Control UI: approval is judged
+        // from the operator's own message text, never from a model assertion.
+        trustDelegatedOperatorApproval: z.boolean().optional(),
       })
       .strict()
       .optional(),

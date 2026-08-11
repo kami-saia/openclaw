@@ -51,6 +51,8 @@ import { resolveToolLoopDetectionConfig } from "./tool-loop-detection-config.js"
 import { createAgentsListTool } from "./tools/agents-list-tool.js";
 import { createAskUserTool } from "./tools/ask-user-tool.js";
 import type { AnyAgentTool } from "./tools/common.js";
+// FORK: agent-driven compaction tool (restored; see compact-tool.ts header).
+import { createCompactTool } from "./tools/compact-tool.js";
 import { createComputerTool } from "./tools/computer-tool.js";
 import {
   createConversationsListTool,
@@ -183,6 +185,16 @@ export function createOpenClawTools(
     swarmOutputSchema?: Record<string, unknown>;
     /** If true, include the heartbeat response tool for structured heartbeat outcomes. */
     enableHeartbeatTool?: boolean;
+    /** FORK: live SessionManager for the agent-driven `compact` tool. */
+    getSessionManager?: Parameters<typeof createCompactTool>[0]["getSessionManager"];
+    /** FORK: session store handle so `compact` can update the compaction counter. */
+    getSessionStoreContext?: Parameters<typeof createCompactTool>[0]["getSessionStoreContext"];
+    /** FORK: refresh live agent messages after an agent-driven compaction. */
+    updateAgentMessagesAfterCompaction?: Parameters<
+      typeof createCompactTool
+    >[0]["updateAgentMessagesAfterCompaction"];
+    /** FORK: run `compact` session writes inside the embedded attempt write lock. */
+    withSessionWriteLock?: Parameters<typeof createCompactTool>[0]["withSessionWriteLock"];
     /** If true, skip plugin tool resolution and return only shipped core tools. */
     disablePluginTools?: boolean;
     /**
@@ -416,6 +428,18 @@ export function createOpenClawTools(
         conversationReadOrigin: options?.conversationReadOrigin,
       });
   const heartbeatTool = options?.enableHeartbeatTool ? createHeartbeatResponseTool() : null;
+  // FORK: prefer the live run session key over the sandbox/policy key — the
+  // transcript is stored under the routed live run key.
+  const compactTool = createCompactTool({
+    sessionKey: options?.runSessionKey ?? options?.agentSessionKey,
+    sessionId: options?.sessionId,
+    config: resolvedConfig,
+    workspaceDir,
+    getSessionManager: options?.getSessionManager,
+    getSessionStoreContext: options?.getSessionStoreContext,
+    updateAgentMessagesAfterCompaction: options?.updateAgentMessagesAfterCompaction,
+    withSessionWriteLock: options?.withSessionWriteLock,
+  });
   options?.recordToolPrepStage?.("openclaw-tools:message-tool");
   const nodesToolBase = createNodesTool({
     agentSessionKey: options?.agentSessionKey,
@@ -537,7 +561,7 @@ export function createOpenClawTools(
             agentSessionKey: options?.runSessionKey ?? options?.agentSessionKey,
           }),
         ]),
-    ...collectPresentOpenClawTools([heartbeatTool]),
+    ...collectPresentOpenClawTools([heartbeatTool, compactTool]),
     createTtsTool({
       agentChannel: options?.agentChannel,
       config: resolvedConfig,

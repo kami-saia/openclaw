@@ -21,6 +21,12 @@ import {
   sessionLikelyHasOversizedToolResults,
   truncateOversizedToolResultsInActiveTarget,
 } from "../tool-result-truncation.js";
+// FORK: agent-compaction overflow fallback (turn-boundary cut + resend).
+import {
+  getAgentOverflowSessionManager,
+  hasAgentOverflowStash,
+  prepareAgentOverflowFallback,
+} from "./agent-overflow-fallback.js";
 import {
   compactEmbeddedRunForRecovery,
   type EmbeddedRunCompactionRecoveryInput,
@@ -56,6 +62,8 @@ export async function recoverEmbeddedRunOverflow(
     attemptCompactionCount: number;
     prepareCurrentTranscriptRetry: () => void;
     prepareCompactedTranscriptRetry: () => Promise<void>;
+    /** FORK: activate a synthetic internal user prompt for the retry. */
+    prepareAgentOverflowRetry?: (prompt: string) => void;
   },
 ): Promise<EmbeddedRunOverflowRecoveryOutcome> {
   const contextOverflowError =
@@ -130,6 +138,41 @@ export async function recoverEmbeddedRunOverflow(
   );
 
   const isCompactionFailure = isCompactionFailureError(errorText);
+
+  // FORK: agent-compaction overflow fallback. Before handing the transcript to
+  // a detached summarizer, cut the recent tail at a turn boundary and resend
+  // with an overflow prompt so the model compacts itself. The cut tail is
+  // restored by the `compact` tool once it runs.
+  if (
+    !isCompactionFailure &&
+    runParams.config?.agents?.defaults?.compaction?.mode === "agent" &&
+    input.prepareAgentOverflowRetry &&
+    !hasAgentOverflowStash(runParams.sessionKey, activeSession.id)
+  ) {
+    const overflowSessionManager = getAgentOverflowSessionManager(runParams.runId);
+    if (overflowSessionManager) {
+      const fallback = prepareAgentOverflowFallback({
+        sessionManager: overflowSessionManager,
+        ...(runParams.sessionKey ? { sessionKey: runParams.sessionKey } : {}),
+        sessionId: activeSession.id,
+      });
+      if (fallback) {
+        input.state.overflowCompactionAttempts += 1;
+        log.warn(
+          `[agent-overflow-fallback] engaged for ${input.provider}/${input.modelId}; ` +
+            `cutEntries=${fallback.cutEntryCount} diagId=${overflowDiagId}; ` +
+            "retrying with agent-driven compaction prompt",
+        );
+        input.prepareAgentOverflowRetry(fallback.prompt);
+        return { action: "retry" };
+      }
+      log.warn(
+        `[agent-overflow-fallback] no safe turn-boundary cut for ${input.provider}/${input.modelId}; ` +
+          "falling through to default overflow recovery",
+      );
+    }
+  }
+
   if (
     !isCompactionFailure &&
     input.attemptCompactionCount > 0 &&
