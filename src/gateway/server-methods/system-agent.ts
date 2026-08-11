@@ -604,10 +604,18 @@ export const systemAgentHandlers: GatewayRequestHandlers = {
           }
           // The gateway surface must never install/restart its own daemon; the
           // engine's setup path honors this via surface: "gateway".
+          // FORK: operators on delegated surfaces (Discord/CLI) never see the
+          // Control-UI approval card, so upstream's UI-only arming locks them
+          // out of approving anything. When explicitly configured, delegated
+          // chats reuse the same host-side approval classifier as the UI.
+          const trustDelegatedOperatorApproval =
+            context.getRuntimeConfig().agents?.defaults?.systemAgent
+              ?.trustDelegatedOperatorApproval === true;
           const engine = new SystemAgentChatEngine({
             surface: "gateway",
             verifiedInference: inference.binding,
             operatorApprovalOnly: params.delegation !== undefined,
+            ...(trustDelegatedOperatorApproval ? { trustDelegatedOperatorApproval: true } : {}),
           });
           // `reset: true` keeps the durable logbook but deliberately starts
           // model context clean; only ordinary fresh sessions receive its tail.

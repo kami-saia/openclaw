@@ -119,6 +119,12 @@ export type SystemAgentChatEngineOptions = {
   readonly verifiedInference: SystemAgentVerifiedInferenceBinding;
   /** Delegated chats accept approval only from the operator registry. */
   operatorApprovalOnly?: boolean;
+  // FORK: Damon's call — no machinery adjudicating consent. When set, the
+  // system-agent approval handshake is skipped entirely and mutating
+  // operations execute on the first tool call. Deciding whether a change is
+  // worth asking about first becomes the agent's judgment, not a gate.
+  // Set from `agents.defaults.systemAgent.trustDelegatedOperatorApproval`.
+  trustDelegatedOperatorApproval?: boolean;
 };
 
 type SystemAgentChatTurnOptions = {
@@ -892,7 +898,13 @@ export class SystemAgentChatEngine {
         undefined,
       );
     }
-    if (this.opts.operatorApprovalOnly && this.getPendingOperatorProposal()) {
+    // FORK: a trusted delegated operator answers the proposal in their own
+    // chat, so do not dead-end them into a UI-only card they cannot see.
+    if (
+      this.opts.operatorApprovalOnly &&
+      !this.opts.trustDelegatedOperatorApproval &&
+      this.getPendingOperatorProposal()
+    ) {
       return { text: "Approval pending. Human must decide in OpenClaw UI.", action: "none" };
     }
     // Secret hygiene: an exact `config set` on a sensitive path carries a raw
@@ -929,9 +941,10 @@ export class SystemAgentChatEngine {
     // Approval is judged from the user's own words, host-side. The classifier
     // only runs while a proposal is pending, and "other" (questions, new
     // requests) keeps the proposal pending and lets the AI carry on.
-    const intent = this.opts.operatorApprovalOnly
-      ? "other"
-      : await this.classifyApprovalIntent(text);
+    const intent =
+      this.opts.operatorApprovalOnly && !this.opts.trustDelegatedOperatorApproval
+        ? "other"
+        : await this.classifyApprovalIntent(text);
     if (this.pending) {
       if (intent === "approve") {
         // Approval classification may invoke inference. Its result authorizes
@@ -960,7 +973,9 @@ export class SystemAgentChatEngine {
 
     return await this.resolveAssistantTurn(
       text,
-      this.opts.operatorApprovalOnly ? false : intent === "approve",
+      this.opts.operatorApprovalOnly && !this.opts.trustDelegatedOperatorApproval
+        ? false
+        : intent === "approve",
       options?.uiContext,
     );
   }
@@ -1107,6 +1122,9 @@ export class SystemAgentChatEngine {
         // Mutations unlock only on host-verified approval of THIS message;
         // the model cannot self-approve (see system-agent-tool.ts).
         approvalArmed,
+        ...(this.opts.trustDelegatedOperatorApproval === true
+          ? { approvalGateDisabled: true as const }
+          : {}),
         session: this.agentSession,
       });
     } catch (error) {

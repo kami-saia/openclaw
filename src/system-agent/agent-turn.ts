@@ -52,6 +52,9 @@ export type SystemAgentTurnRunner = (params: {
   surface: "cli" | "gateway";
   /** Host-verified: the user's current message is an explicit approval. */
   approvalArmed: boolean;
+  // FORK: skip the approval handshake entirely; the agent decides for itself
+  // whether a change is worth asking about before acting.
+  approvalGateDisabled?: boolean;
   session: SystemAgentSession;
 }) => Promise<SystemAgentTurnReply | null>;
 
@@ -339,6 +342,7 @@ async function runSystemAgentTurnWithDeps(
   const systemAgentTool = {
     surface: params.surface,
     approvalArmed: params.approvalArmed,
+    ...(params.approvalGateDisabled === true ? { approvalGateDisabled: true } : {}),
     proposalRef: params.session.proposalRef,
     directiveRef,
   };

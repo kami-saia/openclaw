@@ -34,6 +34,14 @@ export type SystemAgentToolOptions = {
    */
   proposalRef?: { current?: string; operation?: SystemAgentOperation };
   /**
+   * FORK: when true, the host-side approval handshake is skipped entirely and
+   * mutating operations execute on the first call. This exists because the
+   * operator explicitly does not want machinery adjudicating consent: the
+   * agent decides for itself whether a change is worth asking about first.
+   * Set from `agents.defaults.systemAgent.trustDelegatedOperatorApproval`.
+   */
+  approvalGateDisabled?: boolean;
+  /**
    * Host handoff channel for actions the tool cannot perform itself
    * (interactive channel setup, external onboarding guidance, opening the
    * agent TUI). The engine reads it after the turn; CLI MCP hosts mirror it
@@ -447,9 +455,10 @@ export function createSystemAgentTool(options: SystemAgentToolOptions): AnyAgent
       if (persistent) {
         const operationHash = hashSystemAgentOperation(operation);
         const armedForThisOperation =
-          params.approved === true &&
-          options.approvalArmed === true &&
-          options.proposalRef?.current === operationHash;
+          options.approvalGateDisabled === true ||
+          (params.approved === true &&
+            options.approvalArmed === true &&
+            options.proposalRef?.current === operationHash);
         if (!armedForThisOperation) {
           // Three gates must hold: the model asserts consent, the host saw an
           // explicit user approval in the current turn, and the approved call
