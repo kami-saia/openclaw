@@ -2292,5 +2292,85 @@ describe("buildGuardedModelFetch", () => {
       expect(response.headers.get("x-should-retry")).toBeNull();
     });
   });
+
+  describe("transient Copilot 403 handling", () => {
+    const copilotModel = {
+      id: "claude-opus-5",
+      provider: "***",
+      api: "anthropic-messages",
+      baseUrl: "https://api.enterprise.githubcopilot.com",
+    } as unknown as Model<"anthropic-messages">;
+
+    const COPILOT_URL = "https://api.enterprise.githubcopilot.com/v1/messages";
+
+    async function fetch403(body: string, status = 403) {
+      fetchWithSsrFGuardMock.mockResolvedValue({
+        response: new Response(body, {
+          status,
+          headers: { "content-type": "application/json" },
+        }),
+        finalUrl: COPILOT_URL,
+        release: vi.fn(async () => undefined),
+      });
+      return await buildGuardedModelFetch(copilotModel)(COPILOT_URL, { method: "POST" });
+    }
+
+    it("marks the generic ToS-style 403 retryable so the SDK retries it", async () => {
+      const response = await fetch403(
+        JSON.stringify({
+          error: {
+            message:
+              "Access to this endpoint is forbidden. Please review our [Terms of Service](https://example.invalid).",
+          },
+        }),
+      );
+
+      expect(response.status).toBe(403);
+      expect(response.headers.get("x-should-retry")).toBe("true");
+    });
+
+    it("leaves the original body readable after classification", async () => {
+      const response = await fetch403(
+        JSON.stringify({ error: { message: "Access to this endpoint is forbidden." } }),
+      );
+
+      await expect(response.text()).resolves.toContain("Access to this endpoint is forbidden");
+    });
+
+    it.each([
+      ["token expired", "Access to this endpoint is forbidden: token expired"],
+      ["not entitled", "Access to this endpoint is forbidden. You are not entitled to this model."],
+      ["seat", "Access to this endpoint is forbidden - no Copilot seat assigned"],
+      ["suspended", "Access to this endpoint is forbidden. Account suspended."],
+      ["quota exceeded", "Access to this endpoint is forbidden: quota exceeded"],
+    ])("keeps an entitlement 403 fatal (%s)", async (_label, message) => {
+      const response = await fetch403(JSON.stringify({ error: { message } }));
+
+      expect(response.status).toBe(403);
+      expect(response.headers.get("x-should-retry")).toBeNull();
+    });
+
+    it("does not mark an unrecognized 403 body retryable", async () => {
+      const response = await fetch403(JSON.stringify({ error: { message: "nope" } }));
+
+      expect(response.headers.get("x-should-retry")).toBeNull();
+    });
+
+    it("does not mark an empty 403 body retryable", async () => {
+      const response = await fetch403("");
+
+      expect(response.headers.get("x-should-retry")).toBeNull();
+    });
+
+    it("does not touch non-403 responses carrying the same text", async () => {
+      const response = await fetch403(
+        JSON.stringify({ error: { message: "Access to this endpoint is forbidden." } }),
+        401,
+      );
+
+      expect(response.status).toBe(401);
+      expect(response.headers.get("x-should-retry")).toBeNull();
+    });
+  });
 });
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

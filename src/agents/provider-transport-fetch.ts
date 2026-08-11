@@ -931,9 +931,11 @@ export function buildGuardedModelFetch(
         `contentType=${response.headers.get("content-type") ?? ""}`,
     );
     // The transient-403 classifier below needs the provider's own error text;
-    // read it from a clone so the original response body stays intact.
+    // read it from a clone so the original response body stays intact. Only do
+    // this for 403 — cloning drains the source stream, and the SDK must keep the
+    // ability to cancel other retryable bodies (429/5xx) unread before retrying.
     let providerErrorText = "";
-    if (!response.ok) {
+    if (response.status === 403) {
       try {
         providerErrorText = (await response.clone().text()).replace(/\s+/g, " ").slice(0, 400);
       } catch {

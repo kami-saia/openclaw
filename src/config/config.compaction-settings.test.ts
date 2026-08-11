@@ -79,4 +79,25 @@ describe("config compaction settings", () => {
       expect(materializeCompactionConfig({ thinkingLevel })?.thinkingLevel).toBe(thinkingLevel);
     },
   );
+
+  it.each(["default", "safeguard", "agent"] as const)(
+    "preserves compaction mode=%s during materialization",
+    (mode) => {
+      expect(materializeCompactionConfig({ mode })?.mode).toBe(mode);
+    },
+  );
+
+  it("keeps the agent-mode model and timeout overrides that gate in-session compaction", () => {
+    const compaction = materializeCompactionConfig({
+      mode: "agent",
+      model: "***/gpt-5.5",
+      timeoutSeconds: 360,
+      keepRecentTokens: 4096,
+    });
+
+    expect(compaction?.mode).toBe("agent");
+    expect(compaction?.model).toBe("***/gpt-5.5");
+    expect(compaction?.timeoutSeconds).toBe(360);
+    expect(compaction?.keepRecentTokens).toBe(4096);
+  });
 });
