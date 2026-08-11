@@ -519,30 +519,6 @@ function resolveMaxSdkRetryWaitSeconds(): number | undefined {
   return DEFAULT_MAX_SDK_RETRY_WAIT_SECONDS;
 }
 
-// FORK: GitHub Copilot's enterprise endpoint returns a generic 403 with a
-// Terms-of-Service blurb for two very different situations: a real entitlement
-// denial (permanent) and transient server-side rejection of a well-formed
-// request (retryable). Measured 2026-08-11 on api.enterprise.githubcopilot.com:
-// 6/19 compaction calls 403'd while byte-identical payloads returned 200 minutes
-// apart on the same token and process. Only treat the generic ToS-style body as
-// transient; anything naming a specific auth/entitlement failure stays fatal so
-// a genuinely revoked seat is not retried forever.
-const COPILOT_TRANSIENT_FORBIDDEN_RE =
-  /access to this endpoint is forbidden|please review our .{0,40}terms of service/i;
-const COPILOT_FATAL_FORBIDDEN_RE =
-  /\b(unauthorized|token expired|invalid token|bad credentials|no access to|not entitled|subscription|seat|quota exceeded|suspended|blocked)\b/i;
-
-function isTransientCopilotForbidden(response: Response, providerErrorText: string): boolean {
-  if (response.status !== 403) {
-    return false;
-  }
-  const text = providerErrorText ?? "";
-  if (!text || COPILOT_FATAL_FORBIDDEN_RE.test(text)) {
-    return false;
-  }
-  return COPILOT_TRANSIENT_FORBIDDEN_RE.test(text);
-}
-
 function shouldBypassLongSdkRetry(response: Response): boolean {
   const maxWaitSeconds = resolveMaxSdkRetryWaitSeconds();
   if (maxWaitSeconds === undefined) {
@@ -930,38 +906,6 @@ export function buildGuardedModelFetch(
         `status=${response.status} elapsedMs=${Date.now() - fetchStartedAt} ` +
         `contentType=${response.headers.get("content-type") ?? ""}`,
     );
-    // The transient-403 classifier below needs the provider's own error text;
-    // read it from a clone so the original response body stays intact. Only do
-    // this for 403 — cloning drains the source stream, and the SDK must keep the
-    // ability to cancel other retryable bodies (429/5xx) unread before retrying.
-    let providerErrorText = "";
-    if (response.status === 403) {
-      try {
-        providerErrorText = (await response.clone().text()).replace(/\s+/g, " ").slice(0, 400);
-      } catch {
-        providerErrorText = "";
-      }
-    }
-    // FORK: GitHub Copilot's enterprise endpoint intermittently answers a
-    // well-formed request with 403 + "Access to this endpoint is forbidden".
-    // Measured 2026-08-11: 6/19 compaction calls failed this way, with
-    // byte-identical payloads succeeding minutes apart on the same token and
-    // process, so it is server-side flake rather than an entitlement problem.
-    // The SDK only retries 408/409/429/5xx, so a transient 403 gets zero
-    // retries and compaction dies outright. Mark those responses retryable.
-    if (response.status === 403 && isTransientCopilotForbidden(response, providerErrorText)) {
-      const headers = new Headers(response.headers);
-      headers.set("x-should-retry", "true");
-      response = new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers,
-      });
-      log.warn(
-        `[model-fetch] retryable-403 provider=${model.provider} model=${model.id} ` +
-          `marked x-should-retry=true (transient Copilot forbidden)`,
-      );
-    }
     if (shouldBypassLongSdkRetry(response)) {
       const headers = new Headers(response.headers);
       headers.set("x-should-retry", "false");
