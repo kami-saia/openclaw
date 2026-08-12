@@ -517,6 +517,11 @@ export type GatewayNodesConfig = {
     allow?: string[];
     /** Commands to deny even if they appear in the defaults or node claims. */
     deny?: string[];
+    /**
+     * Denylist-first mode. When true, every command a paired node declares is
+     * allowed (including dangerous defaults) except entries in `deny`.
+     */
+    allowAll?: boolean;
   };
 };
 

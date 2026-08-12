@@ -219,6 +219,7 @@ export const GatewayConfigSchema = z
           .strictObject({
             allow: z.array(z.string()).optional(),
             deny: z.array(z.string()).optional(),
+            allowAll: z.boolean().optional(),
           })
           .optional(),
       })
