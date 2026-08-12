@@ -211,8 +211,13 @@ function normalizeMemoryFlush(value: unknown): SessionEntry["memoryFlush"] | und
     return undefined;
   }
   const compactionCount = normalizeCount(value.compactionCount);
+  const totalTokens = normalizeCount(value.totalTokens);
   if (value.kind === "succeeded" && compactionCount !== undefined) {
-    return { kind: "succeeded", compactionCount };
+    return {
+      kind: "succeeded",
+      compactionCount,
+      ...(totalTokens !== undefined ? { totalTokens } : {}),
+    };
   }
   const failureCount = normalizeCount(value.failureCount);
   if (value.kind !== "failed" || !failureCount) {
@@ -221,6 +226,7 @@ function normalizeMemoryFlush(value: unknown): SessionEntry["memoryFlush"] | und
   return {
     kind: "failed",
     ...(compactionCount !== undefined ? { compactionCount } : {}),
+    ...(totalTokens !== undefined ? { totalTokens } : {}),
     failureCount,
   };
 }

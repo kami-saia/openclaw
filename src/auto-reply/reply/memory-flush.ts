@@ -147,7 +147,18 @@ export function shouldRunMemoryFlush(params: {
   }
 
   if (hasAlreadyFlushedForCurrentCompaction(state.entry)) {
-    return false;
+    // A flush was already signalled for this compaction cycle. compactionCount
+    // only advances on a compaction that actually landed, so if the flush turn
+    // produced no compaction the cycle never ends and this gate would suppress
+    // the signal forever while context keeps climbing into the window.
+    // Re-arm once the session has grown a further margin past the point where
+    // the last flush was signalled.
+    const rearmMargin = Math.max(1, Math.floor(params.softThresholdTokens));
+    const lastFlushTokens = resolvePositiveTokenCount(state.entry.memoryFlush?.totalTokens);
+    const rearmAt = (lastFlushTokens ?? state.threshold) + rearmMargin;
+    if (state.totalTokens < rearmAt) {
+      return false;
+    }
   }
 
   return true;

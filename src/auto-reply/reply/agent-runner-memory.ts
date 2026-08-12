@@ -1226,6 +1226,15 @@ export async function runMemoryFlushIfNeeded(params: {
     `memoryFlush triggered: sessionKey=${params.sessionKey} tokenCount=${tokenCountForFlush ?? "undefined"} threshold=${flushThreshold}`,
   );
 
+  // Context size at the moment the flush was signalled. Persisted with the
+  // flush state so the gate can re-arm if the session keeps growing without a
+  // compaction landing (compactionCount only advances on success).
+  const flushSignalTokens = tokenCountForFlush ?? entry?.totalTokens;
+  const flushSignalTokensField =
+    typeof flushSignalTokens === "number" && Number.isFinite(flushSignalTokens)
+      ? { totalTokens: Math.floor(flushSignalTokens) }
+      : {};
+
   params.replyOperation.setPhase("memory_flushing");
   let activeSessionEntry = entry ?? params.sessionEntry;
   const activeSessionStore = params.sessionStore;
@@ -1451,7 +1460,11 @@ export async function runMemoryFlushIfNeeded(params: {
           skipMaintenance: true,
           takeCacheOwnership: true,
           update: async () => ({
-            memoryFlush: { kind: "succeeded", compactionCount: flushedCompactionCount },
+            memoryFlush: {
+              kind: "succeeded",
+              compactionCount: flushedCompactionCount,
+              ...flushSignalTokensField,
+            },
           }),
         });
         if (updatedEntry) {
@@ -1483,6 +1496,7 @@ export async function runMemoryFlushIfNeeded(params: {
               ...(sessionEntry.memoryFlush?.compactionCount !== undefined
                 ? { compactionCount: sessionEntry.memoryFlush.compactionCount }
                 : {}),
+              ...flushSignalTokensField,
               failureCount:
                 (sessionEntry.memoryFlush?.kind === "failed"
                   ? sessionEntry.memoryFlush.failureCount
@@ -1538,6 +1552,7 @@ export async function runMemoryFlushIfNeeded(params: {
               memoryFlush: {
                 kind: "succeeded",
                 compactionCount: sessionEntry.compactionCount ?? 0,
+                ...flushSignalTokensField,
               },
             }),
           });

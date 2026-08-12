@@ -88,11 +88,21 @@ type FallbackNoticeState = {
 };
 
 type MemoryFlushState =
-  | { kind: "succeeded"; compactionCount: number }
+  | {
+      kind: "succeeded";
+      compactionCount: number;
+      /**
+       * Context size when this flush was signalled. Used to re-arm the flush
+       * gate when the session keeps growing without a compaction landing
+       * (compactionCount only advances on a successful compaction).
+       */
+      totalTokens?: number;
+    }
   | {
       kind: "failed";
       compactionCount?: number;
       failureCount: number;
+      totalTokens?: number;
     };
 
 export type { AcpSessionRuntimeOptions, SessionAcpIdentity, SessionAcpMeta };
