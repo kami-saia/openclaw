@@ -56,9 +56,12 @@ export type ResponsesMessageSnapshotCollapse = { kind: "extend"; text: string } 
 // snapshot items — each a strict prefix-superset of the previous one — instead
 // of one final message item. A same-phase strict extension replaces the prior
 // text block, or the visible reply repeats once per snapshot (#91959).
-// Extension-only on purpose: equal or shrinking adjacent items stay distinct
-// (the Responses protocol allows multiple message items per response), so a
-// false positive can only merge rendering — it can never lose text.
+// Collapse covers strict extension and byte-identical re-emission of the same
+// snapshot; shrinking adjacent items stay distinct (the Responses protocol
+// allows multiple message items per response), so a false positive can only
+// merge rendering — it can never lose text. An adjacent same-phase item with
+// identical text is always a re-emitted snapshot, and keeping it appends a
+// second copy of the reply into the same message (visible as a doubled answer).
 // `prior` must be the immediately preceding output item: collapsing across
 // reasoning/function_call boundaries would drop real post-tool messages and
 // orphan reasoning items, which OpenAI replay rejects.
@@ -71,7 +74,7 @@ export function resolveResponsesMessageSnapshotCollapse(params: {
   if (!prior?.text || !nextText || prior.phase !== params.nextPhase) {
     return { kind: "keep" };
   }
-  if (nextText.length > prior.text.length && nextText.startsWith(prior.text)) {
+  if (nextText.length >= prior.text.length && nextText.startsWith(prior.text)) {
     return { kind: "extend", text: nextText };
   }
   return { kind: "keep" };

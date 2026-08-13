@@ -2723,10 +2723,9 @@ describe("processResponsesStream", () => {
     ]);
   });
 
-  it.each([
-    ["identical", "Hello world.", "Hello world."],
-    ["shrinking", "Step one. Step two.", "Step one."],
-  ])("keeps %s adjacent same-phase message items as distinct blocks", async (_label, a, b) => {
+  it("keeps shrinking adjacent same-phase message items as distinct blocks", async () => {
+    const a = "Step one. Step two.";
+    const b = "Step one.";
     const output = createAssistantOutput();
     const stream = new AssistantMessageEventStream();
     const events: Array<Record<string, unknown>> = [];
@@ -2772,8 +2771,8 @@ describe("processResponsesStream", () => {
     stream.end();
     await collect;
 
-    // Only strict extensions collapse; equal or shrinking items are real,
-    // independently identified messages and must never be removed.
+    // Extensions and identical re-emissions collapse; a shrinking item is a
+    // real, independently identified message and must never be removed.
     expect(output.content).toEqual([
       {
         type: "text",
