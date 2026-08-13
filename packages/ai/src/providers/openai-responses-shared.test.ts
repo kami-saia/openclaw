@@ -2723,77 +2723,77 @@ describe("processResponsesStream", () => {
     ]);
   });
 
-  it.each([
-    ["identical", "Hello world.", "Hello world."],
-    ["shrinking", "Step one. Step two.", "Step one."],
-  ])("keeps %s adjacent same-phase message items as distinct blocks", async (_label, a, b) => {
-    const output = createAssistantOutput();
-    const stream = new AssistantMessageEventStream();
-    const events: Array<Record<string, unknown>> = [];
-    const collect = (async () => {
-      for await (const event of stream) {
-        events.push(event as unknown as Record<string, unknown>);
-      }
-    })();
-    await processResponsesStream(
-      responseEvents([
-        {
-          type: "response.output_item.added",
-          item: { type: "message", id: "msg_1", phase: "final_answer" },
-        },
-        {
-          type: "response.output_item.done",
-          item: {
-            type: "message",
-            id: "msg_1",
-            phase: "final_answer",
-            content: [{ type: "output_text", text: a }],
+  it.each([["shrinking", "Step one. Step two.", "Step one."]])(
+    "keeps %s adjacent same-phase message items as distinct blocks",
+    async (_label, a, b) => {
+      const output = createAssistantOutput();
+      const stream = new AssistantMessageEventStream();
+      const events: Array<Record<string, unknown>> = [];
+      const collect = (async () => {
+        for await (const event of stream) {
+          events.push(event as unknown as Record<string, unknown>);
+        }
+      })();
+      await processResponsesStream(
+        responseEvents([
+          {
+            type: "response.output_item.added",
+            item: { type: "message", id: "msg_1", phase: "final_answer" },
           },
-        },
-        {
-          type: "response.output_item.added",
-          item: { type: "message", id: "msg_2", phase: "final_answer" },
-        },
-        {
-          type: "response.output_item.done",
-          item: {
-            type: "message",
-            id: "msg_2",
-            phase: "final_answer",
-            content: [{ type: "output_text", text: b }],
+          {
+            type: "response.output_item.done",
+            item: {
+              type: "message",
+              id: "msg_1",
+              phase: "final_answer",
+              content: [{ type: "output_text", text: a }],
+            },
           },
-        },
-        { type: "response.completed", response: { id: "resp_1", status: "completed" } },
-      ]),
-      output,
-      stream,
-      nativeOpenAIModel,
-    );
-    stream.end();
-    await collect;
+          {
+            type: "response.output_item.added",
+            item: { type: "message", id: "msg_2", phase: "final_answer" },
+          },
+          {
+            type: "response.output_item.done",
+            item: {
+              type: "message",
+              id: "msg_2",
+              phase: "final_answer",
+              content: [{ type: "output_text", text: b }],
+            },
+          },
+          { type: "response.completed", response: { id: "resp_1", status: "completed" } },
+        ]),
+        output,
+        stream,
+        nativeOpenAIModel,
+      );
+      stream.end();
+      await collect;
 
-    // Only strict extensions collapse; equal or shrinking items are real,
-    // independently identified messages and must never be removed.
-    expect(output.content).toEqual([
-      {
-        type: "text",
-        text: a,
-        textSignature: JSON.stringify({ v: 1, id: "msg_1", phase: "final_answer" }),
-      },
-      {
-        type: "text",
-        text: b,
-        textSignature: JSON.stringify({ v: 1, id: "msg_2", phase: "final_answer" }),
-      },
-    ]);
-    // The deferred second item still opens and closes its own block.
-    expect(events.map((event) => [event.type, event.contentIndex])).toEqual([
-      ["text_start", 0],
-      ["text_end", 0],
-      ["text_start", 1],
-      ["text_end", 1],
-    ]);
-  });
+      // Shrinking items are real, independently identified messages and must
+      // never be removed.
+      expect(output.content).toEqual([
+        {
+          type: "text",
+          text: a,
+          textSignature: JSON.stringify({ v: 1, id: "msg_1", phase: "final_answer" }),
+        },
+        {
+          type: "text",
+          text: b,
+          textSignature: JSON.stringify({ v: 1, id: "msg_2", phase: "final_answer" }),
+        },
+      ]);
+      // The deferred second item still opens and closes its own block.
+      expect(events.map((event) => [event.type, event.contentIndex])).toEqual([
+        ["text_start", 0],
+        ["text_end", 0],
+        ["text_start", 1],
+        ["text_end", 1],
+      ]);
+    },
+  );
 
   it("streams a deferred distinct message live once its text diverges from the prior block", async () => {
     const output = createAssistantOutput();

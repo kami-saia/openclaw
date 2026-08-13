@@ -183,14 +183,19 @@ export function createResponsesTerminalController(params: {
       nextPhase: phase,
     });
     if (collapse.kind === "extend" && previous) {
+      const priorText = previous.block.text;
       previous.block.text = collapse.text;
       previous.block.textSignature = encodeTextSignatureV1(item.id, phase);
-      stream.push({
-        type: "text_end",
-        contentIndex: previous.index,
-        content: collapse.text,
-        partial: output as never,
-      });
+      if (collapse.text !== priorText) {
+        // A pure repeat adds no text; re-ending the block would deliver the same
+        // reply twice downstream (one chat message per text_end).
+        stream.push({
+          type: "text_end",
+          contentIndex: previous.index,
+          content: collapse.text,
+          partial: output as never,
+        });
+      }
       return;
     }
     const block: TextContent = {

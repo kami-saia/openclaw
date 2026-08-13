@@ -562,17 +562,22 @@ export async function processResponsesStream<TApi extends Api>(
             // instead of appending another copy. The deferred block was never
             // started publicly, and the newest item's signature is kept so
             // replay carries the item that produced this content (#91959).
+            const priorText = outputSlot.collapseCandidate.block.text;
             outputSlot.collapseCandidate.block.text = collapse.text;
             outputSlot.collapseCandidate.block.textSignature = encodeTextSignatureV1(
               item.id,
               phase,
             );
-            stream.push({
-              type: "text_end",
-              contentIndex: outputSlot.collapseCandidate.index,
-              content: collapse.text,
-              partial: output,
-            });
+            if (collapse.text !== priorText) {
+              // A pure repeat adds no text; re-ending the block would deliver the
+              // same reply twice downstream (one chat message per text_end).
+              stream.push({
+                type: "text_end",
+                contentIndex: outputSlot.collapseCandidate.index,
+                content: collapse.text,
+                partial: output,
+              });
+            }
             lastTextBlock = outputSlot.collapseCandidate;
           } else {
             if (!outputSlot.block) {
