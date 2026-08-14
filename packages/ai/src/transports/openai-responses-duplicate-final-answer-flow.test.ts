@@ -149,3 +149,52 @@ describe("Responses final answer projection", () => {
     ]);
   });
 });
+
+// Regression (#eyrie-triple): the provider streamed reasoning + one final-answer
+// message item, then the terminal snapshot carried a *second* message item with
+// the same text under a different id. Terminal recovery must still collapse it.
+describe("Responses terminal recovery final answer projection", () => {
+  it("collapses a duplicate final answer item that only appears in the terminal snapshot", async () => {
+    const reasoning = {
+      id: "rs_0",
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: "thinking" }],
+      content: [],
+    };
+    const result = await runFixture([
+      {
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { id: "rs_0", type: "reasoning", summary: [], content: [] },
+      },
+      { type: "response.output_item.done", output_index: 0, item: reasoning },
+      {
+        type: "response.output_item.added",
+        output_index: 1,
+        item: { ...messageItem("msg_first", "", "in_progress"), content: [] },
+      },
+      {
+        type: "response.output_text.delta",
+        output_index: 1,
+        item_id: "msg_first",
+        content_index: 0,
+        delta: FINAL,
+      },
+      {
+        type: "response.output_item.done",
+        output_index: 1,
+        item: messageItem("msg_first", FINAL, "completed"),
+      },
+      completed("resp_terminal_repeat", [
+        reasoning,
+        messageItem("msg_first", FINAL, "completed"),
+        messageItem("msg_repeat", FINAL, "completed"),
+      ]),
+    ]);
+
+    expect(result.error).toBeNull();
+    expect(result.content.filter((block) => block.type === "text")).toEqual([
+      { type: "text", text: FINAL },
+    ]);
+  });
+});

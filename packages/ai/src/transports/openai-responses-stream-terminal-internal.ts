@@ -262,7 +262,18 @@ export function createResponsesTerminalController(params: {
         appendText(item);
         params.completedOutputItemIdentities.add(identity);
       } else {
-        params.setLastTextBlock(null);
+        // Items already projected by the streaming path are replayed verbatim in
+        // the terminal snapshot; they are not a new boundary, so clearing the
+        // collapse candidate here would strand a duplicate final-answer message
+        // that only shows up in the snapshot (#eyrie-triple).
+        const alreadyProjected =
+          item.type === "reasoning"
+            ? params.reasoningBlocksById.has(item.id)
+            : item.type === "function_call" &&
+              params.completedOutputItemIdentities.has(`function_call:${item.call_id}`);
+        if (!alreadyProjected) {
+          params.setLastTextBlock(null);
+        }
         if (includeToolCalls && item.type === "function_call") {
           const identity = `function_call:${item.call_id}`;
           if (params.completedOutputItemIdentities.has(identity)) {
