@@ -976,3 +976,45 @@ describe("maybeWakeRequesterAfterAllChildrenSettled", () => {
     });
   });
 });
+
+describe("regression: premature wake before the child ends", () => {
+  beforeEach(() => {
+    deliverSpy.mockClear();
+    transitionBatchSpy.mockClear();
+    completeBatchSpy.mockClear();
+    sessionStore = { [REQUESTER]: { sessionId: "sess-main" } };
+    registryRuntimeMock.hasDescendantRunAwaitingSettle.mockReset().mockReturnValue(false);
+    registryRuntimeMock.listSubagentRunsForRequester.mockReset().mockReturnValue([]);
+    registryRuntimeMock.getLatestSubagentRunByChildSessionKey
+      .mockReset()
+      .mockReturnValue(undefined);
+  });
+
+  // Observed live: a frozen yield batch whose only child was still executing
+  // was woken anyway, delivering "status: unknown / (no output)". The requester
+  // answered NO_REPLY, which requireVisibleReply scores as visible_reply_missing,
+  // so the wake burned its whole retry budget -> 3 agent runs for 1 subagent.
+  it("does not wake a frozen yield batch while its child is still running", async () => {
+    const running = makeSettledChild({
+      runId: "run-b",
+      delivery: { status: "delivered" },
+      requesterSettleWake: {
+        status: "pending",
+        attemptCount: 0,
+        batchRunIds: ["run-b"],
+        requesterYieldBatch: true,
+        afterRequesterYield: true,
+        rearmGeneration: 1,
+      },
+      execution: { status: "running", startedAt: 2_000 },
+    });
+    registryRuntimeMock.listSubagentRunsForRequester.mockReturnValue([running]);
+
+    const woke = await maybeWakeRequesterAfterAllChildrenSettled(
+      wakeParams({ settledEntry: running }),
+    );
+
+    expect(deliverSpy).not.toHaveBeenCalled();
+    expect(woke).toBe(false);
+  });
+});

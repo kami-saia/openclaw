@@ -257,6 +257,13 @@ export async function maybeWakeRequesterAfterAllChildrenSettled(params: {
           Boolean(entry?.requesterSettleWake) &&
           entry?.requesterSettleWake?.rearmGeneration === currentRearmGeneration,
       );
+    // A frozen yield batch is selected by run id, not by liveness. Waking while
+    // any member is still executing delivers "(no output)" and then burns the
+    // retry budget on requireVisibleReply, producing several requester runs
+    // for one child. Keep the batch pending until every member has ended.
+    if (settledBatch.some((entry) => !hasSubagentRunEnded(entry))) {
+      return false;
+    }
   } else {
     settledBatch = buildConnectedSettledWave(
       requesterRuns.filter((entry) => entry.requesterSettleWake && hasSubagentRunEnded(entry)),
