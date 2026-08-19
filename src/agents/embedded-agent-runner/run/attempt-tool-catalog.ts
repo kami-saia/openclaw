@@ -67,6 +67,7 @@ export function prepareEmbeddedAttemptToolCatalog(input: {
     sessionId: attempt.sessionId,
     runId: attempt.runId,
     approvalReviewerDeviceId: attempt.approvalReviewerDeviceId,
+    nodeDeviceId: attempt.nodeDeviceId,
     channelId: attempt.currentChannelId,
     trace: input.runTrace,
     loopDetection: resolveToolLoopDetectionConfig({

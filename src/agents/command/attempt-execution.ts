@@ -1021,6 +1021,7 @@ export function runAgentAttempt(params: {
             currentThreadTs: params.runContext.currentThreadTs,
             currentInboundAudio: params.runContext.currentInboundAudio,
             approvalReviewerDeviceId: params.opts.approvalReviewerDeviceId,
+            nodeDeviceId: params.opts.nodeDeviceId,
             agentAccountId: params.runContext.accountId,
             senderId: params.runContext.senderId,
             senderIsOwner: params.opts.senderIsOwner,

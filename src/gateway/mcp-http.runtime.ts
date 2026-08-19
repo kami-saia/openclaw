@@ -226,6 +226,7 @@ export class McpLoopbackToolCache {
       params.bashElevated?.fullAccessBlockedReason ?? "",
       params.trigger ?? "",
       params.approvalReviewerDeviceId ?? "",
+      params.nodeDeviceId ?? "",
       params.channelContext?.sender?.id ?? "",
       params.channelContext?.chat?.id ?? "",
       params.senderName ?? "",

@@ -587,6 +587,7 @@ export const handleNodeEvent = async (
           thinking: "low",
           deliver: false,
           messageChannel: "node",
+          nodeDeviceId: normalizeOptionalString(opts?.deviceId),
           inputProvenance: {
             kind: "external_user",
             sourceChannel: "voice",
@@ -849,6 +850,7 @@ export const handleNodeEvent = async (
           timeout:
             typeof link?.timeoutSeconds === "number" ? link.timeoutSeconds.toString() : undefined,
           messageChannel: "node",
+          nodeDeviceId: normalizeOptionalString(opts?.deviceId),
           allowModelOverride: false,
         },
         opts?.isConnectionCurrent,

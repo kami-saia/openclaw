@@ -320,6 +320,8 @@ type OpenClawCodingToolsOptions = {
   runId?: string;
   /** Device-scoped operator session allowed to review approvals initiated by this run. */
   approvalReviewerDeviceId?: string;
+  /** Paired node/device id when this run originated from a connected node transport. */
+  nodeDeviceId?: string;
   /** Diagnostic trace context for hook/log correlation during this run. */
   trace?: DiagnosticTraceContext;
   /** What initiated this run (for trigger-specific tool restrictions). */
@@ -1121,6 +1123,7 @@ function createOpenClawCodingToolsInternal(options?: OpenClawCodingToolsOptions)
   const toolsForMessageProvider = filterToolsByMessageProvider(
     toolsForMemoryFlush,
     options?.toolPolicyMessageProvider ?? options?.messageProvider,
+    options?.nodeDeviceId,
   );
   options?.recordToolPrepStage?.("message-provider-policy");
   const toolsForModelProvider = applyModelProviderToolPolicy(toolsForMessageProvider, {

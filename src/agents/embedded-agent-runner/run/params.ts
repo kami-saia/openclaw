@@ -131,6 +131,8 @@ export type RunEmbeddedAgentParams = {
   senderIsOwner?: boolean;
   /** Device-scoped operator session allowed to review approvals initiated by this run. */
   approvalReviewerDeviceId?: string;
+  /** Paired node/device id when this run originated from a connected node transport. */
+  nodeDeviceId?: string;
   /** Current channel ID for auto-threading (Slack). */
   currentChannelId?: string;
   /** Transport-native chat/conversation ID for hook identity context. */
