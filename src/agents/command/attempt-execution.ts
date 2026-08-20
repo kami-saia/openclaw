@@ -1191,6 +1191,7 @@ export function runAgentAttempt(params: {
     execApprovalContinuationPromptRange: embeddedExecApprovalContinuationPromptRange,
     execApprovalContinuationTranscriptPromptRange: continuationTranscriptPromptRange,
     approvalReviewerDeviceId: params.opts.approvalReviewerDeviceId,
+    nodeDeviceId: params.opts.nodeDeviceId,
     timeoutMs: params.timeoutMs,
     runTimeoutOverrideMs: params.runTimeoutOverrideMs,
     runId: params.runId,
