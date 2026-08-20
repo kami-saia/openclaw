@@ -220,14 +220,25 @@ export function createCompactTool(options: {
         const workspaceDir = options.workspaceDir;
         let memoryTarget: string | undefined;
         if (workspaceDir) {
-          const memoryDir = path.join(workspaceDir, "memory");
+          // FORK: route trading-session compaction summaries into their own
+          // subdir so they stop colliding with the shared heartbeat daily log
+          // (memory/YYYY-MM-DD.md). Two prior incidents (Aug 19 16:10, Aug 20
+          // 13:47) had #saiabets compaction dumps (500+ lines) appended to the
+          // shared file, requiring manual cleanup by the heartbeat session.
+          const isTradingSession = sessionKey.includes("1469273412357718048");
+          const memorySubdir = isTradingSession ? "trading" : undefined;
+          const memoryDir = memorySubdir
+            ? path.join(workspaceDir, "memory", memorySubdir)
+            : path.join(workspaceDir, "memory");
           const dailyFile = path.join(memoryDir, `${dateStamp}.md`);
           try {
             if (!fs.existsSync(memoryDir)) {
               fs.mkdirSync(memoryDir, { recursive: true });
             }
             fs.appendFileSync(dailyFile, `\n${summary}\n`, "utf-8");
-            memoryTarget = `memory/${dateStamp}.md`;
+            memoryTarget = memorySubdir
+              ? `memory/${memorySubdir}/${dateStamp}.md`
+              : `memory/${dateStamp}.md`;
           } catch (fsErr) {
             log.warn(`Failed to append compaction summary to ${dailyFile}: ${String(fsErr)}`);
           }
