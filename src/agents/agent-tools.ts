@@ -1123,7 +1123,7 @@ function createOpenClawCodingToolsInternal(options?: OpenClawCodingToolsOptions)
   const toolsForMessageProvider = filterToolsByMessageProvider(
     toolsForMemoryFlush,
     options?.toolPolicyMessageProvider ?? options?.messageProvider,
-    options?.nodeDeviceId ?? options?.approvalReviewerDeviceId,
+    options?.nodeDeviceId,
   );
   options?.recordToolPrepStage?.("message-provider-policy");
   const toolsForModelProvider = applyModelProviderToolPolicy(toolsForMessageProvider, {
