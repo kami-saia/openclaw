@@ -1691,6 +1691,23 @@ describe("agent request events", () => {
     expectFields(mockCallArg(agentCommandMock), { sessionKey });
   });
 
+  it("repro: forwards nodeDeviceId from opts.deviceId into agentCommandFromIngress for agent.request", async () => {
+    await handleNodeEvent(
+      buildCtx(),
+      "node-device-repro",
+      {
+        event: "agent.request",
+        payloadJSON: JSON.stringify({
+          message: "hello from eyrie",
+          sessionKey: "agent:main:main",
+        }),
+      },
+      { deviceId: "eyrie-device-abc123" },
+    );
+
+    expectFields(mockCallArg(agentCommandMock), { nodeDeviceId: "eyrie-device-abc123" });
+  });
+
   it("keeps an accepted detached agent dispatch visible to suspension", async () => {
     const dispatch = createDeferred<never>();
     agentCommandMock.mockImplementationOnce(() => dispatch.promise);

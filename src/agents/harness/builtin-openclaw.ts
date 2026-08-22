@@ -24,6 +24,7 @@ function buildRestrictedFinalizationAttempt(
     workspaceDir: attempt.workspaceDir,
     cwd: attempt.cwd,
     agentDir: attempt.agentDir,
+    nodeDeviceId: attempt.nodeDeviceId,
     config: attempt.config,
     prompt: attempt.prompt,
     timeoutMs: attempt.timeoutMs,

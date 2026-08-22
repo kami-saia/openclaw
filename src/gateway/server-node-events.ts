@@ -588,6 +588,13 @@ export const handleNodeEvent = async (
           deliver: false,
           messageChannel: "node",
           nodeDeviceId: normalizeOptionalString(opts?.deviceId),
+          // Node events only reach this handler after the connecting device
+          // passed pairing/token auth (verifyDeviceToken at WS connect), so a
+          // node-channel turn is always the paired device owner. This was
+          // previously left unset and silently defaulted to non-owner, which
+          // stripped owner-only core tools (automations/nodes/sessions/etc.)
+          // from every Eyrie chat/voice turn.
+          senderIsOwner: true,
           inputProvenance: {
             kind: "external_user",
             sourceChannel: "voice",
@@ -851,6 +858,9 @@ export const handleNodeEvent = async (
             typeof link?.timeoutSeconds === "number" ? link.timeoutSeconds.toString() : undefined,
           messageChannel: "node",
           nodeDeviceId: normalizeOptionalString(opts?.deviceId),
+          // See voice.transcript dispatch above: node events are already
+          // authenticated as the paired device, so this turn is the owner.
+          senderIsOwner: true,
           allowModelOverride: false,
         },
         opts?.isConnectionCurrent,
