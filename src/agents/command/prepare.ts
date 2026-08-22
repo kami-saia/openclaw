@@ -237,9 +237,7 @@ export async function prepareAgentCommandExecution(opts: AgentCommandOpts, runti
     ? {
         ...selectedCommandOpts,
         channel: explicitRecipientSession.channel,
-        to: explicitRecipientSession.to,
-        accountId: explicitRecipientSession.accountId,
-        threadId: explicitRecipientSession.threadId,
+        sessionKey: explicitRecipientSession.sessionKey,
       }
     : selectedCommandOpts;
   const sessionResolution = resolveSession({
