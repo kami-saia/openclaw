@@ -288,33 +288,7 @@ export function createCronTool(opts?: CronToolOptions, deps?: CronToolDeps): Any
     label: "Automations",
     name: AUTOMATIONS_TOOL_NAME,
     displaySummary: CRON_TOOL_DISPLAY_SUMMARY,
-    description: `Gateway scheduler: reminders, delayed self-wakeups, loops, recurring work, event watchers. Never exec sleep/poll as timer.
-
-ACTIONS: status | list [includeDisabled,limit?,offset?] (use nextOffset for the next page) | get jobId | add job | update jobId patch | remove jobId | run jobId (runMode "force"=now) | runs jobId = history | next_check in:"30m" (own paced run only) | wake text mode?:"now"|"next-heartbeat"(default) nudges a caller-owned lane (sessionKey/agentId to pick another).
-
-ADD: {name?,schedule,payload,sessionTarget?,pacing?,trigger?,delivery?,enabled?}. Required: schedule+payload.
-
-SCHEDULE:
-- {kind:"at",at:"ISO-8601"} one-shot; no tz=UTC; auto-deletes after run.
-- {kind:"every",everyMs}.
-- {kind:"cron",expr,tz?:"IANA"}: expr is wall time in tz; never pre-convert to UTC; no tz=gateway host local. 18:00 Shanghai => {expr:"0 18 * * *",tz:"Asia/Shanghai"}.
-- {kind:"stream",command:[argv],mode?:"line"|"match",match?}: fires on supervised process output; needs cron.triggers.enabled.
-
-TARGET+PAYLOAD:
-- "current" (agentTurn default) = this conversation: run carries this chat's context, result lands here. Self-wakeup/"continue later"/loop = at|every + agentTurn + current.
-- "isolated" = fresh detached session (shows in \`openclaw tasks\`); standalone background work.
-- "main" = heartbeat lane; payload {kind:"systemEvent",text} (systemEvent default target).
-- "session:<key>" = named session.
-- agentTurn {kind:"agentTurn",message,model?,thinking?,timeoutSeconds?}; timeoutSeconds 0=none.
-- script {kind:"script",script,timeoutSeconds?,toolBudget?}: main|isolated only; needs cron.triggers.enabled.
-
-PACED LOOP: recurring job + pacing{min?,max?} durations ("15m","4h"; at least one). Inside its run, job calls next_check in:"<dur>" to set the next delay (clamped to bounds, measured from run end; failed runs keep normal backoff). Adaptive polling: tighten when active, back off when quiet.
-
-TRIGGER (condition watcher on every/cron): {script,once?}; needs cron.triggers.enabled — if off, say so; never model-poll instead. Quiet headless check, no model; 30s/5 tool calls/16KB state. Read frozen trigger.state, return json({fire,message?,state?}) with NEW state; dedupe via state, never memory. fire:false saves state only. fire:true runs payload; message is that run's entire context — self-contained. Fire on failures/timeouts too; success-only watchers look healthy when broken. Script stays read-only; actions belong in payload. once:true disables after first fire. Code Mode: await tools.call("exec",{command:"..."}).
-
-DELIVERY {mode:"none"|"announce"|"webhook",channel?,to?,threadId?,bestEffort?}: where detached run output goes. Omitted=announce (current=>this chat; isolated=>last route; set channel/to for a specific chat — no messaging tool inside the run). Silent watcher=>mode:"none". webhook posts finished-run event to URL in \`to\`.
-
-Job wakeMode (main jobs): "now"(default)|"next-heartbeat". Restricted automation-run sessions: self status/list/get/runs/remove + own next_check only. failureAlert {...}|false disables. jobId canonical (id=compat). contextMessages 0-10 embeds recent chat lines into reminder text.`,
+    description: `Gateway scheduler: reminders, delayed self-wakeups, recurring jobs, paced loops, event watchers/triggers, cron expressions. Never exec sleep/poll as a timer. Actions: status|list|get|add|update|remove|run|runs|next_check|wake. Schedule kinds at|every|cron|stream; sessionTarget current|isolated|main|session:<key>; payload agentTurn|systemEvent|script. Full schedule/payload/pacing/trigger/delivery reference: skill openclaw-automations-scheduler.`,
     parameters: createCronToolSchema(),
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
