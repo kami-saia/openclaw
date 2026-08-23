@@ -17,8 +17,6 @@ export type McpLoopbackRequestContext = {
   agentId?: string;
   sessionId?: string;
   runId?: string;
-  /** Paired node/device id when this request originated from a connected node transport. */
-  nodeDeviceId?: string;
   /** Server-selected roots for mediated coding tools in this CLI run. */
   workspaceDir?: string;
   cwd?: string;

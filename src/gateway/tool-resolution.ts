@@ -101,8 +101,6 @@ export function resolveGatewayScopedTools(params: {
   bashElevated?: ExecElevatedDefaults;
   trigger?: string;
   approvalReviewerDeviceId?: string;
-  /** Paired node/device id when this request originated from a connected node transport. */
-  nodeDeviceId?: string;
   channelContext?: PluginHookChannelContext;
   senderName?: string;
   senderUsername?: string;
@@ -359,7 +357,7 @@ export function resolveGatewayScopedTools(params: {
           senderIsOwner: params.senderIsOwner,
           trigger: params.trigger,
           approvalReviewerDeviceId: params.approvalReviewerDeviceId,
-          nodeDeviceId: params.nodeDeviceId,
+          sourceReplyDeliveryMode,
           taskSuggestionDeliveryMode: params.taskSuggestionDeliveryMode,
           inboundEventKind: params.inboundEventKind,
           requireExplicitMessageTarget: params.requireExplicitMessageTarget,
@@ -456,11 +454,7 @@ export function resolveGatewayScopedTools(params: {
       ]
     : toolsWithMediatedCoding;
 
-  const toolsForMessageProvider = filterToolsByMessageProvider(
-    allTools,
-    params.messageProvider,
-    params.nodeDeviceId,
-  );
+  const toolsForMessageProvider = filterToolsByMessageProvider(allTools, params.messageProvider);
   const policyFiltered = applyToolPolicyPipeline({
     tools: toolsForMessageProvider,
     toolMeta: (tool: AnyAgentTool) => getPluginToolMeta(tool),

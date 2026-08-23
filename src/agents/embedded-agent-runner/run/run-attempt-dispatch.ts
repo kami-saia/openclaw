@@ -230,7 +230,6 @@ export async function dispatchEmbeddedRunAttempt(input: {
     senderE164: params.senderE164,
     senderIsOwner: params.senderIsOwner,
     approvalReviewerDeviceId: params.approvalReviewerDeviceId,
-    nodeDeviceId: params.nodeDeviceId,
     currentChannelId: params.currentChannelId,
     chatId: params.chatId,
     channelContext: params.channelContext,

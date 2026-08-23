@@ -587,7 +587,6 @@ export const handleNodeEvent = async (
           thinking: "low",
           deliver: false,
           messageChannel: "node",
-          nodeDeviceId: normalizeOptionalString(opts?.deviceId),
           // Node events only reach this handler after the connecting device
           // passed pairing/token auth (verifyDeviceToken at WS connect), so a
           // node-channel turn is always the paired device owner. This was
@@ -857,7 +856,6 @@ export const handleNodeEvent = async (
           timeout:
             typeof link?.timeoutSeconds === "number" ? link.timeoutSeconds.toString() : undefined,
           messageChannel: "node",
-          nodeDeviceId: normalizeOptionalString(opts?.deviceId),
           // See voice.transcript dispatch above: node events are already
           // authenticated as the paired device, so this turn is the owner.
           senderIsOwner: true,

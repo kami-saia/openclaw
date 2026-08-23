@@ -181,8 +181,6 @@ export type RunCliAgentParams = {
   skillsSnapshot?: SkillSnapshot;
   messageChannel?: string;
   messageProvider?: string;
-  /** Paired node/device id when this run originated from a connected node transport. */
-  nodeDeviceId?: string;
   /** Capabilities declared by the gateway client that originated this run. */
   clientCaps?: string[];
   currentChannelId?: string;

@@ -161,7 +161,6 @@ export async function invokeGatewayTool(params: {
   agentThreadId?: string;
   senderIsOwner?: boolean;
   clientCaps?: string[];
-  nodeDeviceId?: string;
   conversationReadOrigin?: ConversationReadInvocationOrigin;
   toolCallIdPrefix: string;
   approvalMode?: "request" | "report";
@@ -241,7 +240,6 @@ export async function invokeGatewayTool(params: {
       agentThreadId: params.agentThreadId,
       senderIsOwner: params.senderIsOwner,
       clientCaps: params.clientCaps,
-      nodeDeviceId: params.nodeDeviceId,
       conversationReadOrigin,
       allowGatewaySubagentBinding: true,
       allowMediaInvokeCommands: true,
