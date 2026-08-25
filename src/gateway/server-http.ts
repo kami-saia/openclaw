@@ -72,6 +72,7 @@ import {
 } from "./server/ws-types.js";
 import { isTerminalConfigEnabled } from "./terminal/enabled.js";
 import { matchUserProfileAvatarPath } from "./user-profiles-http-path.js";
+import { VOICE_STREAM_PATH_PREFIX } from "./voice-stream-http.js";
 
 type PluginGatewayDispatchContext = {
   gatewayAuthSatisfied?: boolean;
@@ -102,6 +103,7 @@ type ResolvePluginNodeCapabilityRoute = (
 ) => PluginNodeCapabilitySurface | undefined;
 
 const getControlUiModule = createLazyRuntimeModule(() => import("./control-ui.js"));
+const getVoiceStreamHttpModule = createLazyRuntimeModule(() => import("./voice-stream-http.js"));
 const getCanvasServeModule = createLazyRuntimeModule(() => import("../canvas/serve.runtime.js"));
 const getBoardHttpModule = createLazyRuntimeModule(() => import("./board-http.js"));
 const getEmbeddingsHttpModule = createLazyRuntimeModule(() => import("./embeddings-http.js"));
@@ -594,6 +596,17 @@ export function createGatewayHttpServer(opts: {
         }
         return false;
       });
+      // The one-off path token is itself the capability, so this route authorizes on
+      // possession of the URL rather than a gateway token: the player fetching it is a
+      // media pipeline that cannot carry auth headers.
+      addRequestStage(
+        "voice-stream",
+        scopedRequestPath.startsWith(`${VOICE_STREAM_PATH_PREFIX}/`),
+        async () =>
+          (await getVoiceStreamHttpModule()).handleVoiceStreamRequest(req, res, {
+            config: configSnapshot,
+          }),
+      );
       addRequestStage(
         "canvas-documents",
         Boolean(nodeCapability) &&
