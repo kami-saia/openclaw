@@ -218,6 +218,72 @@ export const ttsHandlers: GatewayRequestHandlers = {
       );
     }
   },
+  // Unlike tts.speak (inline base64) this returns a one-off URL and synthesizes
+  // nothing until that URL is fetched, so a player can start on the first chunk.
+  // The path carries a 256-bit random id with a short TTL: possession of the URL
+  // is the capability, so remote players need no gateway token of their own.
+  "tts.stream": async ({ params, respond, context }) => {
+    const text = normalizeOptionalString(params.text);
+    if (!text) {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "tts.stream requires text"));
+      return;
+    }
+    try {
+      const cfg = context.getRuntimeConfig();
+      // Bound the text here rather than at fetch time: an over-long request should
+      // fail while a caller is still listening, not mid-stream on the device.
+      const maxTextLength = resolveTtsConfig(cfg).maxTextLength;
+      if (text.length > maxTextLength) {
+        respond(
+          false,
+          undefined,
+          errorShape(
+            ErrorCodes.INVALID_REQUEST,
+            `tts.stream text too long (${text.length} chars, max ${maxTextLength})`,
+          ),
+        );
+        return;
+      }
+      assertSecretOwnerAvailable("capability", "tts");
+      const channel = normalizeOptionalString(params.channel);
+      const agentId = normalizeOptionalString(params.agentId);
+      const accountId = normalizeOptionalString(params.accountId);
+      const { createVoiceStreamRequest } = await import("../voice-stream-http.js");
+      const request = createVoiceStreamRequest({
+        text,
+        ...(channel ? { channel } : {}),
+        ...(agentId ? { agentId } : {}),
+        ...(accountId ? { accountId } : {}),
+      });
+      if (!request) {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.UNAVAILABLE, "Could not register voice stream"),
+        );
+        return;
+      }
+      respond(true, { path: request.path, expiresAtMs: request.expiresAtMs });
+    } catch (err) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.UNAVAILABLE,
+          formatForLog(err),
+          err instanceof SecretSurfaceUnavailableError
+            ? {
+                details: {
+                  reason: err.code,
+                  ownerKind: err.ownerKind,
+                  ownerId: err.ownerId,
+                },
+              }
+            : undefined,
+        ),
+      );
+    }
+  },
   "tts.setProvider": async ({ params, respond, context }) => {
     const cfg = context.getRuntimeConfig();
     const provider = canonicalizeSpeechProviderId(
