@@ -6,7 +6,7 @@ import { uniqueStrings } from "@openclaw/normalization-core/string-normalization
 import { HEARTBEAT_RESPONSE_TOOL_NAME } from "./heartbeat-tool-response.js";
 import {
   HEARTBEAT_RESPONSE_TOOL_PROMPT,
-  HEARTBEAT_TRANSCRIPT_PROMPT,
+  HEARTBEAT_TRANSCRIPT_PROMPTS,
   resolveHeartbeatPromptForResponseTool,
   stripHeartbeatToken,
 } from "./heartbeat.js";
@@ -302,12 +302,14 @@ export function isHeartbeatUserMessage(
     return false;
   }
   const normalizedHeartbeatPrompt = heartbeatPrompt?.trim();
-  if (trimmed === HEARTBEAT_TRANSCRIPT_PROMPT) {
+  if (
+    HEARTBEAT_TRANSCRIPT_PROMPTS.includes(trimmed as (typeof HEARTBEAT_TRANSCRIPT_PROMPTS)[number])
+  ) {
     return true;
   }
   if (
     MESSAGE_TOOL_DELIVERY_HINTS.some((prefix) => trimmed.startsWith(prefix)) &&
-    trimmed.endsWith(HEARTBEAT_TRANSCRIPT_PROMPT)
+    HEARTBEAT_TRANSCRIPT_PROMPTS.some((marker) => trimmed.endsWith(marker))
   ) {
     return true;
   }

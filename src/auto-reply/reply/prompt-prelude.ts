@@ -7,7 +7,7 @@ import { MESSAGE_TOOL_ONLY_DELIVERY_HINT } from "../../plugin-sdk/message-tool-d
 import { annotateInterSessionPromptText } from "../../sessions/input-provenance.js";
 import { MEDIA_ONLY_USER_TEXT } from "../../sessions/user-turn-media.js";
 import type { SourceReplyDeliveryMode } from "../get-reply-options.types.js";
-import { HEARTBEAT_TRANSCRIPT_PROMPT } from "../heartbeat.js";
+import { resolveHeartbeatTranscriptPrompt } from "../heartbeat.js";
 import { buildInboundMediaNoteProjection } from "../media-note.js";
 import type { MsgContext, TemplateContext } from "../templating.js";
 import { appendChannelPromptContext } from "./channel-prompt-context.js";
@@ -234,7 +234,7 @@ export function buildReplyPromptEnvelopeBase(
   // Room-event transcript rows are plain chat lines; replay treats them as
   // conversation, while the OpenClaw marker remains current-turn context only.
   const transcriptBody = params.isHeartbeat
-    ? HEARTBEAT_TRANSCRIPT_PROMPT
+    ? resolveHeartbeatTranscriptPrompt(params.ctx.Provider)
     : params.isBareSessionReset
       ? softResetTail || `[OpenClaw session ${params.startupAction}]`
       : isRoomEvent
