@@ -58,6 +58,7 @@ const CORE_GATEWAY_METHOD_SPECS = [
   ["tts.enable", "tts", "operator.write", "<=2026.7"],
   ["tts.disable", "tts", "operator.write", "<=2026.7"],
   ["tts.convert", "tts", "operator.write", "<=2026.7"],
+  ["tts.stream", "tts", "operator.write", "2026.7"],
   ["tts.setProvider", "tts", "operator.write", "<=2026.7"],
   ["tts.setPersona", "tts", "operator.write", "<=2026.7"],
   ["config.get", "config", "operator.read", "<=2026.7"],
