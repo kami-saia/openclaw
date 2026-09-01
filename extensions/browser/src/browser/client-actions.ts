@@ -14,6 +14,11 @@ export {
 } from "./client-actions-core.js";
 export {
   browserConsoleMessages,
+  browserRequests,
+  browserErrors,
+  browserPageText,
+  // FORK: structured /extract endpoint used by `browser action=extract`.
   browserPageContent,
+  browserEmulateSetting,
   browserPdfSave,
 } from "./client-actions-observe.js";

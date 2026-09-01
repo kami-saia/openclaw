@@ -1,7 +1,8 @@
 // Config-keyed chat.startup projections shared across session switches.
 import { modelCatalogBrowseRequiresFullDiscovery } from "../../agents/model-catalog-browse.js";
 import type { ModelCatalogEntry } from "../../agents/model-catalog.types.js";
-import { resolveSwarmConfig } from "../../agents/swarm-config.js";
+import type { SessionListModelCatalog } from "../session-utils.types.js";
+import { resolveSwarmConfig } from "../../agents/subagents/swarm/swarm-config.js";
 import { hashRuntimeConfigValue } from "../../config/runtime-snapshot.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
@@ -182,7 +183,7 @@ export function listMemoizedChatStartupAgents(params: {
   includeSystem: boolean;
   catalogSnapshot: GatewayModelCatalogSnapshot;
   modelCatalog: ModelCatalogEntry[];
-  modelCatalogByAgentId: ReadonlyMap<string, ModelCatalogEntry[]>;
+  modelCatalogByAgentId: SessionListModelCatalog;
 }): ReturnType<typeof listAgentsForGateway> {
   const buildAgentsList = () =>
     listAgentsForGateway(params.cfg, params.modelCatalog, {

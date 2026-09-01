@@ -3,7 +3,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { loadSessionEntry, upsertSessionEntry } from "../../config/sessions/session-accessor.js";
+import {
+  loadSessionEntry,
+  upsertSessionEntryCore as upsertSessionEntry,
+} from "../../config/sessions/session-accessor.js";
 import {
   consumeSessionSkillSuggestion,
   recordSessionSkillCaptureSignals,
@@ -21,6 +24,8 @@ import {
   rejectSkillProposal,
 } from "../workshop/service.js";
 import * as workshopService from "../workshop/service.js";
+// Upstream moved listWritableWorkspaceSkillSummaries out of service.ts.
+import * as workspaceSkillRead from "../workshop/workspace-skill-read.js";
 import { runSkillResearchAutoCapture } from "./autocapture.js";
 
 const tempDirs = createTrackedTempDirs();
@@ -264,6 +269,8 @@ describe("skill research auto-capture", () => {
     await applySkillProposal({
       workspaceDir,
       proposalId: expectDefined(proposals.proposals[0], "proposals.proposals[0] test invariant").id,
+      // Upstream gates agent updates to Workshop-owned skills; operator apply is the reviewed path.
+      eventActor: { type: "gateway" },
     });
     const updatedSkill = await fs.readFile(skillFile, "utf8");
     expect(updatedSkill).toContain("Preserve this original review checklist.");
@@ -366,6 +373,8 @@ describe("skill research auto-capture", () => {
     await applySkillProposal({
       workspaceDir,
       proposalId: expectDefined(proposals.proposals[0], "proposals.proposals[0] test invariant").id,
+      // Upstream gates agent updates to Workshop-owned skills; operator apply is the reviewed path.
+      eventActor: { type: "gateway" },
     });
     const updatedSkill = await fs.readFile(skillFile, "utf8");
     expect(updatedSkill).toContain("Capture first, score later.");
@@ -426,6 +435,8 @@ describe("skill research auto-capture", () => {
     await applySkillProposal({
       workspaceDir,
       proposalId: expectDefined(proposals.proposals[0], "proposals.proposals[0] test invariant").id,
+      // Upstream gates agent updates to Workshop-owned skills; operator apply is the reviewed path.
+      eventActor: { type: "gateway" },
     });
     const updatedSkill = await fs.readFile(skillFile, "utf8");
     expect(updatedSkill).toContain("Capture first, score later.");
@@ -828,7 +839,7 @@ describe("skill research auto-capture", () => {
 
   it("performs no workspace skill discovery when the turn has no durable signal", async () => {
     const workspaceDir = await makeWorkspace();
-    const discovery = vi.spyOn(workshopService, "listWritableWorkspaceSkillSummaries");
+    const discovery = vi.spyOn(workspaceSkillRead, "listWritableWorkspaceSkillSummaries");
 
     await runSkillResearchAutoCapture({
       event: {

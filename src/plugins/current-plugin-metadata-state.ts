@@ -4,37 +4,27 @@ import {
   type ManifestModelIdNormalizationRecord,
 } from "@openclaw/model-catalog-core/provider-model-id-normalization";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { getPluginCache, getProcessPluginCache } from "./plugin-cache.js";
+import type { PluginMetadataSnapshot } from "./plugin-metadata-snapshot.types.js";
 
-let currentPluginMetadataSnapshot: unknown;
-let currentPluginMetadataSnapshotConfigFingerprint: string | undefined;
-let currentPluginMetadataSnapshotCompatiblePolicyHashes: readonly string[] | undefined;
-let currentPluginMetadataSnapshotCompatibleConfigFingerprints: readonly string[] | undefined;
-let currentManifestModelIdNormalizationRecords:
-  | readonly ManifestModelIdNormalizationRecord[]
-  | undefined;
-// Temporary snapshot owners compare this publication token before restoring;
-// lifecycle clears and newer publications must always win.
-let currentPluginMetadataSnapshotRevision = Symbol("plugin-metadata-snapshot");
-let currentPluginMetadataConfigIdentities = new WeakSet<OpenClawConfig>();
-
-export type CurrentPluginMetadataSnapshotRevision = typeof currentPluginMetadataSnapshotRevision;
+export type CurrentPluginMetadataSnapshotRevision = symbol;
 
 /** Owns config identity reuse for the current immutable metadata snapshot. */
 export const currentPluginMetadataConfigIdentityCache = {
   add(config: OpenClawConfig): void {
-    currentPluginMetadataConfigIdentities.add(config);
+    getProcessPluginCache().metadata.current.configIdentities.add(config);
   },
   capture(): WeakSet<OpenClawConfig> {
-    return currentPluginMetadataConfigIdentities;
+    return getProcessPluginCache().metadata.current.configIdentities;
   },
   clear(): void {
-    currentPluginMetadataConfigIdentities = new WeakSet();
+    getProcessPluginCache().metadata.current.configIdentities = new WeakSet();
   },
   has(config: OpenClawConfig): boolean {
-    return currentPluginMetadataConfigIdentities.has(config);
+    return getProcessPluginCache().metadata.current.configIdentities.has(config);
   },
   restore(identities: WeakSet<OpenClawConfig>): void {
-    currentPluginMetadataConfigIdentities = identities;
+    getProcessPluginCache().metadata.current.configIdentities = identities;
   },
 };
 
@@ -45,33 +35,34 @@ export function setCurrentPluginMetadataSnapshotState(
   compatiblePolicyHashes?: readonly string[],
   compatibleConfigFingerprints?: readonly string[],
   manifestModelIdNormalizationRecords?: readonly ManifestModelIdNormalizationRecord[],
+  owner: "gateway" | "operation" = "operation",
 ): CurrentPluginMetadataSnapshotRevision {
-  currentPluginMetadataSnapshot = snapshot;
-  currentPluginMetadataSnapshotConfigFingerprint = snapshot ? configFingerprint : undefined;
-  currentPluginMetadataSnapshotCompatiblePolicyHashes = snapshot
-    ? compatiblePolicyHashes
-    : undefined;
-  currentPluginMetadataSnapshotCompatibleConfigFingerprints = snapshot
-    ? compatibleConfigFingerprints
-    : undefined;
-  currentManifestModelIdNormalizationRecords = snapshot
+  const state = getProcessPluginCache().metadata.current;
+  state.snapshot = snapshot;
+  state.owner = owner;
+  state.configFingerprint = snapshot ? configFingerprint : undefined;
+  state.compatiblePolicyHashes = snapshot ? compatiblePolicyHashes : undefined;
+  state.compatibleConfigFingerprints = snapshot ? compatibleConfigFingerprints : undefined;
+  state.manifestModelIdNormalizationRecords = snapshot
     ? manifestModelIdNormalizationRecords
     : undefined;
-  setCurrentManifestModelIdNormalizationRecords(currentManifestModelIdNormalizationRecords);
-  currentPluginMetadataSnapshotRevision = Symbol("plugin-metadata-snapshot");
-  return currentPluginMetadataSnapshotRevision;
+  setCurrentManifestModelIdNormalizationRecords(state.manifestModelIdNormalizationRecords);
+  state.revision = Symbol("plugin-metadata-snapshot");
+  return state.revision;
 }
 
 /** Clears the process-current plugin metadata snapshot. */
 function clearCurrentPluginMetadataSnapshotState(): CurrentPluginMetadataSnapshotRevision {
-  currentPluginMetadataSnapshot = undefined;
-  currentPluginMetadataSnapshotConfigFingerprint = undefined;
-  currentPluginMetadataSnapshotCompatiblePolicyHashes = undefined;
-  currentPluginMetadataSnapshotCompatibleConfigFingerprints = undefined;
-  currentManifestModelIdNormalizationRecords = undefined;
+  const state = getProcessPluginCache().metadata.current;
+  state.snapshot = undefined;
+  state.owner = "operation";
+  state.configFingerprint = undefined;
+  state.compatiblePolicyHashes = undefined;
+  state.compatibleConfigFingerprints = undefined;
+  state.manifestModelIdNormalizationRecords = undefined;
   setCurrentManifestModelIdNormalizationRecords(undefined);
-  currentPluginMetadataSnapshotRevision = Symbol("plugin-metadata-snapshot");
-  return currentPluginMetadataSnapshotRevision;
+  state.revision = Symbol("plugin-metadata-snapshot");
+  return state.revision;
 }
 
 /** Clears the snapshot, its identity cache, and process-wide model normalization. */
@@ -80,21 +71,49 @@ export function clearCurrentPluginMetadataSnapshot(): void {
   clearCurrentPluginMetadataSnapshotState();
 }
 
+/** Install-ledger writes cannot retire metadata owned by a running Gateway. */
+export function isGatewayPluginMetadataSnapshotActive(): boolean {
+  const state = getProcessPluginCache().metadata.current;
+  return state.owner === "gateway" && state.snapshot !== undefined;
+}
+
+/** Reads the boot inventory without importing discovery into lightweight consumers. */
+export function getGatewayPluginMetadataSnapshot(): PluginMetadataSnapshot | undefined {
+  const cache = getPluginCache();
+  if (cache.kind === "process" && cache.metadata.current.owner === "gateway") {
+    // SAFETY: Gateway publication stores the complete typed snapshot in its owning generation.
+    return cache.metadata.current.snapshot as PluginMetadataSnapshot | undefined;
+  }
+  return undefined;
+}
+
+/** Management compares a fresh candidate with boot state without making boot its read context. */
+export function getProcessGatewayPluginMetadataSnapshot(): PluginMetadataSnapshot | undefined {
+  if (isGatewayPluginMetadataSnapshotActive()) {
+    // SAFETY: Production Gateway publication accepts only a complete typed snapshot.
+    return getProcessPluginCache().metadata.current.snapshot as PluginMetadataSnapshot;
+  }
+  return undefined;
+}
+
 /** Returns the process-current plugin metadata snapshot state. */
 export function getCurrentPluginMetadataSnapshotState(): {
   snapshot: unknown;
+  owner: "gateway" | "operation";
   configFingerprint: string | undefined;
   compatiblePolicyHashes: readonly string[] | undefined;
   compatibleConfigFingerprints: readonly string[] | undefined;
   manifestModelIdNormalizationRecords: readonly ManifestModelIdNormalizationRecord[] | undefined;
   revision: CurrentPluginMetadataSnapshotRevision;
 } {
+  const state = getProcessPluginCache().metadata.current;
   return {
-    snapshot: currentPluginMetadataSnapshot,
-    configFingerprint: currentPluginMetadataSnapshotConfigFingerprint,
-    compatiblePolicyHashes: currentPluginMetadataSnapshotCompatiblePolicyHashes,
-    compatibleConfigFingerprints: currentPluginMetadataSnapshotCompatibleConfigFingerprints,
-    manifestModelIdNormalizationRecords: currentManifestModelIdNormalizationRecords,
-    revision: currentPluginMetadataSnapshotRevision,
+    snapshot: state.snapshot,
+    owner: state.owner,
+    configFingerprint: state.configFingerprint,
+    compatiblePolicyHashes: state.compatiblePolicyHashes,
+    compatibleConfigFingerprints: state.compatibleConfigFingerprints,
+    manifestModelIdNormalizationRecords: state.manifestModelIdNormalizationRecords,
+    revision: state.revision,
   };
 }

@@ -1,4 +1,4 @@
-import { resolveStorePath } from "../../config/sessions/paths.js";
+import { resolveStorePath } from "../../plugin-sdk/session-store-runtime.js";
 import {
   claimSessionSkillCaptureSignals,
   readSessionSkillCaptureSignalHashes,
@@ -18,11 +18,11 @@ import { stripProposalFrontmatterForSkill } from "../workshop/frontmatter.js";
 import {
   inspectSkillProposal,
   listSkillProposals,
-  listWritableWorkspaceSkillSummaries,
   proposeCreateSkill,
   proposeUpdateSkill,
   reviseSkillProposal,
 } from "../workshop/service.js";
+import { listWritableWorkspaceSkillSummaries } from "../workshop/workspace-skill-read.js";
 import { resolveSkillProposalTarget } from "../workshop/store.js";
 import {
   type DurableInstruction,

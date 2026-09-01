@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@mariozechner/pi-ai";
+import type { AgentMessage } from "../../runtime/index.js";
 // FORK: Coverage for served-model resolution feeding the Runtime line's
 // `served_model=` token. buildRuntimeLine tests only cover rendering; these
 // cover the logic that decides WHAT gets rendered, which is where the real

@@ -50,7 +50,7 @@ every human `Thanks @...` attribution.
    writing grouped prose:
 
    ```bash
-   node .agents/skills/openclaw-changelog-update/scripts/verify-release-notes.mjs \
+   node --import tsx .agents/skills/openclaw-changelog-update/scripts/verify-release-notes.mjs \
      --base <base-tag> \
      --target <target-ref> \
      --main-ref origin/main \
@@ -58,6 +58,10 @@ every human `Thanks @...` attribution.
      --manifest /tmp/openclaw-release-<YYYY.M.PATCH>.json \
      --write-ledger
    ```
+
+   Add repeatable `--release-provenance '<40sha> -> #PR[, #PR]'` inputs when
+   release commits cannot carry provenance metadata. These use the same exact
+   marker grammar and current-main validation as commit-body markers.
 
    The verifier automatically reuses public GitHub GraphQL responses from an
    exact base/target SHA snapshot under the worktree's git metadata. Iterative
@@ -155,16 +159,20 @@ every human `Thanks @...` attribution.
      prose but are never rendered as a public `#### Direct commits` dump. Add
      direct-commit credit to a grouped bullet only when it shares an explicit
      closing issue reference or at least two distinctive subject terms
-   - the verifier rejects `docs`, `test`, `refactor`, `ci`, `build`, `chore`,
-     and `style` PRs in Highlights, Changes, or Fixes. Keep those internal
-     contributions in the complete PR record, but do not give them editorial
-     release-note space
-   - classify internal-only work from conventional prefixes and clear title
-     signals such as `QA`, `test`, `docs`, `refactor`, `lint`, or `CI`; an
-     untyped title is not automatically editorial
+   - the verifier rejects ordinary `docs`, `test`, `refactor`, `ci`, `build`,
+     `chore`, and `style` PRs in Highlights, Changes, or Fixes. An explicit
+     Conventional Commits `!` marker makes any type editorial-eligible; include
+     its verified user-facing breaking change and migration guidance with the
+     original PR ref and credit. Keep other internal contributions only in the
+     complete PR record
+   - classify conventional titles from their declared type and scope, not
+     incidental words such as `doc` or `build` in their descriptions. For
+     untyped titles, retain internal-work signals such as `QA`, `test`, `docs`,
+     `refactor`, `lint`, or `CI`; eligibility never replaces the source audit
+     that establishes a user-visible outcome
    - do not add GHSA references, advisory IDs, or security advisory slugs to
      changelog entries or GitHub release-note text unless explicitly requested
-   - never thank bots, `@claude`, `@openclaw`, `@clawsweeper`, or `@steipete`
+   - never thank bots, `@claude`, `@codex`, `@openclaw`, `@clawsweeper`, or `@steipete`
    - do not use GitHub's release contributor count as the source of truth; the
      changelog must carry the complete human credit set itself
 7. Sorting preference:
@@ -180,14 +188,15 @@ every human `Thanks @...` attribution.
 9. Check release-note side conditions:
    - inspect `src/plugins/compat/registry.ts`
    - inspect `src/commands/doctor/shared/deprecation-compat.ts`
-   - if any compatibility `removeAfter` is on/before release date, resolve it
-     or explicitly record the blocker before shipping
+   - if a deprecated compatibility record reaches `removeAfter`, remove it when
+     proven safe or move it to `removal-pending` and record the blocker; keep a
+     due `removal-pending` record only until its documented conditions are met
 10. Validate and ship:
 
 - after the manifest-driven rewrite, regenerate and verify the complete
   contribution record before committing:
   ```bash
-  node .agents/skills/openclaw-changelog-update/scripts/verify-release-notes.mjs \
+  node --import tsx .agents/skills/openclaw-changelog-update/scripts/verify-release-notes.mjs \
     --base <base-tag> \
     --target <target-ref> \
     --main-ref origin/main \
@@ -215,7 +224,7 @@ every human `Thanks @...` attribution.
 - after the GitHub release or prerelease is published, verify every matching
   release page against the same source section:
   ```bash
-  node .agents/skills/openclaw-changelog-update/scripts/verify-release-notes.mjs \
+  node --import tsx .agents/skills/openclaw-changelog-update/scripts/verify-release-notes.mjs \
     --base <base-tag> \
     --target <target-ref> \
     --version <YYYY.M.PATCH> \
@@ -225,7 +234,7 @@ every human `Thanks @...` attribution.
 - add one `--release-tag` for every beta and stable page in the train; a
   `### Release verification` tail is permitted, but any other body drift
   fails the check
-- `scripts/render-github-release-notes.mjs` is the canonical release-body
+- `scripts/render-github-release-notes.mts` is the canonical release-body
   renderer used by candidate validation, publish, and verification. When the
   complete `## YYYY.M.PATCH` section fits GitHub's 125,000-character limit and
   the renderer's matching 125,000-byte safety ceiling, the body must contain

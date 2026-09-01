@@ -10,7 +10,7 @@ import {
   readStringValue,
   wrapExternalContent,
 } from "./browser-tool.runtime.js";
-import type { BrowserProxyRequest } from "./browser-tool.snapshot.js";
+import type { BrowserProxyRequest } from "./browser-node-proxy.js";
 import {
   BROWSER_EXTRACT_MAX_CHARS,
   BROWSER_EXTRACT_TRUNCATION_MARKER,

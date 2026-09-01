@@ -4,19 +4,21 @@
 import { sanitizeForLog } from "../../../../packages/terminal-core/src/ansi.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import type { AssistantMessage } from "../../../llm/types.js";
-import { classifyRateLimitWindow } from "../../../llm/utils/rate-limit-window.js";
 import {
   projectAgentRunAttemptTerminal,
   type AgentRunAttemptTerminal,
 } from "../../agent-run-terminal-outcome.js";
 import type { AuthProfileFailureReason } from "../../auth-profiles.js";
 import {
-  formatAssistantErrorText,
   formatBillingErrorMessage,
+  formatUserFacingAssistantErrorText,
+  GENERIC_ASSISTANT_ERROR_TEXT,
   isTimeoutErrorMessage,
   type FailoverReason,
 } from "../../embedded-agent-helpers.js";
 import { FailoverError, resolveFailoverStatus } from "../../failover-error.js";
+import type { PreparedProviderFailoverOwner } from "../../failover/provider-patterns.js";
+import { classifyRateLimitWindow } from "../../failover/retry-evidence.js";
 import {
   mergeRetryFailoverReason,
   resolveRunFailoverDecision,
@@ -73,15 +75,16 @@ export async function handleAssistantFailover(params: {
   failoverReason: FailoverReason | null;
   harnessOwnsTransport: boolean;
   allowSameModelIdleTimeoutRetry: boolean;
-  allowSameModelRateLimitRetry: boolean;
   assistantProfileFailureReason: AuthProfileFailureReason | null;
   lastProfileId?: string;
   modelId: string;
   provider: string;
+  providerOwner?: PreparedProviderFailoverOwner;
   activeErrorContext: { provider: string; model: string };
   lastAssistant: AssistantMessage | undefined;
   config: OpenClawConfig | undefined;
   sessionKey?: string;
+  agentId?: string;
   authFailure: boolean;
   rateLimitFailure: boolean;
   billingFailure: boolean;
@@ -102,14 +105,14 @@ export async function handleAssistantFailover(params: {
     reason?: AuthProfileFailureReason | null;
     modelId?: string;
   }) => Promise<void>;
-  maybeEscalateRateLimitProfileFallback: (params: {
-    failoverProvider: string;
-    failoverModel: string;
-    logFallbackDecision: (decision: "fallback_model", extra?: { status?: number }) => void;
-  }) => void;
   maybeRetrySameModelRateLimit: (retry?: ShortWindowRateLimitRetry) => Promise<boolean>;
   maybeBackoffBeforeOverloadFailover: (reason: FailoverReason | null) => Promise<void>;
   advanceAuthProfile: () => Promise<boolean>;
+  advanceRateLimitAuthProfile: (context: {
+    failoverProvider: string;
+    failoverModel: string;
+    logFallbackDecision: (decision: "fallback_model", extra?: { status?: number }) => void;
+  }) => Promise<boolean>;
 }): Promise<AssistantFailoverOutcome> {
   const terminal = projectAgentRunAttemptTerminal(params.terminal);
   const externalAbort = terminal.externalAbort || params.signalOwnedInterruption;
@@ -190,26 +193,24 @@ export async function handleAssistantFailover(params: {
       }
     }
 
+    let rotated: boolean;
     if (params.failoverReason === "rate_limit") {
       // Minute-scale RPM windows can clear without spending a profile rotation
       // or model fallback. Keep the retry bounded; once exhausted, continue
       // through the existing rate-limit escalation path.
       const shortWindowRetry = resolveShortWindowRateLimitRetry(params.lastAssistant?.errorMessage);
-      if (
-        params.allowSameModelRateLimitRetry &&
-        shortWindowRetry &&
-        (await params.maybeRetrySameModelRateLimit(shortWindowRetry))
-      ) {
+      if (shortWindowRetry && (await params.maybeRetrySameModelRateLimit(shortWindowRetry))) {
         return sameModelRateLimitRetry();
       }
-      params.maybeEscalateRateLimitProfileFallback({
+      rotated = await params.advanceRateLimitAuthProfile({
         failoverProvider: params.activeErrorContext.provider,
         failoverModel: params.activeErrorContext.model,
         logFallbackDecision: params.logAssistantFailoverDecision,
       });
+    } else {
+      rotated = await params.advanceAuthProfile();
     }
 
-    const rotated = await params.advanceAuthProfile();
     const markFailedProfilePromise = markFailedProfile();
     if (timeoutFailure && !params.isProbeSession && failedProfileId) {
       const timeoutLabel = terminal.idleTimedOut ? "idle timeout (model silent)" : "timed out";
@@ -333,7 +334,9 @@ function resolveAssistantFailoverErrorMessage(params: {
   lastAssistant: AssistantMessage | undefined;
   config: OpenClawConfig | undefined;
   sessionKey?: string;
+  agentId?: string;
   activeErrorContext: { provider: string; model: string };
+  providerOwner?: PreparedProviderFailoverOwner;
   terminal: AgentRunAttemptTerminal;
   rateLimitFailure: boolean;
   billingFailure: boolean;
@@ -345,10 +348,12 @@ function resolveAssistantFailoverErrorMessage(params: {
     params.terminal.kind === "timeout" && params.terminal.source !== "observation";
   return (
     (params.lastAssistant
-      ? formatAssistantErrorText(params.lastAssistant, {
+      ? formatUserFacingAssistantErrorText(params.lastAssistant, {
           cfg: params.config,
           sessionKey: params.sessionKey,
+          agentId: params.agentId,
           provider: params.activeErrorContext.provider,
+          providerOwner: params.providerOwner,
           model: params.activeErrorContext.model,
           authMode: params.authMode,
         })
@@ -366,7 +371,7 @@ function resolveAssistantFailoverErrorMessage(params: {
             )
           : params.authFailure
             ? "LLM request unauthorized."
-            : "LLM request failed.")
+            : GENERIC_ASSISTANT_ERROR_TEXT)
   );
 }
 

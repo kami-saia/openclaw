@@ -13,7 +13,10 @@ import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths
 import { resolveConfigDir } from "../utils.js";
 import { readCronStoreStatePath } from "./store/config-state.js";
 import { cronStoreKey } from "./store/key.js";
-import { saveCronQuarantinedJobs } from "./store/quarantine.js";
+import {
+  deleteCronQuarantinedJobsFromDatabase,
+  saveCronQuarantinedJobs,
+} from "./store/quarantine.js";
 import {
   assertCronStoreCanPersist,
   deleteStaleCronJobFamilyRows,
@@ -23,11 +26,18 @@ import {
   updateCronRuntimeRows,
 } from "./store/row-codec.js";
 import type { CronJobFamilyIdentity } from "./store/row-codec.js";
+import {
+  loadCronRuntimeAuthorities,
+  repairCronRuntimeAuthorityRows,
+  replaceCronRuntimeAuthorityRows,
+} from "./store/runtime-authority-store.js";
+import type { CronStoreTransactionHooks } from "./store/transaction-hooks.types.js";
 import type {
   CronQuarantinedJob,
   LoadedCronStore,
   QuarantinedCronConfigJob,
 } from "./store/types.js";
+import type { CronStoreFile } from "./types.js";
 export type {
   CronConfigJobRuntimeEntry,
   CronQuarantinedJob,
@@ -35,7 +45,6 @@ export type {
   QuarantinedCronConfigJob,
 } from "./store/types.js";
 export { loadCronQuarantinedJobs, saveCronQuarantinedJobs } from "./store/quarantine.js";
-import type { CronStoreFile } from "./types.js";
 
 const MAX_TRACKED_CRON_STORE_REVISIONS = 64;
 const cronStoreRevisions = new Map<string, number>();
@@ -46,7 +55,7 @@ export function getCronJobsStoreRevision(storePath: string): number {
   return cronStoreRevisions.get(cronStoreKey(storePath)) ?? 0;
 }
 
-function noteCronJobsStoreCommit(storeKey: string): void {
+export function noteCronJobsStoreCommit(storeKey: string): void {
   // A bounded monotonic fact invalidates sibling service snapshots without
   // polling SQLite or discarding the current scheduler's transient run state.
   cronStoreRevisions.delete(storeKey);
@@ -91,7 +100,17 @@ export async function loadCronJobsStoreWithConfigJobs(storePath: string): Promis
   const database = openOpenClawStateDatabase().db;
   const rows = loadCronRows(database, storeKey);
   if (rows.length > 0) {
-    return loadedCronStoreFromRows(rows);
+    const loaded = loadedCronStoreFromRows(rows);
+    const authority = loadCronRuntimeAuthorities({
+      db: database,
+      storeKey,
+      jobs: loaded.store.jobs,
+    });
+    repairLoadedCronRuntimeAuthority({
+      storeKey,
+      jobIds: authority.repairJobIds,
+    });
+    return loaded;
   }
   return {
     store: { version: 1, jobs: [] },
@@ -100,6 +119,35 @@ export async function loadCronJobsStoreWithConfigJobs(storePath: string): Promis
     configJobRuntimeEntries: [],
     invalidConfigRows: [],
   };
+}
+
+function repairLoadedCronRuntimeAuthority(params: {
+  storeKey: string;
+  jobIds: readonly string[];
+}): void {
+  if (params.jobIds.length === 0) {
+    return;
+  }
+  const repaired = runOpenClawStateWriteTransaction(
+    ({ db }) => {
+      const rows = loadCronRows(db, params.storeKey);
+      if (rows.length === 0) {
+        return false;
+      }
+      const loaded = loadedCronStoreFromRows(rows);
+      return repairCronRuntimeAuthorityRows({
+        db,
+        storeKey: params.storeKey,
+        jobs: loaded.store.jobs,
+        jobIds: params.jobIds,
+      });
+    },
+    {},
+    { operationLabel: "cron.runtime-authority-repair" },
+  );
+  if (repaired) {
+    noteCronJobsStoreCommit(params.storeKey);
+  }
 }
 
 /** Removes an owned declarative job family left under obsolete absolute store keys. */
@@ -151,7 +199,9 @@ export async function loadCronJobsStoreWithConfigJobsReadOnly(
     }
     const rows = loadCronRows(db, storeKey);
     if (rows.length > 0) {
-      return loadedCronStoreFromRows(rows);
+      const loaded = loadedCronStoreFromRows(rows);
+      loadCronRuntimeAuthorities({ db, storeKey, jobs: loaded.store.jobs });
+      return loaded;
     }
     return emptyLoadedCronStore();
   } finally {
@@ -171,7 +221,17 @@ export function loadCronJobsStoreSync(storePath: string): CronStoreFile {
   const database = openOpenClawStateDatabase().db;
   const rows = loadCronRows(database, storeKey);
   if (rows.length > 0) {
-    return loadedCronStoreFromRows(rows).store;
+    const loaded = loadedCronStoreFromRows(rows);
+    const authority = loadCronRuntimeAuthorities({
+      db: database,
+      storeKey,
+      jobs: loaded.store.jobs,
+    });
+    repairLoadedCronRuntimeAuthority({
+      storeKey,
+      jobIds: authority.repairJobIds,
+    });
+    return loaded.store;
   }
   return { version: 1, jobs: [] };
 }
@@ -185,6 +245,11 @@ type SaveCronJobsStoreOptions = SaveCronStoreOptions & {
     entries: readonly (QuarantinedCronConfigJob | CronQuarantinedJob)[];
     nowMs: number;
   };
+  deleteQuarantineEntries?: readonly (QuarantinedCronConfigJob | CronQuarantinedJob)[];
+};
+
+type SaveCronJobsStoreInternalOptions = SaveCronJobsStoreOptions & {
+  transactionHooks?: CronStoreTransactionHooks;
 };
 
 /** Persists cron jobs, or only mutable runtime state when stateOnly is set. */
@@ -192,14 +257,23 @@ export async function saveCronJobsStore(
   storePath: string,
   store: CronStoreFile,
   opts?: SaveCronJobsStoreOptions,
-) {
+): Promise<void>;
+export async function saveCronJobsStore(
+  storePath: string,
+  store: CronStoreFile,
+  opts?: SaveCronJobsStoreInternalOptions,
+): Promise<void> {
   const resolvedStorePath = path.resolve(storePath);
   const storeKey = cronStoreKey(resolvedStorePath);
-  const stateOnly = opts?.stateOnly === true && !opts.quarantine?.entries.length;
+  const stateOnly =
+    opts?.stateOnly === true &&
+    !opts.quarantine?.entries.length &&
+    !opts.deleteQuarantineEntries?.length;
   if (!stateOnly) {
     assertCronStoreCanPersist(store);
   }
   runOpenClawStateWriteTransaction((database) => {
+    opts?.transactionHooks?.beforeWrite?.(database.db);
     if (opts?.quarantine?.entries.length) {
       saveCronQuarantinedJobs({
         storePath: resolvedStorePath,
@@ -208,14 +282,27 @@ export async function saveCronJobsStore(
         database,
       });
     }
+    if (opts?.deleteQuarantineEntries?.length) {
+      deleteCronQuarantinedJobsFromDatabase({
+        database: database.db,
+        storePath: resolvedStorePath,
+        entries: opts.deleteQuarantineEntries,
+      });
+    }
     // Hot-path timer updates mutate runtime columns only; malformed-row
     // quarantine and full replacement commit together or roll back together.
     if (stateOnly) {
       updateCronRuntimeRows(database.db, storeKey, store);
+      opts?.transactionHooks?.afterWrite?.(database.db);
       return;
     }
-    replaceCronRows(database.db, storeKey, store);
+    const normalizedJobs = replaceCronRows(database.db, storeKey, store);
+    replaceCronRuntimeAuthorityRows({ db: database.db, storeKey, jobs: normalizedJobs });
+    opts?.transactionHooks?.afterWrite?.(database.db);
   });
+  // Timeout outcomes may commit before their runner settles. Only after this
+  // commit may a deferred receipt terminal request become externally visible.
+  opts?.transactionHooks?.afterCommit?.();
   noteCronJobsStoreCommit(storeKey);
 }
 
@@ -225,6 +312,7 @@ export async function saveCronJobsStoreWithMetadata(
   store: CronStoreFile,
   acquireMetadata: (db: DatabaseSync) => boolean,
   quarantine?: SaveCronJobsStoreOptions["quarantine"],
+  deleteQuarantineEntries?: SaveCronJobsStoreOptions["deleteQuarantineEntries"],
 ): Promise<boolean> {
   const resolvedStorePath = path.resolve(storePath);
   const storeKey = cronStoreKey(resolvedStorePath);
@@ -241,7 +329,15 @@ export async function saveCronJobsStoreWithMetadata(
         database,
       });
     }
-    replaceCronRows(database.db, storeKey, store);
+    if (deleteQuarantineEntries?.length) {
+      deleteCronQuarantinedJobsFromDatabase({
+        database: database.db,
+        storePath: resolvedStorePath,
+        entries: deleteQuarantineEntries,
+      });
+    }
+    const normalizedJobs = replaceCronRows(database.db, storeKey, store);
+    replaceCronRuntimeAuthorityRows({ db: database.db, storeKey, jobs: normalizedJobs });
     return true;
   });
   if (committed) {

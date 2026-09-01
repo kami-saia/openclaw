@@ -27,6 +27,8 @@ import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { resolveUserTimezone } from "../date-time.js";
 import { restoreAgentOverflowStash } from "../embedded-agent-runner/run/agent-overflow-fallback.js";
 import { prepareCompaction, type SessionManager } from "../sessions/index.js";
+// FORK: reserveTokens default now lives in agent-core (dropped from AgentCompactionConfig upstream).
+import { DEFAULT_COMPACTION_SETTINGS } from "../../../packages/agent-core/src/harness/compaction/compaction.js";
 import type { AnyAgentTool } from "./common.js";
 
 const log = createSubsystemLogger("agent-compaction");
@@ -145,7 +147,7 @@ export function createCompactTool(options: {
         const keepRecent = typed.keepRecent !== false;
         const settings = {
           enabled: true,
-          reserveTokens: cfg?.agents?.defaults?.compaction?.reserveTokens ?? 0,
+          reserveTokens: DEFAULT_COMPACTION_SETTINGS.reserveTokens,
           // keepRecent=false is the overflow-fallback path: the recent tail was
           // already cut from the request and is re-appended by the runner.
           keepRecentTokens: keepRecent
@@ -206,7 +208,6 @@ export function createCompactTool(options: {
               sessionStore: storeCtx.sessionStore as never,
               sessionKey,
               storePath: storeCtx.storePath,
-              cfg,
             });
           } catch (countErr) {
             log.warn(`compact: compaction count update failed: ${String(countErr)}`);

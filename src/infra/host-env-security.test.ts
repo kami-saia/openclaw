@@ -1065,10 +1065,7 @@ describe("git env exploit regression", () => {
       fs.writeFileSync(helperPath, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\nexit 1\n`, "utf8");
       fs.chmodSync(helperPath, 0o755);
 
-      // Port 45999 (closed, high) instead of port 1: under WSL2 networkingMode=mirrored,
-      // connects to closed LOW ports blackhole instead of returning ECONNREFUSED, so git
-      // hangs to the 120s test timeout. High ports refuse instantly.
-      const target = "https://127.0.0.1:45999/does-not-matter";
+      const target = "https://127.0.0.1:1/does-not-matter";
       const unsafeEnv = {
         PATH: process.env.PATH ?? "/usr/bin:/bin",
         GIT_EXEC_PATH: helperDir,
@@ -1372,8 +1369,7 @@ describe("git env exploit regression", () => {
     const marker = path.join(os.tmpdir(), `openclaw-git-ssh-command-${process.pid}-${Date.now()}`);
     clearMarker(marker);
 
-    // See note above: closed low ports blackhole under WSL2 mirrored networking.
-    const target = "ssh://127.0.0.1:45999/does-not-matter";
+    const target = "ssh://127.0.0.1:1/does-not-matter";
     const exploitValue = `touch ${JSON.stringify(marker)}; false`;
     const gitSshCommandKey = "GIT_SSH_COMMAND";
     const baseEnv = {

@@ -47,6 +47,12 @@ async function withOllamaServer<T>(
               details: {},
             },
             {
+              name: "remote-model-only:latest",
+              size: 1,
+              remote_model: "upstream-chat",
+              details: {},
+            },
+            {
               name: "tagged-only:cloud",
               size: 1,
               details: {},
@@ -213,13 +219,7 @@ describe("Ollama node host inference", () => {
         expect(result.provider).toBe("ollama");
         expect(result.models).toHaveLength(200);
         expect(result.models[0]).toMatchObject({ name: "chat:loaded", loaded: true });
-        // Loaded models are sorted into the first probe batch, but a batch fires
-        // OLLAMA_SHOW_CONCURRENCY (8) requests via Promise.all. Asserting which of those
-        // 8 concurrent connections the server records FIRST assumes ordered TCP loopback.
-        // Under WSL2 networkingMode=mirrored the loopback shim reorders them (measured:
-        // ordered 6/15 over TCP vs 15/15 over a unix socket), so this flakes ~80% locally
-        // while passing on native-Linux CI. Assert the real guarantee: first batch.
-        expect(showRequests.slice(0, 8)).toContain("chat:loaded");
+        expect(showRequests[0]).toBe("chat:loaded");
         expect(showRequests).toHaveLength(200);
       },
       { models, loadedModels: [{ name: "chat:loaded" }] },
@@ -265,26 +265,19 @@ describe("Ollama node host inference", () => {
 
   it("rejects remote and non-chat models before inference", async () => {
     await withOllamaServer(async (baseUrl, chatRequests) => {
-      await expect(
-        commandByName(baseUrl, OLLAMA_CHAT_COMMAND).handle(
-          JSON.stringify({ model: "remote:cloud", prompt: "hello" }),
-        ),
-      ).rejects.toThrow("is not a local chat model");
-      await expect(
-        commandByName(baseUrl, OLLAMA_CHAT_COMMAND).handle(
-          JSON.stringify({ model: "tagged-only:cloud", prompt: "hello" }),
-        ),
-      ).rejects.toThrow("is not a local chat model");
-      await expect(
-        commandByName(baseUrl, OLLAMA_CHAT_COMMAND).handle(
-          JSON.stringify({ model: "tagged-only:120b-cloud", prompt: "hello" }),
-        ),
-      ).rejects.toThrow("is not a local chat model");
-      await expect(
-        commandByName(baseUrl, OLLAMA_CHAT_COMMAND).handle(
-          JSON.stringify({ model: "embedding:latest", prompt: "hello" }),
-        ),
-      ).rejects.toThrow("is not a local chat model");
+      for (const model of [
+        "remote:cloud",
+        "remote-model-only:latest",
+        "tagged-only:cloud",
+        "tagged-only:120b-cloud",
+        "embedding:latest",
+      ]) {
+        await expect(
+          commandByName(baseUrl, OLLAMA_CHAT_COMMAND).handle(
+            JSON.stringify({ model, prompt: "hello" }),
+          ),
+        ).rejects.toThrow("is not a local chat model");
+      }
       expect(chatRequests).toHaveLength(0);
     });
   });

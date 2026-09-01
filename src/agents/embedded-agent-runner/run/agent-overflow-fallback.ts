@@ -228,7 +228,9 @@ export function restoreAgentOverflowStash(input: {
   let restored = 0;
   for (const message of stash.messages) {
     try {
-      input.sessionManager.appendMessage(message);
+      input.sessionManager.appendMessage(
+        message as Parameters<SessionManager["appendMessage"]>[0],
+      );
       restored += 1;
     } catch (err) {
       log.warn(`[agent-overflow-fallback] restore append failed: ${String(err)}`);
@@ -238,7 +240,7 @@ export function restoreAgentOverflowStash(input: {
     input.sessionManager.appendMessage({
       role: "user",
       content: AGENT_OVERFLOW_RESUME_NOTICE,
-    } as AgentMessage);
+    } as Parameters<SessionManager["appendMessage"]>[0]);
   } catch (err) {
     log.warn(`[agent-overflow-fallback] resume notice append failed: ${String(err)}`);
   }

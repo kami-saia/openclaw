@@ -9,7 +9,10 @@ const AI_DEPENDENCIES = {
   openai: "6.45.0",
 };
 
-function createShrinkwrap() {
+function createShrinkwrap(): {
+  lockfileVersion: number;
+  packages: Record<string, Record<string, unknown>>;
+} {
   return {
     lockfileVersion: 3,
     packages: {

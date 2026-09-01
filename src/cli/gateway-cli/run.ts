@@ -4,10 +4,12 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { TLSSocket } from "node:tls";
 import { expectDefined } from "@openclaw/normalization-core";
+import { parseStrictPositiveInteger } from "@openclaw/normalization-core/number-coercion";
 import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
+import { normalizeTlsFingerprint } from "../../../packages/gateway-client/src/client-address-utils.js";
 import type {
   ConfigFileSnapshot,
   GatewayAuthMode,
@@ -52,15 +54,12 @@ import {
   findVerifiedGatewayListenerPidsOnPortSync,
   formatGatewayPidList,
 } from "../../infra/gateway-processes.js";
-import { parseStrictPositiveInteger } from "../../infra/parse-finite-number.js";
 import type { RespawnSupervisor } from "../../infra/supervisor-markers.js";
-import { normalizeFingerprint } from "../../infra/tls/fingerprint.js";
+import { isTailscaleRouteOwnershipConflictError } from "../../infra/tailscale-route-ownership-error.js";
 import { setConsoleSubsystemFilter, setConsoleTimestampPrefix } from "../../logging/console.js";
 import { withDiagnosticPhase } from "../../logging/diagnostic-phase.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { defaultRuntime } from "../../runtime.js";
-import { findOpenClawAgentDatabaseMediaMigrationRequiredError } from "../../state/openclaw-agent-db-migration-required.js";
-import { findOpenClawStateDatabaseSchemaMigrationRequiredError } from "../../state/openclaw-state-db-schema-migration-required.js";
 import { printClawBanner, type ClawBannerResult } from "../claw-banner.js";
 import { formatCliCommand } from "../command-format.js";
 import { formatInvalidConfigPort, formatInvalidPortOption } from "../error-format.js";
@@ -79,6 +78,7 @@ import { installQaParentWatchdog } from "./qa-parent-watchdog.js";
 import { runGatewayLoop } from "./run-loop.js";
 import type { GatewayRunOpts } from "./run-options.js";
 import type { GatewayRunRuntimeHooks } from "./runtime-hooks.js";
+import { resolveGatewayStartupMaintenanceReason } from "./startup-maintenance.js";
 
 const gatewayLog = createSubsystemLogger("gateway");
 
@@ -478,8 +478,8 @@ function resolveGatewayLockErrorExitCode(err: unknown): number {
 
 function resolveGatewayStartupFailureExitCode(err: unknown): number {
   return isInvalidConfigError(err) ||
-    findOpenClawAgentDatabaseMediaMigrationRequiredError(err) ||
-    findOpenClawStateDatabaseSchemaMigrationRequiredError(err)
+    isTailscaleRouteOwnershipConflictError(err) ||
+    resolveGatewayStartupMaintenanceReason(err)
     ? EXIT_CONFIG_ERROR
     : 1;
 }
@@ -536,9 +536,9 @@ async function probeGatewayHealthz(params: {
         if (params.tlsFingerprint) {
           const peerFingerprint =
             res.socket instanceof TLSSocket
-              ? normalizeFingerprint(res.socket.getPeerCertificate().fingerprint256 ?? "")
+              ? normalizeTlsFingerprint(res.socket.getPeerCertificate().fingerprint256 ?? "")
               : "";
-          if (peerFingerprint !== normalizeFingerprint(params.tlsFingerprint)) {
+          if (peerFingerprint !== normalizeTlsFingerprint(params.tlsFingerprint)) {
             res.resume();
             finish(false);
             return;
@@ -694,16 +694,11 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
   installQaParentWatchdog();
   const isDevProfile = normalizeOptionalLowercaseString(process.env.OPENCLAW_PROFILE) === "dev";
   const devMode = Boolean(opts.dev) || isDevProfile;
-  // Dev gateways inherit the operator shell. Suppress ambient channel credentials so a
-  // development instance cannot silently connect to real channel services.
-  const devAmbientEnvTriggers = opts.devAmbientChannels ? "allow" : "suppress";
+  // Gateways inherit the launching shell, so suppress ambient channel credentials unless the
+  // operator explicitly allows them for this run.
+  const ambientEnvTriggers = opts.ambientChannels || opts.devAmbientChannels ? "allow" : "suppress";
   if (opts.reset && !devMode) {
     defaultRuntime.error("Use --reset with --dev.");
-    defaultRuntime.exit(1);
-    return;
-  }
-  if (opts.devAmbientChannels && !devMode) {
-    defaultRuntime.error("Use --dev-ambient-channels with --dev.");
     defaultRuntime.exit(1);
     return;
   }
@@ -1118,13 +1113,7 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
     defaultRuntime.exit(EXIT_CONFIG_ERROR);
     return;
   }
-  const tailscaleOverride =
-    tailscaleMode || opts.tailscaleResetOnExit
-      ? {
-          ...(tailscaleMode ? { mode: tailscaleMode } : {}),
-          ...(opts.tailscaleResetOnExit ? { resetOnExit: true } : {}),
-        }
-      : undefined;
+  const tailscaleOverride = tailscaleMode ? { mode: tailscaleMode } : undefined;
 
   gatewayLog.info("starting...");
   startupTrace.mark("cli.gateway-loop");
@@ -1136,23 +1125,8 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
       : "start";
   let crashLoopDecision: GatewayCrashLoopBreakerDecision | undefined;
   let channelAutostartSuppression: { reason: "crash-loop-breaker"; message: string } | undefined;
+  let tryRecoverChannelAutostartSuppression: (() => boolean) | undefined;
   let activeBootId: string | undefined;
-  const tryRecoverChannelAutostartSuppression = () => {
-    const decision = inspectGatewayCrashLoopBreaker(process.env);
-    // The current safe-mode boot remains an open row until the full window has
-    // drained. Requiring zero prevents a near-expiry history from restoring
-    // channels before this process itself has proven stable for the whole window.
-    if (!decision.recovered || decision.uncleanBoots !== 0) {
-      return false;
-    }
-    const recoveredBootId = recordGatewayCrashLoopRecovery(activeBootId, process.env);
-    if (!recoveredBootId) {
-      return false;
-    }
-    activeBootId = recoveredBootId;
-    gatewayLog.info("gateway restart-loop breaker recovered; channel auto-start restored");
-    return true;
-  };
   const beginBoot = async (startedAtMs: number) => {
     // run-loop calls beginBoot before every startGatewayServer invocation, so
     // in-process restarts re-evaluate breaker state instead of reusing stale mode.
@@ -1168,6 +1142,7 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
     // row exists for Doctor to reconcile after it repairs the schema.
     activeBootId = recordGatewayBootStart(process.env, startedAtMs, bootStartReason);
     channelAutostartSuppression = undefined;
+    tryRecoverChannelAutostartSuppression = undefined;
     if (crashLoopDecision.recovered) {
       gatewayLog.info("gateway restart-loop breaker recovered; channel auto-start restored");
     }
@@ -1178,6 +1153,26 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
       `gateway restart-loop breaker tripped: ${crashLoopDecision.uncleanBoots} unclean boot(s) within ${crashLoopDecision.windowMs}ms; ` +
       `suppressing channel/provider account auto-start. Inspect the stability bundle and fix the startup crash before restarting the service. ${formatGatewayCrashLoopManualChannelStartHint()}`;
     channelAutostartSuppression = { reason: "crash-loop-breaker", message };
+    const suppressedBootId = activeBootId;
+    tryRecoverChannelAutostartSuppression = () => {
+      if (!suppressedBootId || activeBootId !== suppressedBootId) {
+        return false;
+      }
+      const decision = inspectGatewayCrashLoopBreaker(process.env);
+      // The current safe-mode boot remains an open row until the full window has
+      // drained. Requiring zero prevents a near-expiry history from restoring
+      // channels before this process itself has proven stable for the whole window.
+      if (!decision.recovered || decision.uncleanBoots !== 0) {
+        return false;
+      }
+      const recoveredBootId = recordGatewayCrashLoopRecovery(suppressedBootId, process.env);
+      if (!recoveredBootId || activeBootId !== suppressedBootId) {
+        return false;
+      }
+      activeBootId = recoveredBootId;
+      gatewayLog.info("gateway restart-loop breaker recovered; channel auto-start restored");
+      return true;
+    };
     gatewayLog.error(message);
     if (crashLoopDecision.shouldWriteStabilityBundle) {
       await maybeWriteGatewayStartupFailureBundle(
@@ -1193,6 +1188,7 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
   const startLoop = async () =>
     await runGatewayLoop({
       runtime: defaultRuntime,
+      ownsProcessLifecycle: true,
       lockPort: port,
       healthHost,
       beginBoot,
@@ -1202,6 +1198,7 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
         startupConfigSnapshotReadForNextStart = undefined;
         return await startGatewayServer(port, {
           bind,
+          ...(activeBootId ? { bootId: activeBootId } : {}),
           auth: authOverride,
           tailscale: tailscaleOverride,
           startupStartedAt,
@@ -1212,11 +1209,7 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
           ...(envSidecarStartupMode !== "start" ? { sidecarStartup: envSidecarStartupMode } : {}),
           ...(channelAutostartSuppression ? { channelAutostartSuppression } : {}),
           ...(channelAutostartSuppression ? { tryRecoverChannelAutostartSuppression } : {}),
-          ...(devMode
-            ? {
-                ambientEnvTriggers: devAmbientEnvTriggers,
-              }
-            : {}),
+          ambientEnvTriggers,
         });
       },
     });
@@ -1239,7 +1232,10 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
         `Gateway failed to start: ${errMessage}\nIf the gateway is supervised, stop it with: ${formatCliCommand("openclaw gateway stop")}`,
       );
       try {
-        const { formatPortDiagnostics, inspectPortUsage } = await import("../../infra/ports.js");
+        const [{ formatPortDiagnostics }, { inspectPortUsage }] = await Promise.all([
+          import("../../infra/ports-format.js"),
+          import("../../infra/ports-inspect.js"),
+        ]);
         const diagnostics = await inspectPortUsage(port);
         if (diagnostics.status === "busy") {
           for (const line of formatPortDiagnostics(diagnostics)) {
@@ -1257,35 +1253,10 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
     if (isInvalidConfigError(err)) {
       throw err;
     }
-    if (findOpenClawAgentDatabaseMediaMigrationRequiredError(err)) {
-      try {
-        const { parkCurrentLaunchAgentForMaintenance } = await import("../../daemon/launchd.js");
-        if (await parkCurrentLaunchAgentForMaintenance()) {
-          gatewayLog.error(
-            `gateway requires offline media migration; parked the managed LaunchAgent. Run ${formatCliCommand("openclaw doctor --fix")} to repair and restart it.`,
-          );
-        }
-      } catch (parkError) {
-        gatewayLog.error(
-          `failed to park the managed LaunchAgent after migration-required startup: ${formatErrorMessage(parkError)}`,
-        );
-      }
-    }
-    if (findOpenClawStateDatabaseSchemaMigrationRequiredError(err)) {
-      try {
-        const { parkCurrentLaunchAgentForMaintenance } = await import("../../daemon/launchd.js");
-        if (await parkCurrentLaunchAgentForMaintenance()) {
-          gatewayLog.error(
-            `gateway requires state database schema migration; parked the managed LaunchAgent. Run ${formatCliCommand("openclaw doctor --fix")} to repair and restart it.`,
-          );
-        }
-      } catch (parkError) {
-        gatewayLog.error(
-          `failed to park the managed LaunchAgent after state schema migration-required startup: ${formatErrorMessage(parkError)}`,
-        );
-      }
-    }
     await maybeWriteGatewayStartupFailureBundle(err);
+    if (resolveGatewayStartupMaintenanceReason(err)) {
+      throw err;
+    }
     defaultRuntime.error(
       `Gateway failed to start: ${formatErrorMessage(err)}. Run ${formatCliCommand("openclaw gateway status --deep")} for diagnostics.`,
     );

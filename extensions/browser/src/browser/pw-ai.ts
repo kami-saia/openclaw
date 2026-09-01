@@ -23,6 +23,7 @@ import {
   getConsoleMessagesViaPlaywright,
   getNetworkRequestsViaPlaywright,
   getPageErrorsViaPlaywright,
+  getPageTextViaPlaywright,
 } from "./pw-tools-core.activity.js";
 import {
   armDialogViaPlaywright,
@@ -31,6 +32,7 @@ import {
   uploadViaPlaywright,
   waitForDownloadViaPlaywright,
 } from "./pw-tools-core.downloads.js";
+// FORK: fork-only `browser action=extract` page capture.
 import { pageContentViaPlaywright } from "./pw-tools-core.extract.js";
 import {
   batchViaPlaywright,
@@ -59,7 +61,7 @@ import {
   snapshotAiViaPlaywright,
   snapshotAriaViaPlaywright,
   snapshotRoleViaPlaywright,
-  storeAriaSnapshotRefsViaPlaywright,
+  storeSnapshotRefsViaPlaywright,
 } from "./pw-tools-core.snapshot.js";
 import {
   emulateMediaViaPlaywright,
@@ -119,10 +121,12 @@ export const pwAi = {
   getConsoleMessagesViaPlaywright,
   getNetworkRequestsViaPlaywright,
   getPageErrorsViaPlaywright,
+  getPageTextViaPlaywright,
+  // FORK: fork-only `browser action=extract`.
+  pageContentViaPlaywright,
   highlightViaPlaywright,
   hoverViaPlaywright,
   navigateViaPlaywright,
-  pageContentViaPlaywright,
   pdfViaPlaywright,
   pressKeyViaPlaywright,
   resizeViewportViaPlaywright,
@@ -140,7 +144,7 @@ export const pwAi = {
   snapshotAiViaPlaywright,
   snapshotAriaViaPlaywright,
   snapshotRoleViaPlaywright,
-  storeAriaSnapshotRefsViaPlaywright,
+  storeSnapshotRefsViaPlaywright,
   screenshotWithLabelsViaPlaywright,
   storageClearViaPlaywright,
   storageGetViaPlaywright,

@@ -1,7 +1,9 @@
 // Session skill suggestions are one-shot hints consumed by the next interactive turn.
 import {
   loadSessionEntryReadOnly,
-  patchSessionEntry,
+  // FORK: upstream renamed the accessor-level patch to patchSessionEntryCore.
+  // Same (scope, update, options) signature and Promise<SessionEntry | null>.
+  patchSessionEntryCore as patchSessionEntry,
   type SessionAccessScope,
 } from "./session-accessor.js";
 import type { PendingSkillSuggestion, SessionEntry } from "./types.js";

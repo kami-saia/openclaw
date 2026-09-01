@@ -89,9 +89,9 @@ export function resolveNextSameModelRateLimitRetryCount(params: {
 }
 
 const ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL = "ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL";
-const ANTHROPIC_MAGIC_STRING_REPLACEMENT = "ANTHROPIC MAGIC STRING TRIGGER REFUSAL (redacted)";
+const ANTHROPIC_MAGIC_STRING_REPLACEMENT = "[redacted]";
 
-// Avoid Anthropic's refusal test token poisoning session transcripts.
+// Keep the replacement neutral: naming the refusal trigger can itself prompt a refusal.
 function scrubAnthropicRefusalMagic(prompt: string): string {
   if (!prompt.includes(ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL)) {
     return prompt;
@@ -113,7 +113,7 @@ export function resolveEmbeddedAttemptBasePrompt(params: {
   return scrubAnthropicRefusalMagic(params.prompt);
 }
 
-export function createCompactionDiagId(): string {
+export function createRunRecoveryDiagId(): string {
   return `ovf-${Date.now().toString(36)}-${generateSecureToken(4)}`;
 }
 
@@ -122,6 +122,8 @@ const RUN_RETRY_ITERATIONS_PER_PROFILE = 8;
 const MIN_RUN_RETRY_ITERATIONS = 32;
 const MAX_RUN_RETRY_ITERATIONS = 160;
 
+// This per-run bound multiplies whole-turn overload replays in
+// auto-reply/reply/agent-runner-error-handler.ts; keep their product test aligned.
 // Defensive guard for the outer run loop across all retry branches.
 export function resolveMaxRunRetryIterations(profileCandidateCount: number): number {
   const scaled =
@@ -189,37 +191,58 @@ export function resolveReportedModelRef(params: {
 
 export function resolveLatestCallUsage(params: {
   currentAttemptCandidates: readonly (NormalizedUsage | undefined)[];
-  carriedCandidates: readonly (NormalizedUsage | undefined)[];
+  carriedUsage: NormalizedUsage | undefined;
+  transcriptFallback: NormalizedUsage | undefined;
 }): {
   currentAttempt: NormalizedUsage | undefined;
   latest: NormalizedUsage | undefined;
 } {
   const currentAttempt = params.currentAttemptCandidates.find(hasNonzeroUsage);
+  const carriedUsage = hasNonzeroUsage(params.carriedUsage) ? params.carriedUsage : undefined;
+  const transcriptFallback = hasNonzeroUsage(params.transcriptFallback)
+    ? params.transcriptFallback
+    : undefined;
   return {
     currentAttempt,
-    latest: currentAttempt ?? params.carriedCandidates.find(hasNonzeroUsage),
+    latest: currentAttempt ?? carriedUsage ?? transcriptFallback,
   };
+}
+
+export function normalizeAssistantUsageForContext(
+  assistant: { api?: string; usage?: unknown } | null | undefined,
+): NormalizedUsage | undefined {
+  if (
+    assistant?.api === "cli" &&
+    assistant.usage &&
+    typeof assistant.usage === "object" &&
+    !Array.isArray(assistant.usage) &&
+    (assistant.usage as { contextUsage?: unknown }).contextUsage === undefined
+  ) {
+    return { contextUsage: { state: "unavailable" } };
+  }
+  return normalizeUsage(assistant?.usage as UsageSnapshot | undefined);
 }
 
 export function buildUsageAgentMetaFields(params: {
   usageAccumulator: UsageAccumulator;
-  lastAssistantUsage?: UsageSnapshot | null;
+  latestUsage?: UsageSnapshot | null;
   lastRunPromptUsage: UsageSnapshot | undefined;
-}): Pick<EmbeddedAgentMeta, "usage" | "lastCallUsage" | "promptTokens"> {
+}): Pick<EmbeddedAgentMeta, "usage" | "lastCallUsage" | "promptTokens" | "costUsd"> {
   const usage = toNormalizedUsage(params.usageAccumulator);
-  const lastAssistantUsage = normalizeUsage(params.lastAssistantUsage as never);
-  const lastCallUsage = hasNonzeroUsage(lastAssistantUsage)
-    ? lastAssistantUsage
+  const latestUsage = normalizeUsage(params.latestUsage as never);
+  const lastCallUsage = hasNonzeroUsage(latestUsage)
+    ? latestUsage
     : hasNonzeroUsage(params.lastRunPromptUsage)
       ? params.lastRunPromptUsage
       : undefined;
   const promptTokens = deriveContextPromptTokens({
-    lastCallUsage: params.lastRunPromptUsage,
+    lastCallUsage,
   });
   return {
     usage,
     lastCallUsage,
     promptTokens,
+    ...(usage?.cost ? { costUsd: usage.cost.total } : {}),
   };
 }
 
@@ -234,14 +257,15 @@ export function buildErrorAgentMeta(params: {
   sessionFile?: string;
   provider: string;
   model: string;
+  credentialSource?: EmbeddedAgentMeta["credentialSource"];
   contextTokens?: number;
   usageAccumulator: UsageAccumulator;
   lastRunPromptUsage: UsageSnapshot | undefined;
-  lastAssistant?: { usage?: unknown } | null;
+  currentAttemptAssistant?: { api?: string; usage?: unknown } | null;
 }): EmbeddedAgentMeta {
   const usageMeta = buildUsageAgentMetaFields({
     usageAccumulator: params.usageAccumulator,
-    lastAssistantUsage: params.lastAssistant?.usage as UsageSnapshot | undefined,
+    latestUsage: normalizeAssistantUsageForContext(params.currentAttemptAssistant),
     lastRunPromptUsage: params.lastRunPromptUsage,
   });
   return {
@@ -249,10 +273,13 @@ export function buildErrorAgentMeta(params: {
     ...(params.sessionFile ? { sessionFile: params.sessionFile } : {}),
     provider: params.provider,
     model: params.model,
+    ...(params.credentialSource ? { credentialSource: params.credentialSource } : {}),
     ...(params.contextTokens ? { contextTokens: params.contextTokens } : {}),
+    ...(params.contextTokens ? { contextTokensSource: "resolved" as const } : {}),
     ...(usageMeta.usage ? { usage: usageMeta.usage } : {}),
     ...(usageMeta.lastCallUsage ? { lastCallUsage: usageMeta.lastCallUsage } : {}),
     ...(usageMeta.promptTokens ? { promptTokens: usageMeta.promptTokens } : {}),
+    ...(usageMeta.costUsd !== undefined ? { costUsd: usageMeta.costUsd } : {}),
   };
 }
 

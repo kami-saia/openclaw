@@ -357,7 +357,7 @@ describe("compact-tool", () => {
         message: AgentMessage,
       ) => {
         order.push("message");
-        originalAppend(message);
+        originalAppend(message as Parameters<typeof originalAppend>[0]);
       };
       const tool = createCompactTool({
         sessionKey: KEY,

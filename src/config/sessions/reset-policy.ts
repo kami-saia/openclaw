@@ -1,6 +1,5 @@
 // Session reset policy resolves automatic freshness for direct, group, and thread sessions.
 import type { SessionConfig, SessionResetConfig, SessionResetMode } from "../types.base.js";
-import { DEFAULT_IDLE_MINUTES } from "./types.js";
 
 // FORK: "never" is our alias for upstream's disabled "none" mode (live configs persist it).
 // The union itself lives in ../types.base.ts so config and policy agree on one source of truth.
@@ -28,6 +27,7 @@ export type SessionFreshness = {
 // resolve time. Do not reintroduce a "never" default.
 const DEFAULT_RESET_MODE: SessionResetMode = "none";
 export const DEFAULT_RESET_AT_HOUR = 4;
+const DEFAULT_IDLE_MINUTES = 0;
 
 /** Normalizes the legacy fork alias "never" onto upstream's disabled mode. */
 function normalizeResetMode(mode: SessionResetMode | undefined): SessionResetMode | undefined {

@@ -5,7 +5,7 @@ import {
   HeartbeatSchema,
   AgentSandboxSchema,
   AgentContextLimitsSchema,
-  AgentModelRuntimeEntrySchema,
+  AgentModelMapSchema,
   AgentModelPolicySchema,
   AgentModelSchema,
   AgentToolModelSchema,
@@ -64,6 +64,7 @@ export const AgentDefaultsSchema = z
     /** Global default provider params applied to all models before per-model and per-agent overrides. */
     params: z.record(z.string(), z.unknown()).optional(),
     model: AgentModelSchema.optional(),
+    modelSelectionScope: z.enum(["session", "agent", "global"]).optional(),
     utilityModel: z.string().optional(),
     imageModel: AgentToolModelSchema.optional(),
     mediaModels: z
@@ -78,7 +79,7 @@ export const AgentDefaultsSchema = z
     pdfModel: AgentToolModelSchema.optional(),
     pdfMaxMb: z.number().positive().optional(),
     pdfMaxPages: z.number().int().positive().optional(),
-    models: z.record(z.string(), AgentModelRuntimeEntrySchema).optional(),
+    models: AgentModelMapSchema.optional(),
     modelPolicy: AgentModelPolicySchema.optional(),
     workspace: z.string().optional(),
     skills: z.array(z.string()).optional(),
@@ -115,7 +116,6 @@ export const AgentDefaultsSchema = z
       .strict()
       .optional(),
     contextLimits: AgentContextLimitsSchema,
-    contextTokens: z.number().int().positive().optional(),
     contextPruning: z
       .object({
         mode: z.union([z.literal("off"), z.literal("cache-ttl")]).optional(),
@@ -144,7 +144,7 @@ export const AgentDefaultsSchema = z
           .union([z.literal("default"), z.literal("safeguard"), z.literal("agent")])
           .optional(),
         provider: z.string().optional(),
-        thinkingLevel: AgentThinkingLevelSchema.optional(),
+        thinkingLevel: z.union([AgentThinkingLevelSchema, z.literal("inherit")]).optional(),
         keepRecentTokens: z.number().int().positive().optional(),
         identifierPolicy: z.union([z.literal("strict"), z.literal("off")]).optional(),
         recentTurnsPreserve: z.number().int().min(0).max(12).optional(),
@@ -212,6 +212,18 @@ export const AgentDefaultsSchema = z
         // the SAME host-side classifier as the Control UI: approval is judged
         // from the operator's own message text, never from a model assertion.
         trustDelegatedOperatorApproval: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+    authInheritance: z
+      .object({
+        agentId: z.string().trim().min(1).optional(),
+      })
+      .strict()
+      .optional(),
+    sessionStore: z
+      .object({
+        agentId: z.string().trim().min(1).optional(),
       })
       .strict()
       .optional(),
