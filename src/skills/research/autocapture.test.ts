@@ -23,7 +23,6 @@ import {
   proposeCreateSkill,
   rejectSkillProposal,
 } from "../workshop/service.js";
-import * as workshopService from "../workshop/service.js";
 // Upstream moved listWritableWorkspaceSkillSummaries out of service.ts.
 import * as workspaceSkillRead from "../workshop/workspace-skill-read.js";
 import { runSkillResearchAutoCapture } from "./autocapture.js";

@@ -180,7 +180,7 @@ describe("agent-overflow-fallback", () => {
     });
 
     it("honours an explicit cutMessages target", () => {
-      const entries = [...Array.from({ length: 10 }, (_, i) => entry(`u${i}`, "user"))];
+      const entries = Array.from({ length: 10 }, (_, i) => entry(`u${i}`, "user"));
       const { manager } = createManager(entries);
       const result = prepareAgentOverflowFallback({
         sessionManager: manager,

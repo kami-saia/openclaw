@@ -216,6 +216,7 @@ export async function runEmbeddedAttempt(
           withSessionWriteLock: (run) =>
             compactLive.withLock ? compactLive.withLock(run) : Promise.resolve(run()),
           updateAgentMessagesAfterCompaction: (toolCallId, resultText) => {
+            // SAFETY: only buildSessionContext is called; the cast narrows to that one method.
             const manager = compactLive.sessionManager as
               | { buildSessionContext: () => { messages: unknown[] } }
               | undefined;
@@ -225,11 +226,12 @@ export async function runEmbeddedAttempt(
             }
             try {
               const ctx = manager.buildSessionContext();
+              // SAFETY: session context messages are plain records; only keys are read/written.
               const messages = [...(ctx.messages as Array<Record<string, unknown>>)];
               const last = messages.at(-1);
               const lastContent =
                 last && Array.isArray(last.content)
-                  ? (last.content as Array<Record<string, unknown>>)
+                  ? (last.content as Array<Record<string, unknown>>) // SAFETY: Array.isArray checked.
                   : [];
               // The SDK appends the assistant toolCall before execute() and the
               // real toolResult after it returns; swapping state mid-execute
@@ -249,6 +251,7 @@ export async function runEmbeddedAttempt(
                   timestamp: Date.now(),
                 });
               }
+              // SAFETY: messages came from state.messages via buildSessionContext, same shape back.
               state.messages = messages as never;
             } catch {
               /* best-effort: compaction already landed on disk */

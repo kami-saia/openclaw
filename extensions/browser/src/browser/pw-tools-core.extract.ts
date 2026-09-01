@@ -72,6 +72,7 @@ function capturePageHtmlForExtract(params: {
         }
         return clone;
       };
+      // SAFETY: cloneWithoutIgnoredNodes returns an Element clone or null; node is an Element.
       return (cloneWithoutIgnoredNodes(node) as Element | null)?.outerHTML ?? "";
     })
     .filter(Boolean)

@@ -94,6 +94,7 @@ function readToolCallAction(value: unknown): string | undefined {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     return undefined;
   }
+  // SAFETY: non-null, non-array object verified above; `.action` is read as unknown.
   const action = (input as { action?: unknown }).action;
   return typeof action === "string" ? action.trim().toLowerCase() : undefined;
 }
@@ -102,6 +103,7 @@ function isSkillWorkshopMutationBlock(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
   }
+  // SAFETY: non-null, non-array object verified above; every field is read as unknown.
   const block = value as {
     type?: unknown;
     name?: unknown;
@@ -126,6 +128,7 @@ function hasUnfailedSkillWorkshopMutationCall(messages: readonly unknown[]): boo
     if (!message || typeof message !== "object" || Array.isArray(message)) {
       continue;
     }
+    // SAFETY: non-null, non-array object verified above; `.content` is read as unknown.
     const content = (message as { content?: unknown }).content;
     const blocks = Array.isArray(content) ? content : [content];
     for (const block of blocks) {
@@ -134,7 +137,7 @@ function hasUnfailedSkillWorkshopMutationCall(messages: readonly unknown[]): boo
       }
       const id =
         block && typeof block === "object" && !Array.isArray(block)
-          ? (block as { id?: unknown }).id
+          ? (block as { id?: unknown }).id // SAFETY: non-null, non-array object verified above.
           : undefined;
       if (typeof id === "string" && id) {
         callIds.add(id);
@@ -150,6 +153,7 @@ function hasUnfailedSkillWorkshopMutationCall(messages: readonly unknown[]): boo
     if (!message || typeof message !== "object" || Array.isArray(message)) {
       continue;
     }
+    // SAFETY: non-null, non-array object verified above; all three fields are read as unknown.
     const result = message as { role?: unknown; toolCallId?: unknown; isError?: unknown };
     if (
       result.role === "toolResult" &&
@@ -169,6 +173,7 @@ function currentTurnMessages(messages: readonly unknown[]): readonly unknown[] {
       message &&
       typeof message === "object" &&
       !Array.isArray(message) &&
+      // SAFETY: preceding conjuncts proved message is a non-null, non-array object.
       (message as { role?: unknown }).role === "user"
     ) {
       return messages.slice(index);

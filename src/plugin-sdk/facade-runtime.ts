@@ -33,7 +33,9 @@ export function createLazyFacadeValue<TFacade extends object, K extends keyof TF
     if (typeof value !== "function") {
       return value;
     }
+    // SAFETY: non-function facade values are returned as-is above; this branch is callable.
     return (value as (...innerArgs: unknown[]) => unknown)(...args);
+    // SAFETY: the wrapper forwards args and return value verbatim to the facade member.
   }) as TFacade[K];
 }
 
@@ -150,6 +152,7 @@ function loadFacadeActivationCheckRuntimeFromCandidates(
 ): FacadeActivationCheckRuntimeModule | undefined {
   for (const candidate of FACADE_ACTIVATION_CHECK_RUNTIME_CANDIDATES) {
     try {
+      // SAFETY: candidates are the known activation-check runtime modules; failures fall through.
       return loadCandidate(candidate) as FacadeActivationCheckRuntimeModule;
     } catch {
       // Try source/runtime candidates in order.
@@ -302,6 +305,7 @@ export const testing = {
   ) =>
     loadFacadeActivationCheckRuntime().evaluateBundledPluginPublicSurfaceAccess(
       ...args,
+      // SAFETY: the wrapper's params and return type are derived from the same runtime member.
     )) as FacadeActivationCheckRuntimeModule["evaluateBundledPluginPublicSurfaceAccess"],
   throwForBundledPluginPublicSurfaceAccess: ((
     ...args: Parameters<
@@ -310,12 +314,14 @@ export const testing = {
   ) =>
     loadFacadeActivationCheckRuntime().throwForBundledPluginPublicSurfaceAccess(
       ...args,
+      // SAFETY: the wrapper's params and return type are derived from the same runtime member.
     )) as FacadeActivationCheckRuntimeModule["throwForBundledPluginPublicSurfaceAccess"],
   resolveActivatedBundledPluginPublicSurfaceAccessOrThrow: ((
     params: BundledPluginPublicSurfaceParams,
   ) =>
     loadFacadeActivationCheckRuntime().resolveActivatedBundledPluginPublicSurfaceAccessOrThrow(
       buildFacadeActivationCheckParams(params),
+      // SAFETY: mirrors resolveActivatedBundledPluginPublicSurfaceAccessOrThrow's runtime return.
     )) as (params: BundledPluginPublicSurfaceParams) => {
     allowed: boolean;
     pluginId?: string;
@@ -324,6 +330,7 @@ export const testing = {
   resolveBundledPluginPublicSurfaceAccess: ((params: BundledPluginPublicSurfaceParams) =>
     loadFacadeActivationCheckRuntime().resolveBundledPluginPublicSurfaceAccess(
       buildFacadeActivationCheckParams(params),
+      // SAFETY: mirrors resolveBundledPluginPublicSurfaceAccess's runtime return shape.
     )) as (params: BundledPluginPublicSurfaceParams) => {
     allowed: boolean;
     pluginId?: string;
@@ -332,6 +339,7 @@ export const testing = {
   resolveTrackedFacadePluginId: ((params: BundledPluginPublicSurfaceParams) =>
     loadFacadeActivationCheckRuntime().resolveTrackedFacadePluginId(
       buildFacadeActivationCheckParams(params),
+      // SAFETY: resolveTrackedFacadePluginId returns the plugin id string at runtime.
     )) as (params: BundledPluginPublicSurfaceParams) => string,
 };
 export { testing as __testing };

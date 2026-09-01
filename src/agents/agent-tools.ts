@@ -934,7 +934,9 @@ function createOpenClawCodingToolsInternal(options?: OpenClawCodingToolsOptions)
             senderIsOwner: options?.senderIsOwner,
             authProfileStore: options?.authProfileStore,
             // FORK: agent compaction tool runtime handles.
+            // SAFETY: `never` bridges the fork-only compaction runtime onto upstream's option type.
             getSessionManager: options?.compactToolRuntime?.getSessionManager as never,
+            // SAFETY: same fork-only compaction runtime bridge as getSessionManager above.
             getSessionStoreContext: options?.compactToolRuntime?.getSessionStoreContext as never,
             updateAgentMessagesAfterCompaction:
               options?.compactToolRuntime?.updateAgentMessagesAfterCompaction,

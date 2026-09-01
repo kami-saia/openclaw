@@ -22,6 +22,7 @@ export function resolveLastServedModel(messages: AgentMessage[] | undefined): st
     if (message?.role !== "assistant") {
       continue;
     }
+    // SAFETY: responseModel is a fork-added optional field read as unknown and type-checked below.
     const served = (message as unknown as { responseModel?: unknown }).responseModel;
     if (typeof served === "string" && served.trim().length > 0) {
       return served;

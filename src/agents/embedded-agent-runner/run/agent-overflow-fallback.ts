@@ -86,6 +86,7 @@ function messageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 
 function entryRole(entry: SessionEntry | undefined): string | undefined {
   const message = entry ? messageFromEntry(entry) : undefined;
+  // SAFETY: only the optional `role` field is read, as a possibly-undefined string.
   return message ? (message as { role?: string }).role : undefined;
 }
 
@@ -142,6 +143,7 @@ function resolveTurnBoundaryCutIndex(entries: SessionEntry[], targetCut: number)
     }
   }
   // Last resort: upstream's turn-start scan, in case role shapes differ.
+  // SAFETY: findTurnStartIndex only indexes and role-checks entries; `never[]` bridges the signature.
   const turnStart = findTurnStartIndex(entries as never[], desired, 1);
   if (turnStart > 0 && turnStart < entries.length) {
     return turnStart;
@@ -167,6 +169,7 @@ export function prepareAgentOverflowFallback(input: {
     // A previous fallback for this session never completed; do not stack cuts.
     return null;
   }
+  // SAFETY: getBranch returns the session's own entry list; SessionEntry is its declared shape.
   const entries = input.sessionManager.getBranch() as SessionEntry[];
   const cutIndex = resolveTurnBoundaryCutIndex(
     entries,
@@ -229,6 +232,7 @@ export function restoreAgentOverflowStash(input: {
   for (const message of stash.messages) {
     try {
       input.sessionManager.appendMessage(
+        // SAFETY: stashed messages came out of this same session manager unmodified.
         message as Parameters<SessionManager["appendMessage"]>[0],
       );
       restored += 1;
@@ -240,6 +244,7 @@ export function restoreAgentOverflowStash(input: {
     input.sessionManager.appendMessage({
       role: "user",
       content: AGENT_OVERFLOW_RESUME_NOTICE,
+      // SAFETY: literal user message matches the appendMessage payload shape.
     } as Parameters<SessionManager["appendMessage"]>[0]);
   } catch (err) {
     log.warn(`[agent-overflow-fallback] resume notice append failed: ${String(err)}`);

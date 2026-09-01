@@ -193,6 +193,7 @@ export function validateBrowserExtractSchema(
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       return "schema contains an invalid subschema.";
     }
+    // SAFETY: guarded above by a non-null object, non-array typeof check.
     const record = value as Record<string, unknown>;
     if (
       Object.hasOwn(record, "$ref") ||
@@ -523,6 +524,7 @@ export async function executeExtractAction(params: {
         timeoutMs,
         signal: params.signal,
         body: request,
+        // SAFETY: the /extract proxy route returns the browserPageContent payload verbatim.
       })) as Awaited<ReturnType<typeof browserPageContent>>)
     : await params.deps.browserPageContent(params.baseUrl, {
         ...request,
@@ -567,6 +569,7 @@ function readIgnoreSelectors(value: unknown): string[] | undefined {
   if (selectors.some((entry) => !entry)) {
     throw new Error("ignoreSelectors must be an array of non-empty CSS selectors.");
   }
+  // SAFETY: the .some() check above rejected every empty/undefined entry.
   return selectors.length > 0 ? (selectors as string[]) : undefined;
 }
 
@@ -577,5 +580,6 @@ function readExtractSchema(value: unknown): JsonSchemaObject | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("schema must be a JSON Schema object.");
   }
+  // SAFETY: non-null, non-array object verified above; schema shape is validated by the caller.
   return value as JsonSchemaObject;
 }

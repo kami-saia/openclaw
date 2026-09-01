@@ -40,6 +40,7 @@ export function resolveTelegramUpdateId(update: unknown): number | null {
   if (!update || typeof update !== "object") {
     return null;
   }
+  // SAFETY: non-null object verified above; update_id is read as unknown and validated.
   const value = (update as { update_id?: unknown }).update_id;
   return isValidUpdateId(value) ? value : null;
 }
@@ -79,6 +80,7 @@ export function openTelegramIngressQueue(
 
 export function telegramSpooledUpdateLaneKey(update: unknown, botInfo?: TelegramBotInfo): string {
   return getTelegramSequentialKey({
+    // SAFETY: spooled updates are Telegram payloads already parsed by the ingress decoder.
     update: update as Parameters<typeof getTelegramSequentialKey>[0]["update"],
     ...(botInfo ? { me: botInfo } : {}),
   });

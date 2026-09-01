@@ -9,8 +9,10 @@ function readTextValue(value: unknown): string {
   if (
     value &&
     typeof value === "object" &&
+    // SAFETY: non-null object verified above; `.value` is read as unknown before the string check.
     typeof (value as { value?: unknown }).value === "string"
   ) {
+    // SAFETY: the typeof check on the same property just above proves it is a string.
     return (value as { value: string }).value;
   }
   return "";
@@ -20,10 +22,12 @@ function extractTextBlock(block: unknown): string {
   if (!block || typeof block !== "object") {
     return "";
   }
+  // SAFETY: non-null object verified above; `.type` is read as unknown and validated below.
   const type = (block as { type?: unknown }).type;
   if (typeof type !== "string" || !TEXT_BLOCK_TYPES.has(type)) {
     return "";
   }
+  // SAFETY: non-null object verified above; `.text` is read as unknown and normalized downstream.
   return readTextValue((block as { text?: unknown }).text);
 }
 
@@ -44,7 +48,9 @@ export function extractTranscriptText(messages: unknown[]): Array<{ role: string
     if (!message || typeof message !== "object") {
       continue;
     }
+    // SAFETY: non-null object verified above; both fields are read as unknown and checked below.
     const role = (message as { role?: unknown }).role;
+    // SAFETY: same non-null object guard; content is normalized by extractMessageText.
     const content = (message as { content?: unknown }).content;
     if (typeof role !== "string") {
       continue;

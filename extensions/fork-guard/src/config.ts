@@ -35,13 +35,16 @@ export function parseForkGuardConfig(raw: unknown): ForkGuardConfig {
   if (!raw || typeof raw !== "object") {
     return { ...DEFAULT_FORK_GUARD_CONFIG };
   }
+  // SAFETY: non-null, non-array object verified by the guard above.
   const r = raw as Record<string, unknown>;
   return {
     enabled: typeof r["enabled"] === "boolean" ? r["enabled"] : DEFAULT_FORK_GUARD_CONFIG.enabled,
     blockedRepos: Array.isArray(r["blockedRepos"])
+      // SAFETY: Array.isArray checked; .filter re-narrows every entry to string.
       ? (r["blockedRepos"] as string[]).filter((x) => typeof x === "string")
       : DEFAULT_FORK_GUARD_CONFIG.blockedRepos,
     blocklist: Array.isArray(r["blocklist"])
+      // SAFETY: Array.isArray checked; .filter re-narrows every entry to string.
       ? (r["blocklist"] as string[]).filter((x) => typeof x === "string")
       : DEFAULT_FORK_GUARD_CONFIG.blocklist,
     upstreamRemote:

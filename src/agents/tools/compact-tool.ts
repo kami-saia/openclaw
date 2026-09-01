@@ -119,6 +119,7 @@ export function createCompactTool(options: {
     parameters: CompactToolSchema,
     async execute(toolCallId, params) {
       const prep = options.prepareCompactionOverride ?? prepareCompaction;
+      // SAFETY: params is validated against CompactToolSchema before execute runs.
       const typed = params as { summary?: string; keepRecent?: boolean };
       const summary = typed.summary?.trim();
       if (!summary) {
@@ -205,6 +206,7 @@ export function createCompactTool(options: {
           try {
             await incrementCompactionCount({
               ...(storeCtx.agentId ? { agentId: storeCtx.agentId } : {}),
+              // SAFETY: store context owns this sessionStore; `never` bridges the fork-only handle.
               sessionStore: storeCtx.sessionStore as never,
               sessionKey,
               storePath: storeCtx.storePath,

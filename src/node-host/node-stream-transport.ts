@@ -70,6 +70,7 @@ const loopbackLookup: net.LookupFunction = (
   callback: Parameters<net.LookupFunction>[2],
 ): void => {
   if (options && typeof options === "object" && options.all) {
+    // SAFETY: options.all selects the all-addresses callback overload of net.LookupFunction.
     (callback as (err: null, addresses: { address: string; family: number }[]) => void)(
       null,
       LOOPBACK_ADDRESSES,

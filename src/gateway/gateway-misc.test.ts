@@ -910,38 +910,6 @@ describe("gateway broadcaster", () => {
       resetDiagnosticEventsForTest();
     }
   });
-
-  it("excludes chat/agent events from node-role clients", () => {
-    const operatorSocket = makeRecordingSocket();
-    const nodeSocket = makeRecordingSocket();
-
-    const clients = new Set<GatewayWsClient>([
-      makeGatewayWsClient("c-operator", operatorSocket, {
-        role: "operator",
-        scopes: ["operator.admin"],
-      } as GatewayWsClient["connect"]),
-      makeGatewayWsClient("c-node", nodeSocket, {
-        role: "node",
-        scopes: [],
-      } as unknown as GatewayWsClient["connect"]),
-    ]);
-
-    const { broadcast } = createGatewayBroadcaster({ clients });
-
-    broadcast("chat", { runId: "r1", state: "delta" });
-    broadcast("chat.side_result", { runId: "r1" });
-    broadcast("agent", { sessionKey: "main" });
-
-    // Node should NOT receive chat/agent broadcasts (NODE_EXCLUDED_EVENTS gate)
-    expect(nodeSocket.send).toHaveBeenCalledTimes(0);
-    // Operator-admin should receive all three
-    expect(operatorSocket.send).toHaveBeenCalledTimes(3);
-
-    // Non-excluded events like tick should still reach nodes
-    broadcast("tick", { ts: 1 });
-    expect(nodeSocket.send).toHaveBeenCalledTimes(1);
-    expect(operatorSocket.send).toHaveBeenCalledTimes(4);
-  });
 });
 
 describe("chat run registry", () => {

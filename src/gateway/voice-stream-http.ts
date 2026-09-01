@@ -164,6 +164,7 @@ export async function handleVoiceStreamRequest(
       return true;
     }
     await pipeline(
+      // SAFETY: audioStream is a web ReadableStream of bytes; Readable.fromWeb needs the node typing.
       Readable.fromWeb(result.audioStream as unknown as NodeWebReadableStream<Uint8Array>),
       res,
     );
@@ -180,7 +181,3 @@ export async function handleVoiceStreamRequest(
   }
 }
 
-/** Test seam: clears registered pending streams. */
-export function __resetVoiceStreamsForTest(): void {
-  pendingVoiceStreams.clear();
-}

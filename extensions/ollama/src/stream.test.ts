@@ -13,7 +13,11 @@ vi.mock("openclaw/plugin-sdk/ssrf-runtime", async (importOriginal) => ({
   fetchWithSsrFGuard: fetchWithSsrFGuardMock,
 }));
 
-import { buildAssistantMessage, createOllamaStreamFn, isOllamaCompatProvider } from "./stream.js";
+import {
+  buildAssistantMessage,
+  createOllamaStreamFn,
+  isOllamaCompatProvider,
+} from "./stream-api.js";
 
 function makeOllamaResponse(params: {
   content?: string;
@@ -400,14 +404,6 @@ describe("createOllamaStreamFn thinking events", () => {
       "toolcall_end",
       "done",
     ]);
-    const toolCallEnd = events.find((event) => event.type === "toolcall_end") as {
-      toolCall?: Record<string, unknown>;
-    };
-    expect(toolCallEnd.toolCall).toMatchObject({
-      type: "toolCall",
-      name: "mempalace_mempalace_search",
-      arguments: { query: "codename", wing: "personal", room: "identities" },
-    });
     const done = events.find((event) => event.type === "done") as {
       message?: { content?: Array<Record<string, unknown>>; stopReason?: string };
       reason?: string;

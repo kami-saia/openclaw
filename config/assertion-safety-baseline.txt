@@ -1290,7 +1290,6 @@ extensions/telegram/src/sticker-cache.ts	2
 extensions/telegram/src/target-writeback.test-shared.ts	12
 extensions/telegram/src/telegram-ingress-drain-factory.ts	1
 extensions/telegram/src/telegram-ingress-drain.ts	5
-extensions/telegram/src/telegram-ingress-spool.ts	1
 extensions/telegram/src/telegram-ingress-supersede-auth.ts	10
 extensions/telegram/src/telegram-ingress-supersede.ts	7
 extensions/telegram/src/telegram-ingress-worker.runtime.ts	4
@@ -3382,7 +3381,6 @@ src/plugin-sdk/discord.ts	3
 src/plugin-sdk/extension-shared.ts	6
 src/plugin-sdk/facade-activation-check.runtime.ts	3
 src/plugin-sdk/facade-loader.ts	4
-src/plugin-sdk/facade-runtime.ts	6
 src/plugin-sdk/file-lock.ts	10
 src/plugin-sdk/inbound-reply-dispatch.ts	1
 src/plugin-sdk/lazy-value.ts	1
