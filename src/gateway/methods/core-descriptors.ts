@@ -441,6 +441,10 @@ const CORE_GATEWAY_METHOD_SPECS = [
   ["agents.workspace.list", "agents-workspace", "operator.read", "2026.7"],
   ["agents.workspace.get", "agents-workspace", "operator.read", "2026.7"],
   ["tts.speak", "tts", "operator.write", "2026.7"],
+  // FORK: tts.stream mints one-off streaming voice URLs for node voice.play.
+  // The handler lives in server-methods/tts.ts; without this row the registry
+  // skips it and dispatch reports `unknown method: tts.stream`.
+  ["tts.stream", "tts", "operator.write", "2026.7"],
   ["plugins.list", "plugins", "operator.read", "<=2026.7"],
   ["plugins.search", "plugins", "operator.read", "<=2026.7"],
   ["plugins.install", "plugins", "operator.admin", "<=2026.7", { controlPlaneWrite: true }],

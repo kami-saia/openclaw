@@ -40,6 +40,8 @@ const TRAIN_2026_7_METHODS = [
   "audit.run.inspect",
   "board.widget.appView",
   "tts.speak",
+  // FORK: tts.stream ships alongside tts.speak on the 2026.7 train.
+  "tts.stream",
   "environments.list",
   "environments.status",
   "environments.create",
