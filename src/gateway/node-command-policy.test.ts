@@ -665,6 +665,36 @@ describe("gateway/node-command-policy", () => {
     expect(denied.has("mcp.tools.call.v1")).toBe(false);
   });
 
+  // FORK: regression guard for gateway.nodes.commands.allowAll (denylist-first).
+  // This test and its implementation were dropped by an upstream merge once; the
+  // config key survived in the schema while its consumer vanished, silently
+  // refusing every node-declared command (e.g. voice.play on Android).
+  it("allows every command a node declares when commands.allowAll is on, except denied ones", () => {
+    const node = {
+      platform: "android",
+      deviceFamily: "phone",
+      nodeId: "node-1",
+      connId: "conn-1",
+      commands: ["voice.play", "app.launch", "camera.snap", "clipboard.set"],
+    };
+    const cfg = {
+      gateway: { nodes: { commands: { allowAll: true, deny: ["camera.snap"] } } },
+    } as OpenClawConfig;
+    const allowlist = resolveNodeCommandAllowlist(cfg, node);
+    for (const cmd of ["voice.play", "app.launch", "clipboard.set"]) {
+      expect(
+        isNodeCommandAllowed({ command: cmd, declaredCommands: node.commands, allowlist }),
+      ).toEqual({ ok: true });
+    }
+    expect(
+      isNodeCommandAllowed({
+        command: "camera.snap",
+        declaredCommands: node.commands,
+        allowlist,
+      }).ok,
+    ).toBe(false);
+  });
+
   it("does not treat unconnected declared host commands as approved", () => {
     const allowlist = resolveNodeCommandAllowlist({} as OpenClawConfig, {
       platform: "linux",

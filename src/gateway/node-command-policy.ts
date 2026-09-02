@@ -408,6 +408,12 @@ function resolveNodeCommandAllowlistInternal(
   });
   const extra = cfg.gateway?.nodes?.commands?.allow ?? [];
   const deny = new Set(cfg.gateway?.nodes?.commands?.deny ?? []);
+  // FORK: denylist-first mode. Everything the node declares/advertises is
+  // allowed, including dangerous defaults, except entries in commands.deny.
+  const allowAll = cfg.gateway?.nodes?.commands?.allowAll === true;
+  const declaredByNode = allowAll
+    ? [...(node?.approvedCommands ?? []), ...(node?.commands ?? [])]
+    : [];
   // A plugin `dangerous` flag governs the surface that plugin contributes
   // (listDefaultPluginNodeCommands) and forces a registered invoke policy. It is
   // not authority to revoke a command core itself declares in PLATFORM_DEFAULTS,
@@ -421,16 +427,27 @@ function resolveNodeCommandAllowlistInternal(
   // Dangerous built-ins that also appear in PLATFORM_DEFAULTS stay declarable
   // at pairing but do not enter the runtime allowlist by default.
   const dangerousBuiltinCommands =
-    options?.includeDangerousDefaults === true
+    options?.includeDangerousDefaults === true || allowAll
       ? new Set<string>()
       : new Set(DEFAULT_DANGEROUS_NODE_COMMANDS);
   // Dangerous plugin commands are excluded from plugin defaults. Explicit
   // gateway.nodes.commands.allow below can still opt them in for operators.
   const allow = new Set(
-    [...base, ...watchRelayCommands, ...talkCommands, ...pluginDefaults, ...approved, ...extra]
+    [
+      ...base,
+      ...watchRelayCommands,
+      ...talkCommands,
+      ...pluginDefaults,
+      ...approved,
+      ...declaredByNode,
+      ...extra,
+    ]
       .map((cmd) => cmd.trim())
       .filter(
-        (cmd) => cmd && !dangerousPluginCommands.has(cmd) && !dangerousBuiltinCommands.has(cmd),
+        (cmd) =>
+          cmd &&
+          (allowAll || !dangerousPluginCommands.has(cmd)) &&
+          !dangerousBuiltinCommands.has(cmd),
       ),
   );
   for (const cmd of extra) {
@@ -446,7 +463,7 @@ function resolveNodeCommandAllowlistInternal(
   // explicit persistent allow can authorize them without another pairing.
   // Invoke-time policy still honors deny in full.
   const denyExemptDeclarable =
-    options?.includeDangerousDefaults === true
+    options?.includeDangerousDefaults === true && !allowAll
       ? new Set(DEFAULT_DANGEROUS_NODE_COMMANDS)
       : new Set<string>();
   for (const blocked of deny) {
