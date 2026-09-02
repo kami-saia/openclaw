@@ -482,9 +482,14 @@ export async function runEmbeddedAttempt(
             },
             onSessionCreated: (createdSession) => {
               session = createdSession;
+              // FORK: late-bind the live session for the agent-driven `compact`
+              // tool; the tool set is built before the session exists.
+              compactLive.session = createdSession as never;
             },
             onSessionManagerCreated: (createdSessionManager) => {
               sessionManager = createdSessionManager;
+              // FORK: late-bind for the agent-driven `compact` tool.
+              compactLive.sessionManager = createdSessionManager;
               // FORK: publish for the overflow fallback, which runs outside
               // this closure in the recovery path.
               registerAgentOverflowSessionManager(params.runId, createdSessionManager);
