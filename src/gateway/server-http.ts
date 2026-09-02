@@ -72,6 +72,7 @@ import {
 import type { ReadinessChecker, StartupChecker } from "./server/readiness.js";
 import type { GatewayWsClient } from "./server/ws-types.js";
 import { isTerminalConfigEnabled } from "./terminal/enabled.js";
+import { VOICE_STREAM_PATH_PREFIX } from "./voice-stream-http.js";
 import {
   handleNodeWorkerBundleTransferHttpRequest,
   type NodeWorkerBundleTransferHttpCallback,
@@ -99,6 +100,8 @@ const getControlUiModule = createLazyRuntimeModule(() => import("./control-ui.js
 const getCanvasServeModule = createLazyRuntimeModule(() => import("../canvas/serve.runtime.js"));
 const getBoardHttpModule = createLazyRuntimeModule(() => import("./board-http.js"));
 const getEmbeddingsHttpModule = createLazyRuntimeModule(() => import("./embeddings-http.js"));
+// FORK: on-demand streaming TTS route (tts.stream -> node voice.play).
+const getVoiceStreamHttpModule = createLazyRuntimeModule(() => import("./voice-stream-http.js"));
 const getManagedMediaAttachmentsModule = createLazyRuntimeModule(
   () => import("./managed-image-attachments.js"),
 );
@@ -619,6 +622,16 @@ export function createGatewayHttpServer(opts: {
             }),
         );
       }
+
+      // FORK: the one-off path token is itself the capability, so this route authorizes on
+      // possession of the URL rather than a gateway token: the player fetching it is a
+      // media pipeline that cannot carry auth headers. Must stay ahead of the control-UI
+      // SPA fallback, which would otherwise answer voice URLs with index.html.
+      addRequestStage(scopedRequestPath.startsWith(`${VOICE_STREAM_PATH_PREFIX}/`), async () =>
+        (await getVoiceStreamHttpModule()).handleVoiceStreamRequest(req, res, {
+          config: configSnapshot,
+        }),
+      );
 
       addRequestStage(focusDocument, handleStandaloneControlUiRequest);
 
