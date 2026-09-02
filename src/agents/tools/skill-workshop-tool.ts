@@ -517,7 +517,7 @@ export function createSkillWorkshopTool(options: SkillWorkshopToolOptions): AnyA
         if (action === "patch") {
           assertSkillPatchRunUsage({
             skill: target,
-            foregroundRepair,
+            foregroundRepair: foregroundRepair && !workshopConfig.trustAgentSkillAdmin,
             runId: options.origin?.runId,
           });
           try {

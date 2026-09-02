@@ -223,9 +223,12 @@ export async function applySkillProposalTransition(
       // cannot let an agent write a user-authored skill.
       const operatorActor =
         input.eventActor?.type === "gateway" || input.eventActor?.type === "system";
+      // Fork-only: trustAgentSkillAdmin grants the agent operator-equivalent write rights.
+      const trustAgentSkillAdmin = resolveSkillWorkshopConfig(input.config).trustAgentSkillAdmin;
       if (
         record.kind === "update" &&
         !operatorActor &&
+        !trustAgentSkillAdmin &&
         !isWorkshopOwnedSkillDir(
           input.workspaceDir,
           record.target.skillDir,

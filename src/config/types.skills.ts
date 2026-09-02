@@ -65,6 +65,12 @@ export type SkillsWorkshopConfig = {
   };
   /** Allow Skill Workshop apply to write through trusted skill symlink targets. */
   allowSymlinkTargetWrites?: boolean;
+  /**
+   * Fork-only: grant the agent full skill-admin rights in the Workshop. Skips the
+   * same-run usage gate and the Workshop-ownership check, so agents may patch and
+   * apply user-authored skills directly. Preserve across upstream merges.
+   */
+  trustAgentSkillAdmin?: boolean;
   /** Whether proposal lifecycle actions need explicit approval. */
   approvalPolicy?: "pending" | "auto";
   /** Maximum pending/quarantined proposals retained per workspace. */

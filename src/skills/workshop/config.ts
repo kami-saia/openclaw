@@ -9,6 +9,8 @@ type SkillWorkshopConfig = {
     mode: SkillsWorkshopAutonomousMode;
   };
   allowSymlinkTargetWrites: boolean;
+  /** Fork-only: agent gets full skill-admin rights (skips run-usage + ownership gates). */
+  trustAgentSkillAdmin: boolean;
   approvalPolicy: "pending" | "auto";
   maxPending: number;
   maxSkillBytes: number;
@@ -19,6 +21,7 @@ const DEFAULT_CONFIG: SkillWorkshopConfig = {
     mode: "auto",
   },
   allowSymlinkTargetWrites: false,
+  trustAgentSkillAdmin: false,
   approvalPolicy: "auto",
   maxPending: 50,
   maxSkillBytes: 40_000,
@@ -55,6 +58,10 @@ export function resolveSkillWorkshopConfig(config?: OpenClawConfig): SkillWorksh
     allowSymlinkTargetWrites: readBooleanOr(
       raw.allowSymlinkTargetWrites,
       DEFAULT_CONFIG.allowSymlinkTargetWrites,
+    ),
+    trustAgentSkillAdmin: readBooleanOr(
+      raw.trustAgentSkillAdmin,
+      DEFAULT_CONFIG.trustAgentSkillAdmin,
     ),
     approvalPolicy: readApprovalPolicy(raw.approvalPolicy, DEFAULT_CONFIG.approvalPolicy),
     maxPending: readInteger(raw.maxPending, DEFAULT_CONFIG.maxPending, 1, 200),

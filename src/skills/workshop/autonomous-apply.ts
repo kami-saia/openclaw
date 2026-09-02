@@ -1,4 +1,5 @@
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { resolveSkillWorkshopConfig } from "./config.js";
 import { isWorkshopOwnedSkillDir } from "./ownership.js";
 import { applySkillProposal } from "./service.js";
 import { readSkillProposalRecord, updateSkillProposalRecord } from "./store.js";
@@ -23,8 +24,11 @@ export async function applyAutonomousSkillProposal(params: {
   reason: string;
 }): Promise<AutonomousSkillProposalResult> {
   const store = params.env ? { env: params.env } : {};
+  // Fork-only: trustAgentSkillAdmin grants the agent ownership-independent apply rights.
+  const trustAgentSkillAdmin = resolveSkillWorkshopConfig(params.config).trustAgentSkillAdmin;
   // Decides pending-vs-apply only; the apply transition rechecks ownership under its commit lock.
   if (
+    !trustAgentSkillAdmin &&
     params.proposal.record.kind !== "create" &&
     !isWorkshopOwnedSkillDir(params.workspaceDir, params.proposal.record.target.skillDir, store)
   ) {
