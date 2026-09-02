@@ -737,6 +737,7 @@ export default definePluginEntry({
         return {
           apiKey: auth.apiKey,
           baseUrl: auth.baseUrl,
+          ...(auth.expiresAt ? { expiresAt: auth.expiresAt } : {}),
           request: {
             headers: buildCopilotRuntimeHeaders({ config: ctx.config, headers: ctx.model.headers }),
           },

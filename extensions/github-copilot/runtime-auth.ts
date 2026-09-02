@@ -59,6 +59,54 @@ function parseCopilotApiBaseUrl(value: unknown, domain: string): string {
   return url.href.replace(/\/+$/, "");
 }
 
+function copilotTokenUrl(domain: string): string {
+  return `https://api.${domain}/copilot_internal/v2/token`;
+}
+
+/**
+ * Enterprise CAPI rejects raw `ghu_` bearers non-deterministically (~2/3 of
+ * requests) with a Terms of Service 403, so exchange for a CAPI token first.
+ */
+async function exchangeCopilotApiToken(params: {
+  githubToken: string;
+  domain: string;
+  fetchImpl: typeof fetch;
+  signal: AbortSignal;
+}): Promise<{ apiKey: string; baseUrl?: string; expiresAt?: number } | undefined> {
+  const response = await params.fetchImpl(copilotTokenUrl(params.domain), {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${params.githubToken}`,
+      "Editor-Version": "vscode/1.107.0",
+    },
+    signal: params.signal,
+  });
+  if (!response.ok) {
+    if (!response.bodyUsed) {
+      void response.body?.cancel().catch(() => undefined);
+    }
+    return undefined;
+  }
+  const payload = await readProviderJsonResponse(response, "github-copilot.token");
+  const token = (payload as { token?: unknown }).token;
+  if (typeof token !== "string" || !token.trim()) {
+    return undefined;
+  }
+  const expiresAtSeconds = (payload as { expires_at?: unknown }).expires_at;
+  let baseUrl: string | undefined;
+  try {
+    baseUrl = parseCopilotApiBaseUrl(payload, params.domain);
+  } catch {
+    baseUrl = undefined;
+  }
+  return {
+    apiKey: token,
+    baseUrl,
+    expiresAt: typeof expiresAtSeconds === "number" ? expiresAtSeconds * 1000 : undefined,
+  };
+}
+
 export async function resolveCopilotRuntimeAuth(params: {
   githubToken: string;
   env?: NodeJS.ProcessEnv;
@@ -69,6 +117,7 @@ export async function resolveCopilotRuntimeAuth(params: {
   apiKey: string;
   source: string;
   baseUrl: string;
+  expiresAt?: number;
 }> {
   const env = params.env ?? process.env;
   const domain = resolveGithubCopilotDomain({
@@ -99,9 +148,22 @@ export async function resolveCopilotRuntimeAuth(params: {
       await readProviderJsonResponse(response, "github-copilot.user"),
       domain,
     );
-    // The current Copilot CLI/SDK resolves account metadata through `/user`,
-    // then sends this original GitHub token to CAPI. The retired `/v2/token`
-    // exchange rejects supported fine-grained PATs before inference.
+    const exchanged = await exchangeCopilotApiToken({
+      githubToken: params.githubToken,
+      domain,
+      fetchImpl,
+      signal,
+    });
+    if (exchanged) {
+      return {
+        apiKey: exchanged.apiKey,
+        source: `exchanged:${copilotTokenUrl(domain)}`,
+        baseUrl: exchanged.baseUrl ?? baseUrl,
+        expiresAt: exchanged.expiresAt,
+      };
+    }
+    // Fine-grained PATs are rejected by the exchange, so fall back to the raw
+    // token the way the Copilot CLI/SDK does.
     return {
       apiKey: params.githubToken,
       source: `validated:${userUrl}`,
