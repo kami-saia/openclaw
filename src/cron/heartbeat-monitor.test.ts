@@ -57,6 +57,50 @@ describe("heartbeat monitor desired-state planning", () => {
     ]);
   });
 
+  it("retires duplicate monitors sharing one agentId and keeps the oldest", () => {
+    const cfg = {
+      agents: { defaults: { heartbeat: { every: "60m" } } },
+    } as OpenClawConfig;
+    const options = { schedulerSeed: "test-seed" };
+    const input = resolveHeartbeatMonitorPlan(cfg, [], options).specs[0]?.input;
+    if (!input) {
+      throw new Error("expected configured heartbeat monitor spec");
+    }
+    // Two rows, same declarationKey/agentId/schedule -- the observed duplicate.
+    const older = { ...monitorJob(input, "job-older"), createdAtMs: 1_000 } as CronJob;
+    const newer = { ...monitorJob(input, "job-newer"), createdAtMs: 2_000 } as CronJob;
+
+    const plan = resolveHeartbeatMonitorPlan(cfg, [older, newer], options);
+
+    // The survivor already matches the spec, so the only change is the removal.
+    expect(plan.changes).toEqual([expect.objectContaining({ kind: "remove", agentId: "main" })]);
+    const [removal] = plan.changes;
+    expect(removal?.kind === "remove" && removal.job.id).toBe("job-newer");
+  });
+
+  it("picks the duplicate survivor deterministically regardless of input order", () => {
+    const cfg = {
+      agents: { defaults: { heartbeat: { every: "60m" } } },
+    } as OpenClawConfig;
+    const options = { schedulerSeed: "test-seed" };
+    const input = resolveHeartbeatMonitorPlan(cfg, [], options).specs[0]?.input;
+    if (!input) {
+      throw new Error("expected configured heartbeat monitor spec");
+    }
+    const older = { ...monitorJob(input, "job-older"), createdAtMs: 1_000 } as CronJob;
+    const newer = { ...monitorJob(input, "job-newer"), createdAtMs: 2_000 } as CronJob;
+
+    const removedIds = [
+      resolveHeartbeatMonitorPlan(cfg, [older, newer], options),
+      resolveHeartbeatMonitorPlan(cfg, [newer, older], options),
+    ].map((plan) => {
+      const [change] = plan.changes;
+      return change?.kind === "remove" ? change.job.id : undefined;
+    });
+
+    expect(removedIds).toEqual(["job-newer", "job-newer"]);
+  });
+
   it("retains a disabled monitor and its existing cadence", () => {
     const cfg = {
       agents: { defaults: { heartbeat: { every: "0m" } } },

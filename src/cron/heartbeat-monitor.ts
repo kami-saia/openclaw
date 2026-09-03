@@ -33,6 +33,17 @@ function heartbeatMonitorDeclarationKey(agentId: string): string {
   return `${HEARTBEAT_DECLARATION_PREFIX}${agentId}`;
 }
 
+/**
+ * Deterministic survivor for duplicate monitors on one agentId: oldest row wins,
+ * with the job id as a stable tiebreak so every gateway agrees on the same keep.
+ */
+function preferredHeartbeatMonitor(a: CronJob, b: CronJob): CronJob {
+  if (a.createdAtMs !== b.createdAtMs) {
+    return a.createdAtMs <= b.createdAtMs ? a : b;
+  }
+  return a.id <= b.id ? a : b;
+}
+
 function heartbeatMonitorAgentId(job: CronJob): string | undefined {
   const key = job.declarationKey;
   if (!key?.startsWith(HEARTBEAT_DECLARATION_PREFIX) || job.payload.kind !== "heartbeat") {
@@ -74,11 +85,24 @@ export function resolveHeartbeatMonitorPlan(
   options: { schedulerSeed?: string } = {},
 ): HeartbeatMonitorPlan {
   const existingByAgentId = new Map<string, CronJob>();
+  // FORK: a plain Map.set() here silently dropped extra monitors sharing one
+  // agentId, so a duplicated declarationKey row stayed invisible to the plan --
+  // never updated, never removed, firing forever alongside the survivor.
+  // Collect the losers explicitly and retire them as part of convergence.
+  const duplicateMonitors: Array<{ agentId: string; job: CronJob }> = [];
   for (const job of existingJobs) {
     const agentId = heartbeatMonitorAgentId(job);
-    if (agentId) {
-      existingByAgentId.set(agentId, job);
+    if (!agentId) {
+      continue;
     }
+    const incumbent = existingByAgentId.get(agentId);
+    if (!incumbent) {
+      existingByAgentId.set(agentId, job);
+      continue;
+    }
+    const keep = preferredHeartbeatMonitor(incumbent, job);
+    existingByAgentId.set(agentId, keep);
+    duplicateMonitors.push({ agentId, job: keep === incumbent ? job : incumbent });
   }
 
   const schedulerSeed = resolveHeartbeatSchedulerSeed(options.schedulerSeed);
@@ -140,6 +164,9 @@ export function resolveHeartbeatMonitorPlan(
     }
   }
   for (const [agentId, job] of existingByAgentId) {
+    changes.push({ kind: "remove", agentId, job });
+  }
+  for (const { agentId, job } of duplicateMonitors) {
     changes.push({ kind: "remove", agentId, job });
   }
   return { specs, changes };
