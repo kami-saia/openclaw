@@ -112,7 +112,6 @@ function resolveProviderPort(provider: ModelProviderConfig): number {
 async function prepareEmbeddingServer(
   options: EmbeddingProviderCreateOptions,
   embeddingSource: string,
-  embeddingModelIsDefault: boolean,
 ): Promise<void> {
   const provider = resolveConfiguredProvider(options);
   const cacheDir = resolveLlamaCppModelCacheDir(provider);
@@ -127,7 +126,6 @@ async function prepareEmbeddingServer(
       });
       await prepareManagedLlamaServer({
         chatModel: { mode: "preserve" },
-        embeddingModelIsDefault,
         embeddingModelPath,
         port: resolveProviderPort(provider),
       });
@@ -199,7 +197,7 @@ export const llamaCppEmbeddingProviderAdapter: EmbeddingProviderAdapter = {
     const local = readIdentityLocalOptions(options);
     const embeddingModel = resolveLlamaCppEmbeddingModel(local);
     const identity = resolveModelIdentity(local, options.dimensions);
-    await prepareEmbeddingServer(options, embeddingModel.source, embeddingModel.isDefault);
+    await prepareEmbeddingServer(options, embeddingModel.source);
     const genericAdapter = getEmbeddingProvider("openai-compatible", options.config);
     if (!genericAdapter) {
       throw new Error("OpenAI-compatible embedding transport is unavailable.");

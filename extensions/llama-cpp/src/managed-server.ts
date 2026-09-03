@@ -334,11 +334,13 @@ function renderChatModelSection(params: {
   ].join("\n");
 }
 
-function renderEmbeddingModelSection(params: { isDefault?: boolean; modelPath: string }): string {
+function renderEmbeddingModelSection(params: { modelPath: string }): string {
   return [
     `[${DEFAULT_LLAMA_CPP_EMBEDDING_MODEL_ID}]`,
     `model = ${assertIniValue(params.modelPath, "llama.cpp embedding model path")}`,
-    ...(params.isDefault ? [`ubatch-size = ${LLAMA_CPP_EMBEDDING_UBATCH_SIZE}`] : []),
+    // Physical batch must cover the indexer's largest chunk; llama-server's 512 default
+    // rejects them with HTTP 500 regardless of which embedding model file is loaded.
+    `ubatch-size = ${LLAMA_CPP_EMBEDDING_UBATCH_SIZE}`,
     "embedding = true",
   ].join("\n");
 }
@@ -391,7 +393,6 @@ async function updatePreset(
   presetPath: string,
   params: {
     chatModel: ManagedLlamaChatModel;
-    embeddingModelIsDefault?: boolean;
     embeddingModelPath?: string;
     defaultEmbeddingModelPath?: string;
   },
@@ -418,16 +419,10 @@ async function updatePreset(
               })
             : undefined;
       const embeddingSection = params.embeddingModelPath
-        ? renderEmbeddingModelSection({
-            isDefault: params.embeddingModelIsDefault,
-            modelPath: params.embeddingModelPath,
-          })
+        ? renderEmbeddingModelSection({ modelPath: params.embeddingModelPath })
         : (readModelSection(existing, DEFAULT_LLAMA_CPP_EMBEDDING_MODEL_ID) ??
           (params.defaultEmbeddingModelPath
-            ? renderEmbeddingModelSection({
-                isDefault: true,
-                modelPath: params.defaultEmbeddingModelPath,
-              })
+            ? renderEmbeddingModelSection({ modelPath: params.defaultEmbeddingModelPath })
             : undefined));
       if (!embeddingSection) {
         throw new Error("llama.cpp embedding model path is required for a new managed preset");
@@ -466,7 +461,6 @@ async function findAvailableLlamaServerPort(preferred = LLAMA_CPP_DEFAULT_PORT):
 export async function prepareManagedLlamaServer(params: {
   // Runtime embedding refreshes preserve chat. Explicit embedding-only setup removes it.
   chatModel: ManagedLlamaChatModel;
-  embeddingModelIsDefault?: boolean;
   embeddingModelPath?: string;
   defaultEmbeddingModelPath?: string;
   port?: number;
@@ -475,7 +469,6 @@ export async function prepareManagedLlamaServer(params: {
   const { presetPath } = resolveManagedLlamaServerPaths(asset);
   await updatePreset(presetPath, {
     chatModel: params.chatModel,
-    embeddingModelIsDefault: params.embeddingModelIsDefault,
     embeddingModelPath: params.embeddingModelPath,
     defaultEmbeddingModelPath: params.defaultEmbeddingModelPath,
   });

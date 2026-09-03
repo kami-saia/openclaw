@@ -130,7 +130,6 @@ describe("managed llama-server", () => {
           contextSize: 8192,
           maxTokens: 2048,
         },
-        embeddingModelIsDefault: true,
         embeddingModelPath: "/models/embedding.gguf",
         port: 19_432,
       });
@@ -172,7 +171,7 @@ describe("managed llama-server", () => {
       });
       const preset = await fs.readFile(presetPath, "utf8");
       expect(preset).toBe(
-        "version = 1\n\n[embeddinggemma-300m-qat-q8_0]\nmodel = /models/custom-embedding.gguf\nembedding = true\n",
+        "version = 1\n\n[embeddinggemma-300m-qat-q8_0]\nmodel = /models/custom-embedding.gguf\nubatch-size = 2048\nembedding = true\n",
       );
       expect(preset).not.toContain("jinja");
     } finally {
@@ -225,9 +224,8 @@ describe("managed llama-server", () => {
       const preset = await fs.readFile(presetPath, "utf8");
       expect(preset).toContain(`[chat-model]\nmodel = ${chatModelPath}\nctx-size = 8192`);
       expect(preset).toContain(
-        `[embeddinggemma-300m-qat-q8_0]\nmodel = ${embeddingModelPath}\nembedding = true`,
+        `[embeddinggemma-300m-qat-q8_0]\nmodel = ${embeddingModelPath}\nubatch-size = 2048\nembedding = true`,
       );
-      expect(preset).not.toContain("ubatch-size");
     } finally {
       await fs.rm(tempRoot, { recursive: true, force: true });
     }

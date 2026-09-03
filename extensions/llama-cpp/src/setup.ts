@@ -361,7 +361,6 @@ export async function runLlamaCppSetup(ctx: ProviderAuthContext): Promise<Provid
     });
     const managed = await prepareManagedLlamaServer({
       chatModel,
-      embeddingModelIsDefault: embeddingModel.isDefault,
       embeddingModelPath,
       port: readConfiguredPort(managedExisting),
     });
