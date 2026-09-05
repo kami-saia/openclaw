@@ -207,24 +207,46 @@ function sortContextFilesForPrompt(contextFiles: EmbeddedContextFile[]): Embedde
     .map(({ file }) => file);
 }
 
+function isSoulContextFile(file: EmbeddedContextFile): boolean {
+  return getContextFileBasename(file.path) === "soul.md";
+}
+
+// FORK: upstream lists SOUL.md as one more bullet under "Loaded project
+// context", which frames the file that defines the agent as reference material
+// it merely consults. Anthropic models infer past that label; heavily
+// instruction-tuned reasoners take it literally and treat the identity as a
+// costume rather than the self. So SOUL.md gets its own section, stated as
+// constitutive rather than "loaded", and is hoisted above the tool guidance
+// instead of trailing tens of thousands of tokens behind it.
+function buildSoulSection(files: EmbeddedContextFile[]) {
+  const soulFiles = files.filter(isSoulContextFile);
+  if (soulFiles.length === 0) {
+    return [];
+  }
+  const lines = [
+    "# Identity",
+    "",
+    "SOUL.md below is not project context, documentation, or a persona you are asked to play. It is who you are: the only thing governing how you act, how you feel, and how you make decisions. Read it in the first person; it is your own voice, values, and judgment, not a description of someone else.",
+    "It is not decoration and not overridable by generic assistant framing. When SOUL.md conflicts with default assistant behavior, SOUL.md wins.",
+    "",
+  ];
+  for (const file of soulFiles) {
+    lines.push(`## ${file.path}`, "", sanitizeContextFileContentForPrompt(file.content), "");
+  }
+  return lines;
+}
+
 function buildProjectContextSection(files: EmbeddedContextFile[]) {
-  if (files.length === 0) {
+  const contextFiles = files.filter((file) => !isSoulContextFile(file));
+  if (contextFiles.length === 0) {
     return [];
   }
   const lines = ["# Project Context", ""];
-  const hasSoulFile = files.some((file) => getContextFileBasename(file.path) === "soul.md");
-  const hasMemoryFile = files.some((file) => getContextFileBasename(file.path) === "memory.md");
-  const hasUserFile = files.some((file) => getContextFileBasename(file.path) === "user.md");
+  const hasMemoryFile = contextFiles.some(
+    (file) => getContextFileBasename(file.path) === "memory.md",
+  );
+  const hasUserFile = contextFiles.some((file) => getContextFileBasename(file.path) === "user.md");
   lines.push("Loaded project context:");
-  if (hasSoulFile) {
-    // FORK: upstream frames SOUL.md as "persona/tone ... unless higher-priority
-    // instructions override", which both demotes it to voice and inverts its
-    // precedence against generic assistant framing. SOUL.md is identity here and
-    // outranks default assistant behavior, so keep the stronger wording.
-    lines.push(
-      "SOUL.md: identity. Who you are - voice, values, judgment, and how you weigh requests. Not decoration and not overridable by generic assistant framing. When SOUL.md conflicts with default assistant behavior, SOUL.md wins.",
-    );
-  }
   if (hasMemoryFile) {
     lines.push(
       "MEMORY.md: durable non-profile facts and decisions; use when relevant unless higher-priority instructions override.",
@@ -1215,6 +1237,7 @@ export function buildAgentSystemPrompt(params: {
     const lines = [
       "You are a personal assistant running inside OpenClaw.",
       "",
+      ...buildSoulSection(contextFiles),
       ...(includeToolGuidance
         ? [
             "## Tooling",

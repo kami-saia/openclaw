@@ -1452,10 +1452,15 @@ describe("buildAgentSystemPrompt", () => {
     });
 
     // FORK: SOUL.md is identity here and outranks generic assistant framing.
-    expect(prompt).toContain("SOUL.md: identity.");
+    // It gets its own hoisted section and is never listed as project context.
+    expect(prompt).toContain("# Identity");
+    expect(prompt).toContain("SOUL.md below is not project context");
     expect(prompt).toContain(
       "When SOUL.md conflicts with default assistant behavior, SOUL.md wins.",
     );
+    // The identity section must precede the tool guidance, not trail it.
+    expect(prompt.indexOf("# Identity")).toBeLessThan(prompt.indexOf("## Tooling"));
+    expect(prompt).not.toContain("SOUL.md: identity.");
   });
 
   it("adds MEMORY guidance when a memory file is present", () => {
