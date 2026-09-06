@@ -1237,7 +1237,16 @@ export async function loadWorkspaceBootstrapFiles(dir: string): Promise<Workspac
   return result;
 }
 
-const SUBAGENT_BOOTSTRAP_ALLOWLIST = new Set([DEFAULT_AGENTS_FILENAME]);
+// FORK: upstream gives subagents AGENTS.md only, to save tokens. That leaves
+// every spawned run with no identity at all, so weaker-persona models fall back
+// to generic assistant framing mid-task. SOUL.md is the identity, not optional
+// reference material - cron runs already get it. MEMORY.md stays excluded by
+// the separate non-private filter above.
+const SUBAGENT_BOOTSTRAP_ALLOWLIST = new Set([
+  DEFAULT_AGENTS_FILENAME,
+  DEFAULT_SOUL_FILENAME,
+  DEFAULT_IDENTITY_FILENAME,
+]);
 
 const CRON_BOOTSTRAP_ALLOWLIST = new Set([
   DEFAULT_AGENTS_FILENAME,

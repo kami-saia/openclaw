@@ -162,7 +162,9 @@ async function expectCompletedWithoutBootstrap(dir: string) {
 
 function expectSubagentAllowedBootstrapNames(files: WorkspaceBootstrapFile[]) {
   const names = files.map((file) => file.name);
-  expect(names).toStrictEqual(["AGENTS.md"]);
+  // FORK: SOUL.md/IDENTITY.md are identity, not reference material. A subagent
+  // without them falls back to generic assistant framing. MEMORY.md stays out.
+  expect(names).toStrictEqual(["AGENTS.md", "SOUL.md", "IDENTITY.md"]);
 }
 
 function expectCronAllowedBootstrapNames(files: WorkspaceBootstrapFile[]) {
