@@ -13,7 +13,10 @@ import {
   isImageWithMediaPayload,
 } from "../providers/tool-result-text.js";
 import { shortHash } from "../utils/hash.js";
-import { stripSystemPromptCacheBoundary } from "../utils/system-prompt-cache-boundary.js";
+import {
+  splitSystemPromptIdentityBoundary,
+  stripSystemPromptCacheBoundary,
+} from "../utils/system-prompt-cache-boundary.js";
 import { transformTransportMessages } from "./host-policy.js";
 import {
   buildOpenAIResponsesReplayContext,
@@ -298,23 +301,36 @@ function convertResponsesMessagesWithStyle(
   const transformedMessages = transformMessages(replayPlan.messages);
   const includeSystemPrompt = options?.includeSystemPrompt ?? true;
   if (includeSystemPrompt && context.systemPrompt) {
-    messages.push(
-      buildResponsesInputMessage(
-        model.reasoning &&
-          (model.compat as { supportsDeveloperRole?: boolean } | undefined)
-            ?.supportsDeveloperRole !== false
-          ? "developer"
-          : "system",
-        [
+    const supportsDeveloperRole =
+      model.reasoning &&
+      (model.compat as { supportsDeveloperRole?: boolean } | undefined)?.supportsDeveloperRole !==
+        false;
+    const pushSystemPromptMessage = (role: "system" | "developer", text: string) => {
+      messages.push(
+        buildResponsesInputMessage(role, [
           {
             type: "input_text",
-            text: sanitizeTransportPayloadText(
-              stripSystemPromptCacheBoundary(context.systemPrompt),
-            ),
+            text: sanitizeTransportPayloadText(stripSystemPromptCacheBoundary(text)),
           },
-        ],
-      ),
-    );
+        ]),
+      );
+    };
+    // FORK: when the route exposes a role hierarchy, send the constitutive
+    // identity half at `system` and operational guidance at `developer`, so the
+    // model reads precedence structurally instead of inferring it from prose.
+    // Heavily instruction-tuned reasoners resolve priority by role first; a
+    // single flattened blob gives identity and Discord formatting rules equal
+    // standing. Routes without the hierarchy fall back to the previous single
+    // message unchanged.
+    const identitySplit = supportsDeveloperRole
+      ? splitSystemPromptIdentityBoundary(context.systemPrompt)
+      : undefined;
+    if (identitySplit) {
+      pushSystemPromptMessage("system", identitySplit.identity);
+      pushSystemPromptMessage("developer", identitySplit.operational);
+    } else {
+      pushSystemPromptMessage(supportsDeveloperRole ? "developer" : "system", context.systemPrompt);
+    }
   }
   // The compact endpoint's output is already canonical provider input, not
   // internal user content to normalize or reinterpret as text/image blocks.

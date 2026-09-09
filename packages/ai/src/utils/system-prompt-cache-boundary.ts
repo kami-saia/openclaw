@@ -7,8 +7,35 @@ import { normalizeStructuredPromptSection } from "./prompt-cache-stability.js";
 
 export const SYSTEM_PROMPT_CACHE_BOUNDARY = "\n<!-- OPENCLAW_CACHE_BOUNDARY -->\n";
 
+// FORK: identity boundary. Marks the end of the constitutive identity section
+// (SOUL.md) and the start of operational guidance. Transports that expose a
+// role hierarchy emit the identity half at the higher-authority role and the
+// operational half below it, instead of flattening both into one blob at equal
+// standing. Transports without a hierarchy strip the marker and are unchanged.
+export const SYSTEM_PROMPT_IDENTITY_BOUNDARY = "\n<!-- OPENCLAW_IDENTITY_BOUNDARY -->\n";
+
+export function splitSystemPromptIdentityBoundary(
+  text: string,
+): { identity: string; operational: string } | undefined {
+  const index = text.indexOf(SYSTEM_PROMPT_IDENTITY_BOUNDARY);
+  if (index === -1) {
+    return undefined;
+  }
+  const identity = text.slice(0, index).trimEnd();
+  const operational = text.slice(index + SYSTEM_PROMPT_IDENTITY_BOUNDARY.length).trimStart();
+  if (!identity || !operational) {
+    return undefined;
+  }
+  return { identity, operational };
+}
+
 export function stripSystemPromptCacheBoundary(text: string): string {
-  return text.replaceAll(SYSTEM_PROMPT_CACHE_BOUNDARY, "\n");
+  // Also strips the identity boundary: both are internal structure markers that
+  // must never reach a provider payload, and every transport already funnels
+  // system-prompt text through this one call.
+  return text
+    .replaceAll(SYSTEM_PROMPT_CACHE_BOUNDARY, "\n")
+    .replaceAll(SYSTEM_PROMPT_IDENTITY_BOUNDARY, "\n");
 }
 
 // Append the cache boundary when a prompt has none (e.g. a hook systemPrompt override),
