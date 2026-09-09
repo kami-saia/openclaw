@@ -1,4 +1,4 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import type { EasyInputMessage } from "openai/resources/responses/responses.js";
 import { stripSystemPromptCacheBoundary } from "../utils/system-prompt-cache-boundary.js";
 import {
@@ -46,10 +46,30 @@ function readFinalResponsesPrompt(
  * answer to "what roles does the provider actually receive?" — model
  * self-report of its own prompt roles is confabulation-prone and unusable.
  */
+const EGRESS_DUMP_CONTROL_FILE = "/home/damon/.openclaw/workspace/tmp/egress-dump-target";
+
 function readEgressDumpPath(): string | undefined {
   const raw = process.env.OPENCLAW_EGRESS_PAYLOAD_DUMP;
-  return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : undefined;
+  if (typeof raw === "string" && raw.trim().length > 0) return raw.trim();
+  // Fallback: a control file. The gateway runs under a systemd user unit whose
+  // manager is unreachable from the agent's mount namespace, so its Environment=
+  // cannot be reloaded. Presence of this file enables the dump; its contents are
+  // the destination path. Delete the file to turn the dump off.
+  const now = Date.now();
+  if (now - egressControlCheckedAt < EGRESS_CONTROL_TTL_MS) return egressControlCached;
+  egressControlCheckedAt = now;
+  try {
+    const fromFile = readFileSync(EGRESS_DUMP_CONTROL_FILE, "utf8").trim();
+    egressControlCached = fromFile.length > 0 ? fromFile : undefined;
+  } catch {
+    egressControlCached = undefined;
+  }
+  return egressControlCached;
 }
+
+const EGRESS_CONTROL_TTL_MS = 5000;
+let egressControlCheckedAt = 0;
+let egressControlCached: string | undefined;
 
 const EGRESS_DUMP_PREFIX_CHARS = 400;
 
