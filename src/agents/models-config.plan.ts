@@ -10,7 +10,11 @@ import type { ProviderCatalogOutcome } from "../plugins/provider-catalog.types.j
 import type { PreparedProviderStaticCatalog } from "../plugins/provider-discovery.js";
 import { isRecord } from "../utils.js";
 import type { AuthProfileStore } from "./auth-profiles/types.js";
-import { modelKey, createConfiguredProviderCatalogModelIdNormalizer } from "./model-ref-shared.js";
+import {
+  modelKey,
+  createConfiguredProviderCatalogModelIdNormalizer,
+  type ModelManifestNormalizationContext,
+} from "./model-ref-shared.js";
 import {
   mergeProviders,
   mergeWithExistingProviderSecrets,
@@ -27,8 +31,10 @@ import {
 } from "./models-config.providers.js";
 import {
   encodePluginModelCatalogRelativePath,
+  filterGeneratedPluginModelCatalogProviders,
   PLUGIN_MODEL_CATALOG_GENERATED_BY,
   resolvePluginModelCatalogOwnerPluginId,
+  type PersistedPluginModelCatalog,
 } from "./plugin-model-catalog.js";
 
 type ModelsConfig = NonNullable<OpenClawConfig["models"]>;
@@ -36,6 +42,7 @@ type ModelsConfig = NonNullable<OpenClawConfig["models"]>;
 export type PreparedModelsConfigContext = Readonly<{
   cfg: OpenClawConfig;
   discoveryAuthConfig: OpenClawConfig;
+  discoveryAuthEnv?: NodeJS.ProcessEnv;
   sourceConfigForSecrets: OpenClawConfig;
   agentDir: string;
   env: NodeJS.ProcessEnv;
@@ -58,6 +65,7 @@ type ResolveImplicitProvidersForModelsJson = (params: {
   authStore?: AuthProfileStore;
   config: OpenClawConfig;
   discoveryAuthConfig?: OpenClawConfig;
+  discoveryAuthEnv?: NodeJS.ProcessEnv;
   sourceConfigForSecrets?: OpenClawConfig;
   env: NodeJS.ProcessEnv;
   workspaceDir?: string;
@@ -126,7 +134,7 @@ function buildPluginCatalogWrites(
 
 function buildSourceModelFields(
   sourceProviders: Record<string, ProviderConfig> | undefined,
-  manifestPlugins: PluginMetadataSnapshot["manifestRegistry"]["plugins"] | undefined,
+  manifestPlugins: ModelManifestNormalizationContext["manifestPlugins"],
 ): SourceModelFields {
   const normalizeModelId = createConfiguredProviderCatalogModelIdNormalizer({ manifestPlugins });
   const fields = new Map<
@@ -163,7 +171,7 @@ async function resolveProvidersForModelsJsonWithDeps(
   const cfg = context.cfg.models?.providers
     ? { ...context.cfg, models: { ...context.cfg.models, providers: explicitProviders } }
     : context.cfg;
-  const manifestPlugins = context.pluginMetadataSnapshot?.manifestRegistry.plugins;
+  const manifestPlugins = context.pluginMetadataSnapshot;
   const sourceModelFields = buildSourceModelFields(context.cfg.models?.providers, manifestPlugins);
   // When models.mode is "replace" the user opts out of provider discovery, so
   // skip the (potentially slow) implicit-provider resolver entirely and return
@@ -177,6 +185,7 @@ async function resolveProvidersForModelsJsonWithDeps(
     ...(params.authStore ? { authStore: params.authStore } : {}),
     config: cfg,
     discoveryAuthConfig: context.discoveryAuthConfig,
+    discoveryAuthEnv: context.discoveryAuthEnv,
     sourceConfigForSecrets: context.sourceConfigForSecrets,
     env,
     ...(context.workspaceDir ? { workspaceDir: context.workspaceDir } : {}),
@@ -254,7 +263,8 @@ function isWritableProviderConfig(provider: ProviderConfig): boolean {
   if (!Array.isArray(provider.models) || provider.models.length === 0) {
     return true;
   }
-  return Boolean(provider.baseUrl?.trim() && provider.apiKey);
+  // AuthStorage can supply omitted keys; an explicitly empty key still violates the schema.
+  return Boolean(provider.baseUrl?.trim() && (provider.apiKey === undefined || provider.apiKey));
 }
 
 function filterWritableProviders(
@@ -266,6 +276,36 @@ function filterWritableProviders(
   return Object.keys(next).length === Object.keys(providers).length ? providers : next;
 }
 
+/** Recovers only generated providers; manual root declarations never enter this source. */
+function collectGeneratedCatalogProviders(params: {
+  catalogs: readonly PersistedPluginModelCatalog[];
+  context: PreparedModelsConfigContext;
+}): Record<string, unknown> {
+  const providers: Record<string, unknown> = {};
+  for (const { pluginId, contents } of params.catalogs) {
+    let catalog: unknown;
+    try {
+      catalog = JSON.parse(contents) as unknown;
+    } catch {
+      continue;
+    }
+    if (!isRecord(catalog) || !isRecord(catalog.providers)) {
+      continue;
+    }
+    Object.assign(
+      providers,
+      filterGeneratedPluginModelCatalogProviders({
+        catalogPluginId: pluginId,
+        config: params.context.cfg,
+        parsedCatalog: catalog,
+        pluginMetadataSnapshot: params.context.pluginMetadataSnapshot,
+        providers: catalog.providers,
+      }),
+    );
+  }
+  return providers;
+}
+
 /** Plans root and plugin-owned model catalog writes with injectable provider discovery. */
 async function planOpenClawModelsJsonWithDeps(
   params: {
@@ -273,6 +313,7 @@ async function planOpenClawModelsJsonWithDeps(
     authStore?: AuthProfileStore;
     existingRaw: string;
     existingParsed: unknown;
+    pluginCatalogs?: readonly PersistedPluginModelCatalog[];
   },
   deps?: {
     resolveImplicitProviders?: ResolveImplicitProvidersForModelsJson;
@@ -301,7 +342,7 @@ async function planOpenClawModelsJsonWithDeps(
 
   const mode = cfg.models?.mode ?? "merge";
   const secretRefManagedProviders = new Set<string>();
-  const manifestPlugins = context.pluginMetadataSnapshot?.manifestRegistry.plugins;
+  const manifestPlugins = context.pluginMetadataSnapshot;
   const providerPolicyManifestRegistry =
     context.pluginMetadataSnapshot?.pluginIds === undefined
       ? context.pluginMetadataSnapshot?.manifestRegistry
@@ -321,7 +362,12 @@ async function planOpenClawModelsJsonWithDeps(
     }) ?? providers;
   const mergedProviders = resolveProvidersForMode({
     mode,
-    existingParsed: params.existingParsed,
+    existingParsed: {
+      providers: collectGeneratedCatalogProviders({
+        catalogs: params.pluginCatalogs ?? [],
+        context,
+      }),
+    },
     providers: normalizedProviders,
     secretRefManagedProviders,
   });
@@ -341,9 +387,26 @@ async function planOpenClawModelsJsonWithDeps(
     pluginMetadataSnapshot: context.pluginMetadataSnapshot,
   });
   const pluginCatalogWrites = buildPluginCatalogWrites(splitProviders.pluginProviders);
+  // Root models.json is author-owned even when a plugin also owns that provider id.
+  const rootProviders = resolveProvidersForMode({
+    mode,
+    existingParsed: params.existingParsed,
+    providers: splitProviders.rootProviders,
+    secretRefManagedProviders,
+  });
+  const normalizedRootProviders =
+    normalizeProviderCatalogModelsForConfig(rootProviders, {
+      manifestPlugins,
+    }) ?? rootProviders;
+  const rootWithManagedSecrets =
+    enforceSourceManagedProviderSecrets({
+      providers: normalizedRootProviders,
+      sourceConfigForSecrets: context.sourceConfigForSecrets,
+      secretRefManagedProviders,
+    }) ?? normalizedRootProviders;
   const nextContents = `${JSON.stringify(
     {
-      providers: splitProviders.rootProviders,
+      providers: filterWritableProviders(rootWithManagedSecrets),
     },
     null,
     2,

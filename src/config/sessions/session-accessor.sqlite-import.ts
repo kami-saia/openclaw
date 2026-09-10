@@ -1,5 +1,4 @@
 import {
-  executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
   iterateSqliteQuerySync,
 } from "../../infra/kysely-sync.js";
@@ -30,7 +29,10 @@ import {
   ensureTranscriptSessionRoot,
   touchTranscriptMutationInTransaction,
 } from "./session-accessor.sqlite-transcript-state.js";
-import { appendTranscriptEventsInTransaction } from "./session-accessor.sqlite-transcript-store.js";
+import {
+  appendTranscriptEventsInTransaction,
+  createTranscriptEventInserter,
+} from "./session-accessor.sqlite-transcript-store.js";
 import { reconcileSessionTranscriptIndexInTransaction } from "./session-transcript-index.js";
 import type { SessionEntry } from "./types.js";
 
@@ -39,6 +41,7 @@ type SqliteSessionImportRowsParams = Pick<
   SessionAccessScope,
   "agentId" | "defaultAgentId" | "env" | "sessionKey" | "storePath"
 > & {
+  beforePersistentApply?: () => void;
   allowMalformedRowRepair?: boolean;
   repairLegacyTranscript?: boolean;
   preserveExactStoredKey?: boolean;
@@ -133,6 +136,7 @@ function importSqliteSessionRowsInTransaction(
         .limit(1),
     );
     if (!existing) {
+      const insertEvent = createTranscriptEventInserter(database, params.entry.sessionId);
       for (const row of stage.rows(source)) {
         if (row.seq === 0) {
           ensureTranscriptSessionRoot(database, transcriptScope, row.createdAt!, {
@@ -140,15 +144,7 @@ function importSqliteSessionRowsInTransaction(
           });
           ensureTranscriptGenerationInTransaction(database, params.entry.sessionId);
         }
-        executeSqliteQuerySync(
-          database.db,
-          db.insertInto("transcript_events").values({
-            session_id: params.entry.sessionId,
-            seq: row.seq,
-            event_json: row.eventJson,
-            created_at: row.createdAt!,
-          }),
-        );
+        insertEvent({ seq: row.seq, eventJson: row.eventJson, createdAt: row.createdAt! });
         transcriptEvents += 1;
       }
       // Doctor imports run outside gateway requests and must finish with a complete projection.
@@ -222,41 +218,53 @@ export async function importSqliteSessionRowsBatch(
   ) {
     throw new Error("SQLite session import batch spans multiple stores");
   }
-  return await runExclusiveSqliteSessionWrite(resolved, async () =>
-    withSqliteSessionImportStage((stage) => {
-      const validators: Array<() => void> = [];
-      const repairs = new Map<
-        number,
-        ReturnType<SqliteSessionImportStage["repairLegacyTranscript"]>
-      >();
-      for (const [source, { params: importParams }] of prepared.entries()) {
-        let seq = 0;
-        importParams.readExactTranscriptRows?.((row) =>
-          stage.append(source, seq++, row.eventJson, row.createdAt),
-        );
-        const validate = importParams.readTranscriptEvents?.((event) =>
-          stage.append(source, seq++, JSON.stringify(event), null),
-        );
-        if (validate) {
-          validators.push(validate);
+  return await runExclusiveSqliteSessionWrite(
+    resolved,
+    async () =>
+      withSqliteSessionImportStage((stage) => {
+        const validators: Array<() => void> = [];
+        const repairs = new Map<
+          number,
+          ReturnType<SqliteSessionImportStage["repairLegacyTranscript"]>
+        >();
+        for (const [source, { params: importParams }] of prepared.entries()) {
+          let seq = 0;
+          importParams.readExactTranscriptRows?.((row) =>
+            stage.append(source, seq++, row.eventJson, row.createdAt),
+          );
+          const validate = importParams.readTranscriptEvents?.((event) =>
+            stage.append(source, seq++, JSON.stringify(event), null),
+          );
+          if (validate) {
+            validators.push(validate);
+          }
+          if (importParams.repairLegacyTranscript && importParams.readTranscriptEvents) {
+            repairs.set(source, stage.repairLegacyTranscript(source));
+          }
         }
-        if (importParams.repairLegacyTranscript && importParams.readTranscriptEvents) {
-          repairs.set(source, stage.repairLegacyTranscript(source));
+        // Recheck every source after the last reader, before any canonical transaction.
+        // No filesystem readers or callbacks cross the synchronous SQLite commit boundary.
+        for (const validate of validators) {
+          validate();
         }
-      }
-      // Recheck every source after the last reader, before any canonical transaction.
-      // No filesystem readers or callbacks cross the synchronous SQLite commit boundary.
-      for (const validate of validators) {
-        validate();
-      }
-      return runOpenClawAgentWriteTransaction(
-        (database) =>
-          prepared.map((row, source) =>
-            importSqliteSessionRowsInTransaction(database, row, stage, source, repairs.get(source)),
-          ),
-        toDatabaseOptions(resolved),
-      );
-    }),
+        for (const { params: importParams } of prepared) {
+          importParams.beforePersistentApply?.();
+        }
+        return runOpenClawAgentWriteTransaction(
+          (database) =>
+            prepared.map((row, source) =>
+              importSqliteSessionRowsInTransaction(
+                database,
+                row,
+                stage,
+                source,
+                repairs.get(source),
+              ),
+            ),
+          toDatabaseOptions(resolved),
+        );
+      }),
+    "session.import.batch",
   );
 }
 

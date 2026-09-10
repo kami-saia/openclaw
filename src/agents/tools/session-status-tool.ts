@@ -64,7 +64,7 @@ import {
   modelKey,
   resolveDefaultModelForAgent,
   resolveModelRefFromString,
-  resolveThinkingDefaultWithRuntimeCatalog,
+  resolveThinkingDefaultWithRuntimeCatalogCore,
 } from "../model-selection.js";
 import { createModelVisibilityPolicy } from "../model-visibility-policy.js";
 import { loadPublishedPreparedModelCatalog } from "../prepared-model-catalog.js";
@@ -232,7 +232,7 @@ type CommandsStatusRuntimeModule = {
 };
 
 const commandsStatusRuntimeLoader = createLazyImportLoader<CommandsStatusRuntimeModule>(
-  () => import("./session-status.runtime.js") as Promise<CommandsStatusRuntimeModule>,
+  () => import("../../status/status-text.js") as Promise<CommandsStatusRuntimeModule>,
 );
 
 function loadCommandsStatusRuntime(): Promise<CommandsStatusRuntimeModule> {
@@ -526,7 +526,7 @@ async function resolveModelOverride(params: {
           env: process.env,
         });
   const modelManifestContext = {
-    manifestPlugins: manifestMetadataSnapshot?.plugins,
+    manifestPlugins: manifestMetadataSnapshot,
   };
   const policy = createModelVisibilityPolicy({
     cfg: params.cfg,
@@ -996,6 +996,7 @@ export function createSessionStatusTool(opts?: {
             const applied = applyModelOverrideToSessionEntry({
               entry: nextEntry,
               selection: modelSelection,
+              explicitDefaultSelection: modelSelection.isDefault,
               markLiveSwitchPending: true,
             });
             if (applied.updated) {
@@ -1010,6 +1011,7 @@ export function createSessionStatusTool(opts?: {
                   applyModelOverrideToSessionEntry({
                     entry: persistedEntryPatch,
                     selection: modelSelection,
+                    explicitDefaultSelection: modelSelection.isDefault,
                     markLiveSwitchPending: true,
                   });
                   if (
@@ -1141,7 +1143,7 @@ export function createSessionStatusTool(opts?: {
             resolvedReasoningLevel: (statusSessionEntry.reasoningLevel ?? "off") as ReasoningLevel,
             resolvedElevatedLevel: statusSessionEntry.elevatedLevel as ElevatedLevel | undefined,
             resolveDefaultThinkingLevel: () =>
-              resolveThinkingDefaultWithRuntimeCatalog({
+              resolveThinkingDefaultWithRuntimeCatalogCore({
                 cfg,
                 provider: providerForCard,
                 model: defaultModelForCard,

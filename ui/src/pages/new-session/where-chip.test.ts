@@ -1,9 +1,14 @@
 /* @vitest-environment jsdom */
 import { render } from "lit";
 import { describe, expect, it, vi } from "vitest";
+import { readDraftCloudProfiles } from "./discovery.ts";
 import { renderWhereChip, resolveWhereChip } from "./where-chip.ts";
 
-function renderPicker(isAdmin: boolean, autoPlacementMode?: "least-busy" | "eligible-order") {
+function renderPicker(
+  isAdmin: boolean,
+  autoPlacementMode?: "least-busy" | "eligible-order",
+  selection: Partial<Parameters<typeof resolveWhereChip>[0]> = {},
+) {
   const state = resolveWhereChip({
     environments: [
       {
@@ -34,13 +39,14 @@ function renderPicker(isAdmin: boolean, autoPlacementMode?: "least-busy" | "elig
     cloudProfiles: [{ id: "aws", providerId: "crabbox" }],
     cloudProfileId: "",
     deviceId: "",
+    ...selection,
   });
   const container = document.createElement("div");
   render(
     renderWhereChip({
       state,
       gatewayName: "",
-      cloudProfileId: "",
+      cloudProfileId: selection.cloudProfileId ?? "",
       deviceId: "",
       worktreeAvailable: true,
       submitting: false,
@@ -64,6 +70,80 @@ function renderPicker(isAdmin: boolean, autoPlacementMode?: "least-busy" | "elig
 }
 
 describe("Where chip", () => {
+  it("keeps unavailable operating systems visible with the provider's repair hint", () => {
+    const reason = "Upgrade Crabbox to 0.53.1 or newer, then restart the Gateway.";
+    const container = renderPicker(true, undefined, {
+      cloudProfileId: "aws",
+      cloudProfiles: readDraftCloudProfiles([
+        {
+          id: "aws",
+          providerId: "crabbox",
+          operatingSystems: [
+            { id: "linux", label: "Linux", default: true },
+            { id: "macos", label: "macOS", disabledReason: reason },
+            { id: "windows/wsl2", label: "Windows (WSL2)", disabledReason: reason },
+          ],
+        },
+      ]),
+    });
+    expect(container.querySelector<HTMLButtonElement>('[data-value="os:linux"]')?.disabled).toBe(
+      false,
+    );
+    for (const os of ["macos", "windows/wsl2"]) {
+      const row = container.querySelector<HTMLButtonElement>(`[data-value="os:${os}"]`);
+      expect(row?.disabled).toBe(true);
+      expect(row?.textContent).toContain(reason);
+    }
+  });
+
+  it.each([
+    { os: undefined, machineClass: undefined, label: "aws", machine: "Tiny Linux" },
+    { os: "linux", machineClass: "tiny", label: "aws · Tiny Linux", machine: "Tiny Linux" },
+    {
+      os: "windows/wsl2",
+      machineClass: undefined,
+      label: "aws · Windows (WSL2)",
+      machine: "Tiny Windows",
+    },
+    {
+      os: "windows/wsl2",
+      machineClass: "tiny",
+      label: "aws · Windows (WSL2) · Tiny Windows",
+      machine: "Tiny Windows",
+    },
+  ])("renders OS and class choices for $label", ({ os, machineClass, label, machine }) => {
+    const container = renderPicker(true, undefined, {
+      cloudProfileId: "aws",
+      os,
+      machineClass,
+      cloudProfiles: [
+        {
+          id: "aws",
+          providerId: "crabbox",
+          operatingSystems: [
+            { id: "linux", label: "Linux", default: true },
+            { id: "windows/wsl2", label: "Windows (WSL2)" },
+          ],
+          machines: [
+            { id: "tiny", label: "Tiny Linux", os: "linux", default: true },
+            { id: "tiny", label: "Tiny Windows", os: "windows/wsl2", default: true },
+            { id: "custom", label: "Custom" },
+          ],
+        },
+      ],
+    });
+    expect(container.querySelector(".new-session-page__trigger-label")?.textContent).toBe(label);
+    expect(container.querySelectorAll('[data-value="machine:tiny"]')).toHaveLength(1);
+    expect(container.querySelector('[data-value="machine:tiny"]')?.textContent).toContain(machine);
+    expect(container.querySelector('[data-value="machine:custom"]')).not.toBeNull();
+    const osRow = container.querySelector('[data-value="os:linux"]');
+    expect(osRow?.textContent).toContain("Default");
+    expect(osRow?.hasAttribute("data-popover")).toBe(false);
+    expect(
+      osRow?.compareDocumentPosition(container.querySelector('[data-value="machine:tiny"]')!),
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
   it("keeps capacity structured and exposes busy slots without an ambiguous visible fraction", () => {
     const state = resolveWhereChip({
       environments: [
@@ -278,6 +358,7 @@ describe("Where chip", () => {
       },
       workerSlots: { total: 1, available: 0 },
       invocableCommands: ["codex.exec-server.stdio.v1"],
+      commandState: "invocable" as const,
       disabled: false,
       label: "1 of 1 slots busy",
       tone: "warn",
@@ -290,6 +371,7 @@ describe("Where chip", () => {
       },
       workerSlots: undefined,
       invocableCommands: ["codex.exec-server.stdio.v1"],
+      commandState: "invocable" as const,
       disabled: false,
       label: "Codex exec",
       tone: undefined,
@@ -299,8 +381,9 @@ describe("Where chip", () => {
       devicePlacement: { requiredNodeCommands: [], consumesWorkerSlot: true },
       workerSlots: { total: 1, available: 0 },
       invocableCommands: [],
+      commandState: undefined,
       disabled: true,
-      reason: /worker slots/i,
+      reason: "No worker slots are available. Wait for a slot or pick another device.",
       label: "Slot utilization unavailable",
       tone: "stale",
     },
@@ -312,14 +395,25 @@ describe("Where chip", () => {
       },
       workerSlots: { total: 1, available: 1 },
       invocableCommands: [],
+      commandState: "unauthorized" as const,
       disabled: true,
-      reason: /enable|approv/i,
+      reason:
+        "Authorize codex.exec-server.stdio.v1 in the Gateway node command policy, or pick another device.",
       label: "Slot utilization unavailable",
       tone: "stale",
     },
   ])(
     "$name in the New Session picker",
-    ({ devicePlacement, workerSlots, invocableCommands, disabled, reason, label, tone }) => {
+    ({
+      devicePlacement,
+      workerSlots,
+      invocableCommands,
+      commandState,
+      disabled,
+      reason,
+      label,
+      tone,
+    }) => {
       const state = resolveWhereChip({
         environments: [
           {
@@ -331,6 +425,14 @@ describe("Where chip", () => {
             workerSlots,
             capabilities: ["codex.exec-server.stdio.v1"],
             invocableCommands,
+            ...(commandState
+              ? {
+                  requiredNodeCommand: {
+                    command: "codex.exec-server.stdio.v1",
+                    state: commandState,
+                  },
+                }
+              : {}),
           },
         ],
         cloudProfiles: [],
@@ -371,7 +473,7 @@ describe("Where chip", () => {
         expect(meter?.classList.contains(`session-context-meter--${tone}`)).toBe(true);
       }
       if (reason) {
-        expect(device?.title).toMatch(reason);
+        expect(device?.title).toBe(reason);
       }
     },
   );

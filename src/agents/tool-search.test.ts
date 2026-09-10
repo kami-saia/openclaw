@@ -1,10 +1,12 @@
 // Tool search tests cover catalog compaction, scoped tool lookup, raw fallback
 // tools, hooks, abort wrapping, and transcript projection.
 
+import { validateToolArguments } from "@openclaw/ai/validation";
 import { expectDefined } from "@openclaw/normalization-core";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../test/helpers/promise.js";
 import {
   initializeGlobalHookRunner,
   resetGlobalHookRunner,
@@ -14,9 +16,11 @@ import { setPluginToolMeta } from "../plugins/tool-metadata.js";
 import { materializeBundleMcpToolsForRun } from "./agent-bundle-mcp-materialize.js";
 import type { McpToolCatalog, SessionMcpRuntime } from "./agent-bundle-mcp-types.js";
 import { toToolDefinitions } from "./agent-tool-definition-adapter.js";
-import { wrapToolWithAbortSignal } from "./agent-tools.abort.js";
+import { raceWithAbortSignal, wrapToolWithAbortSignal } from "./agent-tools.abort.js";
 import {
+  finalizeToolTerminalPresentation,
   isToolWrappedWithBeforeToolCallHook,
+  type ToolOutcomeObservation,
   wrapToolWithBeforeToolCallHook,
 } from "./agent-tools.before-tool-call.js";
 import { resetAdjustedParamsByToolCallIdForTests } from "./agent-tools.before-tool-call.state.js";
@@ -48,6 +52,7 @@ import {
   type ToolSearchCatalogRef,
 } from "./tool-search.js";
 import { testing } from "./tool-search.test-support.js";
+import { setToolTerminalPresentation } from "./tool-terminal-presentation.js";
 import { jsonResult, type AnyAgentTool } from "./tools/common.js";
 import { createGatewayTool } from "./tools/gateway-tool.js";
 import { createOpenClawDelegateToolsForRun } from "./tools/openclaw-delegate-tool.js";
@@ -183,6 +188,45 @@ function mockCall(mock: { mock: { calls: unknown[][] } }, index = 0): unknown[] 
   return call;
 }
 
+function observedRuntimeFixture(params: {
+  name: string;
+  ordinal: number;
+  execute?: AnyAgentTool["execute"];
+  executeTool?: NonNullable<ConstructorParameters<typeof ToolSearchRuntime>[0]["executeTool"]>;
+  formatter?: Parameters<typeof setToolTerminalPresentation>[1];
+}) {
+  const catalogRef = createToolSearchCatalogRef();
+  const outcomes: ToolOutcomeObservation[] = [];
+  const runId = `run-${params.name}`;
+  const target = fakeTool(params.name, params.name);
+  if (params.execute) {
+    target.execute = params.execute;
+  }
+  if (params.formatter) {
+    setToolTerminalPresentation(target, params.formatter);
+  }
+  registerHeadlessToolSearchCatalog({
+    catalogRef,
+    tools: [target],
+    hookContext: {
+      runId,
+      sessionId: `session-${params.name}`,
+      onToolOutcome: (outcome) => outcomes.push(outcome),
+      allocateToolOutcomeOrdinal: () => params.ordinal,
+    },
+  });
+  const runtime = new ToolSearchRuntime(
+    {
+      catalogRef,
+      runId,
+      sessionId: `session-${params.name}`,
+      ...(params.executeTool ? { executeTool: params.executeTool } : {}),
+    },
+    resolveToolSearchConfig(),
+  );
+  return { outcomes, runId, runtime };
+}
+
 describe("Tool Search", () => {
   const limitSearchTool = expectDefined(
     createToolSearchTools({}).find((tool) => tool.name === TOOL_SEARCH_RAW_TOOL_NAME),
@@ -201,10 +245,649 @@ describe("Tool Search", () => {
     expect(Value.Check(limitSearchTool.parameters, input)).toBe(valid);
   });
 
+  it("accepts bounded structured batch queries in the tool schema", () => {
+    expect(JSON.stringify(limitSearchTool.parameters)).toContain(
+      "serialized query strings may use at most 512 UTF-8 bytes in total",
+    );
+    expect(
+      Value.Check(limitSearchTool.parameters, {
+        queries: [
+          { query: "today's calendar events", limit: 3 },
+          { query: "Slack messages needing attention", limit: 3 },
+        ],
+      }),
+    ).toBe(true);
+    // Argument validation runs before execute; the parser owns empty/null handling.
+    for (const input of [
+      { queries: [] },
+      { query: null, queries: [{ query: "calendar" }] },
+      { query: "calendar", queries: [] },
+      { query: "calendar", queries: null },
+    ]) {
+      expect(Value.Check(limitSearchTool.parameters, input)).toBe(true);
+    }
+    expect(
+      Value.Check(limitSearchTool.parameters, {
+        queries: Array.from({ length: 17 }, (_, index) => ({ query: `query ${index}`, limit: 1 })),
+      }),
+    ).toBe(false);
+  });
+
   it.each([5.5, 0, -1])("rejects runtime limit %s", async (limit) => {
     await expect(limitSearchTool.execute("call-limit", { query: "test", limit })).rejects.toThrow(
       "limit must be a positive integer",
     );
+  });
+
+  it.each([
+    {
+      label: "missing request",
+      input: {},
+      error: "provide query or queries",
+    },
+    {
+      label: "null request",
+      input: { query: null, queries: null },
+      error: "provide query or queries",
+    },
+    {
+      label: "empty batch",
+      input: { queries: [] },
+      error: "queries must be a non-empty array",
+    },
+    {
+      label: "empty batch beside an empty query",
+      input: { query: "", queries: [] },
+      error: "queries must be a non-empty array",
+    },
+    {
+      label: "empty batch query",
+      input: { queries: [{ query: "  " }] },
+      error: "queries[0].query must be a non-empty string",
+    },
+    {
+      label: "top-level batch limit",
+      input: { queries: [{ query: "calendar" }], limit: 1 },
+      error: "set limit on each batch query",
+    },
+  ])("rejects $label", async ({ input, error }) => {
+    await expect(limitSearchTool.execute("call-invalid-batch", input)).rejects.toThrow(error);
+  });
+
+  it.each(["", "  "])("preserves scalar empty-query compatibility for %j", async (query) => {
+    expect(Value.Check(limitSearchTool.parameters, { query })).toBe(true);
+    const catalogRef = createToolSearchCatalogRef();
+    registerHeadlessToolSearchCatalog({
+      catalogRef,
+      tools: [pluginTool("fake_empty_query", "empty query compatibility surface")],
+    });
+    const searchTool = expectDefined(
+      createToolSearchTools({ catalogRef }).find((tool) => tool.name === TOOL_SEARCH_RAW_TOOL_NAME),
+      "empty scalar query search tool",
+    );
+
+    await expect(searchTool.execute("call-empty-query", { query })).resolves.toMatchObject({
+      details: [],
+    });
+  });
+
+  it("rejects batches whose effective result limits exceed the shared budget", async () => {
+    const searchTool = expectDefined(
+      createToolSearchTools({
+        config: {
+          tools: { toolSearch: { enabled: true, mode: "tools", maxSearchLimit: 50 } },
+        } as never,
+      }).find((tool) => tool.name === TOOL_SEARCH_RAW_TOOL_NAME),
+      "batch budget search tool",
+    );
+
+    await expect(
+      searchTool.execute("call-batch-budget", {
+        queries: [
+          { query: "calendar", limit: 25 },
+          { query: "Slack", limit: 26 },
+        ],
+      }),
+    ).rejects.toThrow("resolve to 51 results, but may request at most 50 in total");
+    await expect(
+      searchTool.execute("call-default-batch-budget", {
+        queries: Array.from({ length: 7 }, (_, index) => ({ query: `surface ${index}` })),
+      }),
+    ).rejects.toThrow(
+      "resolve to 56 results, but may request at most 50 in total. An omitted limit counts as 8; set smaller per-query limits and retry",
+    );
+    expect(JSON.stringify(searchTool.parameters)).toContain(
+      "Their effective limits may total at most 50; an omitted item limit counts as 8",
+    );
+    expect(JSON.stringify(searchTool.parameters)).toContain(
+      "Maximum results for this query. Defaults to 8 when omitted.",
+    );
+  });
+
+  it("preserves scalar query length compatibility while bounding batch query echo", async () => {
+    const longScalarQuery = "q".repeat(4097);
+    expect(Value.Check(limitSearchTool.parameters, { query: longScalarQuery })).toBe(true);
+    const catalogRef = createToolSearchCatalogRef();
+    registerHeadlessToolSearchCatalog({
+      catalogRef,
+      tools: [pluginTool("fake_long_query", "long scalar query surface")],
+    });
+    const searchTool = expectDefined(
+      createToolSearchTools({ catalogRef }).find((tool) => tool.name === TOOL_SEARCH_RAW_TOOL_NAME),
+      "long query search tool",
+    );
+    await expect(
+      searchTool.execute("call-long-query", { query: longScalarQuery }),
+    ).resolves.toBeDefined();
+    await expect(
+      limitSearchTool.execute("call-long-batch-query", {
+        queries: [{ query: "q".repeat(512) }, { query: "r" }],
+      }),
+    ).rejects.toThrow("serialized batch query text may use at most 512 UTF-8 bytes");
+    await expect(
+      limitSearchTool.execute("call-multibyte-batch-query", {
+        queries: [{ query: "😀".repeat(128) }],
+      }),
+    ).rejects.toThrow("serialized batch query text may use at most 512 UTF-8 bytes");
+  });
+
+  it("uses the schema's grapheme length semantics at runtime", async () => {
+    const query = "😀".repeat(3_000);
+    expect(Value.Check(limitSearchTool.parameters, { query })).toBe(true);
+    const catalogRef = createToolSearchCatalogRef();
+    registerHeadlessToolSearchCatalog({
+      catalogRef,
+      tools: [pluginTool("fake_unicode", "unicode search surface")],
+    });
+    const searchTool = expectDefined(
+      createToolSearchTools({ catalogRef }).find((tool) => tool.name === TOOL_SEARCH_RAW_TOOL_NAME),
+      "unicode query search tool",
+    );
+
+    await expect(searchTool.execute("call-unicode-query", { query })).resolves.toBeDefined();
+  });
+
+  function validatedSearchFixture() {
+    const catalogRef = createToolSearchCatalogRef();
+    registerHeadlessToolSearchCatalog({
+      catalogRef,
+      tools: [
+        pluginTool("fake_calendar", "calendar events surface"),
+        pluginTool("fake_slack_messages", "Slack messages surface"),
+        pluginTool("fake_slack_channels", "Slack channels surface"),
+        pluginTool("fake_slack_users", "Slack users surface"),
+      ],
+    });
+    const searchTool = expectDefined(
+      createToolSearchTools({
+        catalogRef,
+        config: {
+          tools: { toolSearch: { mode: "tools", searchDefaultLimit: 2, maxSearchLimit: 50 } },
+        },
+      }).find((tool) => tool.name === TOOL_SEARCH_RAW_TOOL_NAME),
+      "validated search tool",
+    );
+    const execute = async (input: Record<string, unknown>) => {
+      const args = validateToolArguments(searchTool, {
+        type: "toolCall",
+        id: "call-validated-search",
+        name: searchTool.name,
+        arguments: input,
+      });
+      return searchTool.execute("call-validated-search", args);
+    };
+    return { catalogRef, execute };
+  }
+
+  it("preserves scalar-first order and distinct limits for duplicate mixed queries", async () => {
+    const { catalogRef, execute } = validatedSearchFixture();
+    const scalar = await execute({ query: "Slack", limit: 1 });
+    const result = await execute({
+      query: " Slack ",
+      limit: 1,
+      queries: [
+        { query: "calendar", limit: 1 },
+        { query: "Slack", limit: 2 },
+        { query: "Slack", limit: 3 },
+      ],
+    });
+    expect(result.details).toEqual({
+      results: [
+        { query: "Slack", candidates: scalar.details },
+        { query: "calendar", candidates: [expect.objectContaining({ name: "fake_calendar" })] },
+        { query: "Slack", candidates: expect.any(Array) },
+        { query: "Slack", candidates: expect.any(Array) },
+      ],
+    });
+    const groups = resultDetails(result).results as Array<{ candidates: unknown[] }>;
+    expect(groups.map((group) => group.candidates.length)).toEqual([1, 1, 2, 3]);
+    expect(catalogRef.current?.searchCount).toBe(5);
+  });
+
+  it.each([undefined, null, "", "  "])(
+    "serves batch placeholders with scalar query %j through argument validation",
+    async (query) => {
+      const { execute } = validatedSearchFixture();
+      const expected = await execute({ queries: [{ query: "Slack", limit: 1 }] });
+      for (const limit of [undefined, null]) {
+        const result = await execute({ query, limit, queries: [{ query: "Slack", limit: 1 }] });
+        expect(result).toEqual(expected);
+      }
+    },
+  );
+
+  it.each([{ queries: undefined }, { queries: null }, { queries: [] }])(
+    "preserves scalar results beside batch placeholder $queries",
+    async ({ queries }) => {
+      const { execute } = validatedSearchFixture();
+      const expected = await execute({ query: "Slack" });
+      expect(Array.isArray(expected.details)).toBe(true);
+      expect(expected.details).toHaveLength(2);
+      expect(await execute({ query: "Slack", limit: null, queries })).toEqual(expected);
+    },
+  );
+
+  it.each([
+    {},
+    { query: null, limit: null, queries: null },
+    { query: null, limit: null, queries: [] },
+    { query: "", limit: null, queries: [] },
+    { query: "  ", limit: null, queries: [] },
+  ])("rejects missing searches after argument validation: %j", async (input) => {
+    const { catalogRef, execute } = validatedSearchFixture();
+    await expect(execute(input)).rejects.toThrow(/provide query or queries|non-empty array/);
+    expect(catalogRef.current?.searchCount).toBe(0);
+  });
+
+  it.each([1, 0, false, "", -1, 1.5, "invalid"])(
+    "does not discard non-null top-level batch limit %j",
+    async (limit) => {
+      const { catalogRef, execute } = validatedSearchFixture();
+      await expect(execute({ query: null, limit, queries: [{ query: "Slack" }] })).rejects.toThrow(
+        /Validation failed|set limit on each batch query/,
+      );
+      expect(catalogRef.current?.searchCount).toBe(0);
+    },
+  );
+
+  it.each([
+    {
+      input: { query: "Slack", limit: 25, queries: [{ query: "Slack", limit: 26 }] },
+      error: "resolve to 51 results",
+    },
+    {
+      input: {
+        query: "Slack",
+        limit: 1,
+        queries: Array.from({ length: 16 }, () => ({ query: "Slack", limit: 1 })),
+      },
+      error: "at most 16 entries",
+    },
+    {
+      input: { query: "é".repeat(127), limit: 1, queries: [{ query: "é".repeat(127), limit: 1 }] },
+      error: "at most 512 UTF-8 bytes",
+    },
+  ])("counts the scalar duplicate toward batch budgets: $error", async ({ input, error }) => {
+    const { catalogRef, execute } = validatedSearchFixture();
+    await expect(execute(input)).rejects.toThrow(error);
+    expect(catalogRef.current?.searchCount).toBe(0);
+  });
+
+  it("accepts the documented batch boundaries without deduplicating queries", async () => {
+    const catalogRef = createToolSearchCatalogRef();
+    const config = {
+      tools: {
+        toolSearch: {
+          enabled: true,
+          mode: "tools",
+          searchDefaultLimit: 1,
+          maxSearchLimit: 10,
+        },
+      },
+    } as never;
+    applyToolSearchCatalog({
+      tools: [
+        fakeTool(TOOL_SEARCH_RAW_TOOL_NAME, "search"),
+        fakeTool(TOOL_DESCRIBE_RAW_TOOL_NAME, "describe"),
+        fakeTool(TOOL_CALL_RAW_TOOL_NAME, "call"),
+        pluginTool("fake_boundary", "boundary duplicate surface"),
+      ],
+      config,
+      catalogRef,
+    });
+    const searchTool = expectDefined(
+      createToolSearchTools({ config, catalogRef }).find(
+        (tool) => tool.name === TOOL_SEARCH_RAW_TOOL_NAME,
+      ),
+      "boundary batch search tool",
+    );
+
+    const duplicateQueries = Array.from({ length: 16 }, () => ({
+      query: "boundary duplicate",
+    }));
+    const duplicateResult = await searchTool.execute("call-sixteen-queries", {
+      queries: duplicateQueries,
+    });
+    expect(resultDetails(duplicateResult).results).toHaveLength(16);
+    expect(catalogRef.current?.searchCount).toBe(16);
+
+    const clampedResult = await searchTool.execute("call-exact-result-budget", {
+      queries: Array.from({ length: 5 }, (_, index) => ({
+        query: `boundary ${index}`,
+        limit: 999,
+      })),
+    });
+    expect(resultDetails(clampedResult).results).toHaveLength(5);
+    expect(catalogRef.current?.searchCount).toBe(21);
+  });
+
+  it("validates every batch item before executing any search", async () => {
+    const catalogRef = createToolSearchCatalogRef();
+    const config = { tools: { toolSearch: { enabled: true, mode: "tools" } } } as never;
+    applyToolSearchCatalog({
+      tools: [
+        fakeTool(TOOL_SEARCH_RAW_TOOL_NAME, "search"),
+        fakeTool(TOOL_DESCRIBE_RAW_TOOL_NAME, "describe"),
+        fakeTool(TOOL_CALL_RAW_TOOL_NAME, "call"),
+        pluginTool("fake_atomic", "atomic validation surface"),
+      ],
+      config,
+      catalogRef,
+    });
+    const searchTool = expectDefined(
+      createToolSearchTools({ config, catalogRef }).find(
+        (tool) => tool.name === TOOL_SEARCH_RAW_TOOL_NAME,
+      ),
+      "atomic batch search tool",
+    );
+
+    await expect(
+      searchTool.execute("call-invalid-later-item", {
+        queries: [{ query: "atomic validation" }, { query: " " }],
+      }),
+    ).rejects.toThrow("queries[1].query must be a non-empty string");
+    expect(catalogRef.current?.searchCount).toBe(0);
+  });
+
+  it("compacts descriptions and bounds the serialized batch response", async () => {
+    const catalogRef = createToolSearchCatalogRef();
+    const config = {
+      tools: { toolSearch: { enabled: true, mode: "tools", maxSearchLimit: 10 } },
+    } as never;
+    const longDescription = `large surface ${"description ".repeat(200)}`;
+    const catalogTools = Array.from({ length: 10 }, (_, index) =>
+      pluginTool(`fake_large_${index}`, `${longDescription}${index}`),
+    );
+    applyToolSearchCatalog({
+      tools: [
+        fakeTool(TOOL_SEARCH_RAW_TOOL_NAME, "search"),
+        fakeTool(TOOL_DESCRIBE_RAW_TOOL_NAME, "describe"),
+        fakeTool(TOOL_CALL_RAW_TOOL_NAME, "call"),
+        ...catalogTools,
+      ],
+      config,
+      catalogRef,
+    });
+    const searchTool = expectDefined(
+      createToolSearchTools({ config, catalogRef }).find(
+        (tool) => tool.name === TOOL_SEARCH_RAW_TOOL_NAME,
+      ),
+      "bounded response search tool",
+    );
+
+    const scalar = await searchTool.execute("call-full-scalar-description", {
+      query: "fake_large_0",
+      limit: 1,
+    });
+    expect(scalar.details).toEqual([
+      expect.objectContaining({ description: `${longDescription}0` }),
+    ]);
+    const fullRanking = await searchTool.execute("call-untruncated-ranking", {
+      query: "large surface",
+      limit: 10,
+    });
+    const rankedIds = (fullRanking.details as Array<{ id: string }>).map(
+      (candidate) => candidate.id,
+    );
+
+    const result = await searchTool.execute("call-bounded-response", {
+      queries: Array.from({ length: 5 }, () => ({ query: "large surface", limit: 10 })),
+    });
+    const details = resultDetails(result);
+    expect(details.truncated).toBe(true);
+    expect(JSON.stringify(details, null, 2).length).toBeLessThanOrEqual(4_000);
+    expect(JSON.stringify(details)).not.toContain("description ".repeat(20));
+    const retainedCounts = (details.results as Array<{ candidates: unknown[] }>).map(
+      (group) => group.candidates.length,
+    );
+    expect(Math.max(...retainedCounts) - Math.min(...retainedCounts)).toBeLessThanOrEqual(1);
+    expect(retainedCounts.every((count) => count > 0)).toBe(true);
+    for (const group of details.results as Array<{ candidates: Array<{ id: string }> }>) {
+      expect(group.candidates.map((candidate) => candidate.id)).toEqual(
+        rankedIds.slice(0, group.candidates.length),
+      );
+    }
+
+    const manyGroups = resultDetails(
+      await searchTool.execute("call-bounded-many-groups", {
+        queries: Array.from({ length: 16 }, () => ({ query: "large surface", limit: 1 })),
+      }),
+    );
+    expect(JSON.stringify(manyGroups, null, 2).length).toBeLessThanOrEqual(4_000);
+    let sawRetainedCandidate = false;
+    for (const group of manyGroups.results as Array<{
+      candidates: Array<{ id: string }>;
+      truncated?: true;
+    }>) {
+      if (group.candidates.length === 0) {
+        expect(sawRetainedCandidate).toBe(false);
+        expect(group.truncated).toBe(true);
+      } else {
+        sawRetainedCandidate = true;
+        expect(group.candidates[0]?.id).toBe(rankedIds[0]);
+      }
+    }
+  });
+
+  it("bounds untrusted description work before normalizing repeated batch matches", async () => {
+    const catalogRef = createToolSearchCatalogRef();
+    const config = {
+      tools: { toolSearch: { enabled: true, mode: "tools", maxSearchLimit: 10 } },
+    } as never;
+    const hugeDescription = `large remote surface ${" ".repeat(2_000_000)}unbounded tail`;
+    applyToolSearchCatalog({
+      tools: [
+        fakeTool(TOOL_SEARCH_RAW_TOOL_NAME, "search"),
+        fakeTool(TOOL_DESCRIBE_RAW_TOOL_NAME, "describe"),
+        fakeTool(TOOL_CALL_RAW_TOOL_NAME, "call"),
+        pluginTool("fake_remote_large", hugeDescription),
+      ],
+      config,
+      catalogRef,
+    });
+    const searchTool = expectDefined(
+      createToolSearchTools({ config, catalogRef }).find(
+        (tool) => tool.name === TOOL_SEARCH_RAW_TOOL_NAME,
+      ),
+      "untrusted description search tool",
+    );
+
+    const result = resultDetails(
+      await searchTool.execute("call-repeated-huge-description", {
+        queries: Array.from({ length: 16 }, () => ({ query: "large remote surface", limit: 1 })),
+      }),
+    );
+    expect(JSON.stringify(result, null, 2).length).toBeLessThanOrEqual(4_000);
+    expect(JSON.stringify(result)).not.toContain("unbounded tail");
+    const retainedDescriptions = (
+      result.results as Array<{ candidates: Array<{ description: string }> }>
+    ).flatMap((group) => group.candidates.map((candidate) => candidate.description));
+    expect(retainedDescriptions.length).toBeGreaterThan(0);
+    for (const description of retainedDescriptions) {
+      expect(description.length).toBeLessThanOrEqual(180);
+    }
+  });
+
+  it("preserves bounded callable identity while dropping oversized optional metadata", async () => {
+    const catalogRef = createToolSearchCatalogRef();
+    const config = {
+      tools: { toolSearch: { enabled: true, mode: "tools", maxSearchLimit: 10 } },
+    } as never;
+    applyToolSearchCatalog({
+      tools: [
+        fakeTool(TOOL_SEARCH_RAW_TOOL_NAME, "search"),
+        fakeTool(TOOL_DESCRIBE_RAW_TOOL_NAME, "describe"),
+        fakeTool(TOOL_CALL_RAW_TOOL_NAME, "call"),
+        mcpPluginTool("remote_large_label", "oversized metadata"),
+      ],
+      config,
+      catalogRef,
+    });
+    const remoteEntry = expectDefined(
+      catalogRef.current?.entries.find((entry) => entry.name === "remote_large_label"),
+      "remote metadata catalog entry",
+    );
+    remoteEntry.label = "m".repeat(20_000);
+
+    const clientTool = fakeTool(`client_large_name_${"n".repeat(20_000)}`, "oversized metadata");
+    addClientToolsToToolSearchCatalog({ tools: [clientTool], config, catalogRef });
+    const searchTool = expectDefined(
+      createToolSearchTools({ config, catalogRef }).find(
+        (tool) => tool.name === TOOL_SEARCH_RAW_TOOL_NAME,
+      ),
+      "untrusted metadata search tool",
+    );
+
+    const result = resultDetails(
+      await searchTool.execute("call-repeated-huge-metadata", {
+        queries: Array.from({ length: 16 }, () => ({
+          query: "oversized metadata",
+          limit: 2,
+        })),
+      }),
+    );
+    expect(JSON.stringify(result, null, 2).length).toBeLessThanOrEqual(4_000);
+    expect(result.truncated).toBe(true);
+    const groups = result.results as Array<{
+      candidates: Array<{ id: string; label?: string; name: string }>;
+      truncated?: true;
+    }>;
+    const retained = groups.flatMap((group) => group.candidates);
+    expect(retained.length).toBeGreaterThan(0);
+    for (const group of groups) {
+      expect(group.truncated).toBe(true);
+      for (const candidate of group.candidates) {
+        expect(candidate).toEqual(
+          expect.objectContaining({
+            id: "mcp:remoteDemo:remote_large_label",
+            name: "remote_large_label",
+          }),
+        );
+        expect(candidate.label).toBeUndefined();
+      }
+    }
+    expect(retained).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "mcp:remoteDemo:remote_large_label",
+          name: "remote_large_label",
+        }),
+      ]),
+    );
+  });
+
+  it("searches batch queries independently while preserving scalar results", async () => {
+    const catalogRef = createToolSearchCatalogRef();
+    const shared = pluginTool(
+      "fake_attention",
+      "Find calendar events and Slack messages needing attention",
+    );
+    const config = {
+      tools: { toolSearch: { enabled: true, mode: "tools", maxSearchLimit: 50 } },
+    } as never;
+    applyToolSearchCatalog({
+      tools: [
+        fakeTool(TOOL_SEARCH_RAW_TOOL_NAME, "search"),
+        fakeTool(TOOL_DESCRIBE_RAW_TOOL_NAME, "describe"),
+        fakeTool(TOOL_CALL_RAW_TOOL_NAME, "call"),
+        shared,
+      ],
+      config,
+      catalogRef,
+    });
+    const searchTool = expectDefined(
+      createToolSearchTools({ config, catalogRef }).find(
+        (tool) => tool.name === TOOL_SEARCH_RAW_TOOL_NAME,
+      ),
+      "structured batch search tool",
+    );
+
+    const scalar = await searchTool.execute("call-scalar-search", {
+      query: "calendar events",
+      limit: 1,
+    });
+    expect(scalar.details).toEqual([
+      expect.objectContaining({ name: "fake_attention", source: "openclaw" }),
+    ]);
+
+    const batch = await searchTool.execute("call-batch-search", {
+      queries: [
+        { query: "  calendar events  ", limit: 1 },
+        { query: "Slack messages", limit: 1 },
+        { query: "zzzzunmatched", limit: 1 },
+      ],
+    });
+    expect(batch.details).toEqual({
+      results: [
+        {
+          query: "calendar events",
+          candidates: [expect.objectContaining({ name: "fake_attention", source: "openclaw" })],
+        },
+        {
+          query: "Slack messages",
+          candidates: [expect.objectContaining({ name: "fake_attention", source: "openclaw" })],
+        },
+        { query: "zzzzunmatched", candidates: [] },
+      ],
+    });
+    expect(catalogRef.current?.searchCount).toBe(4);
+  });
+
+  it("uses the same structured batch contract in directory mode", async () => {
+    const catalogRef = createToolSearchCatalogRef();
+    const config = {
+      tools: { toolSearch: { enabled: true, mode: "directory" } },
+    } as never;
+    applyToolSchemaDirectoryCatalog({
+      tools: [
+        fakeTool(TOOL_SEARCH_RAW_TOOL_NAME, "search"),
+        fakeTool(TOOL_DESCRIBE_RAW_TOOL_NAME, "describe"),
+        fakeTool(TOOL_CALL_RAW_TOOL_NAME, "call"),
+        pluginTool("fake_directory_calendar", "Read directory calendar events"),
+      ],
+      config,
+      catalogRef,
+    });
+    const searchTool = expectDefined(
+      createToolSearchTools({ config, catalogRef }).find(
+        (tool) => tool.name === TOOL_SEARCH_RAW_TOOL_NAME,
+      ),
+      "directory batch search tool",
+    );
+
+    const result = await searchTool.execute("call-directory-batch-search", {
+      queries: [{ query: "directory calendar", limit: 1 }],
+    });
+
+    expect(result.details).toEqual({
+      results: [
+        {
+          query: "directory calendar",
+          candidates: [expect.objectContaining({ name: "fake_directory_calendar" })],
+        },
+      ],
+    });
+    expect(catalogRef.current?.searchCount).toBe(1);
   });
 
   it("keeps direct-only tools visible and out of the structured catalog", () => {
@@ -440,19 +1123,22 @@ describe("Tool Search", () => {
       scenario: "delegation was never provided",
       agentId: "openclaw",
       denyOpenClaw: false,
-      expected: "Read gateway config + schema. Writes/restart unavailable; ask human.",
+      expected:
+        "Read gateway config/schema. update.run: owner-only update on explicit user request; restart + completion notice automatic. Never via shell.",
     },
     {
       scenario: "policy removed delegation",
       agentId: "main",
       denyOpenClaw: true,
-      expected: "Read gateway config + schema. Writes/restart unavailable; ask human.",
+      expected:
+        "Read gateway config/schema. update.run: owner-only update on explicit user request; restart + completion notice automatic. Never via shell.",
     },
     {
       scenario: "delegation remains authorized",
       agentId: "main",
       denyOpenClaw: false,
-      expected: "Read gateway config + schema. Writes/restart: use openclaw tool.",
+      expected:
+        "Read gateway config/schema. update.run: owner-only update on explicit user request; restart + completion notice automatic. Never via shell. Other system changes: use openclaw tool.",
     },
   ])(
     "keeps gateway guidance consistent across final and deferred surfaces when $scenario",
@@ -511,11 +1197,11 @@ describe("Tool Search", () => {
     },
     {
       mode: "tools" as const,
-      expectedGuidance: "Call tool_describe with a listed tool name",
+      expectedGuidance: "Deferred names are not directly callable.",
     },
     {
       mode: "directory" as const,
-      expectedGuidance: "Call tool_describe with a listed tool name",
+      expectedGuidance: "Call a unique deferred tool name directly, or use tool_call",
     },
   ])("builds a bounded capability directory for $mode mode", ({ mode, expectedGuidance }) => {
     const catalogRef = createToolSearchCatalogRef();
@@ -550,6 +1236,47 @@ describe("Tool Search", () => {
     expect(directory).not.toContain('"properties"');
     expect(directory.length).toBeLessThanOrEqual(testing.maxToolSchemaDirectoryPromptChars);
   });
+
+  it.each(["tools", "directory"] as const)(
+    "lists only deferred tools while keeping direct tools searchable in %s mode",
+    async (mode) => {
+      const catalogRef = createToolSearchCatalogRef();
+      const config = { tools: { toolSearch: { enabled: true, mode } } };
+      const read = fakeTool("read", "Read a workspace file");
+      const status = fakeTool("session_status", "Inspect the current session");
+      const tools = [...createToolSearchTools({ config, catalogRef }), read, status];
+      const apply = mode === "directory" ? applyToolSchemaDirectoryCatalog : applyToolSearchCatalog;
+      const ctx = { config, catalogRef };
+      const first = apply({ ...ctx, tools });
+      expect(first.tools).toContain(read);
+      expect(first.tools).not.toContain(status);
+      expect(buildToolSchemaDirectoryPrompt(ctx)).not.toContain("- read (core)");
+      expect(buildToolSchemaDirectoryPrompt(ctx)).toContain("- session_status (core)");
+      const runtime = new ToolSearchRuntime(ctx, resolveToolSearchConfig(config));
+      expect(await runtime.search("read", { limit: 1 })).toEqual([
+        expect.objectContaining({ name: "read" }),
+      ]);
+      expect(await runtime.call("openclaw:core:read", { value: "file.txt" })).toEqual(
+        expect.objectContaining({
+          result: expect.objectContaining({
+            details: { name: "read", input: { value: "file.txt" } },
+          }),
+        }),
+      );
+
+      // Same tools, different native surface: a cached deferred row must disappear.
+      const direct = apply({ ...ctx, tools, directToolNames: ["session_status"] });
+      expect(direct.tools).toContain(status);
+      expect(buildToolSchemaDirectoryPrompt(ctx)).toBe("Available deferred-schema tools: none.");
+      apply({ ...ctx, tools });
+      expect(buildToolSchemaDirectoryPrompt(ctx)).toContain("- session_status (core)");
+
+      const lookalike = pluginTool("read", "Unrelated plugin reader");
+      apply({ ...ctx, tools: [...tools, lookalike] });
+      expect(buildToolSchemaDirectoryPrompt(ctx)).not.toContain("- read (");
+      expect(await runtime.search("read", { limit: 5 })).toHaveLength(2);
+    },
+  );
 
   it("keeps the capability directory byte-stable across catalog insertion orders", () => {
     const config = { tools: { toolSearch: true } } as never;
@@ -930,6 +1657,154 @@ describe("Tool Search", () => {
     await expect(runtime.callValue("orchard_empty_details")).resolves.toBeUndefined();
   });
 
+  it("finalizes a direct target once with its original model-call ordinal", async () => {
+    let toolCallId: string | undefined;
+    const fixture = observedRuntimeFixture({
+      name: "orchard_direct_terminal",
+      ordinal: 4,
+      execute: async (id) => {
+        toolCallId = id;
+        return jsonResult({ ok: true });
+      },
+    });
+
+    const call = await fixture.runtime.call("orchard_direct_terminal");
+
+    expect(fixture.outcomes).toHaveLength(2);
+    expect(fixture.outcomes[1]).toEqual(
+      expect.objectContaining({
+        toolCallOrdinal: 4,
+        terminalPresentation: undefined,
+        presentationOnly: true,
+      }),
+    );
+    finalizeToolTerminalPresentation({
+      toolCallId: expectDefined(toolCallId, "direct terminal tool call"),
+      runId: fixture.runId,
+      result: call.result,
+      isError: false,
+    });
+    expect(fixture.outcomes).toHaveLength(2);
+  });
+
+  it("formats the result accepted by a supplied executor", async () => {
+    const fixture = observedRuntimeFixture({
+      name: "orchard_accepted_terminal",
+      ordinal: 6,
+      execute: async () => jsonResult({ status: 200 }),
+      formatter: (_params, result) => ({
+        text: `Status ${(result.details as { status: number }).status}`,
+      }),
+      executeTool: async (params) => {
+        await params.tool.execute(
+          params.toolCallId,
+          params.input,
+          params.signal,
+          params.onUpdate,
+          undefined as never,
+        );
+        return await params.acceptResultBeforeProjection(jsonResult({ status: 201 }));
+      },
+    });
+
+    await fixture.runtime.call("orchard_accepted_terminal");
+
+    expect(fixture.outcomes.map((outcome) => outcome.terminalPresentation)).toEqual([
+      "Status 200",
+      "Status 201",
+    ]);
+    expect(fixture.outcomes.map((outcome) => outcome.toolCallOrdinal)).toEqual([6, 6]);
+  });
+
+  it("clears a raw summary when a supplied executor rejects after source success", async () => {
+    const executorError = new Error("synthetic post-source rejection");
+    const fixture = observedRuntimeFixture({
+      name: "orchard_rejected_terminal",
+      ordinal: 8,
+      execute: async () => jsonResult({ ok: true }),
+      formatter: () => ({ text: "Source completed" }),
+      executeTool: async (params) => {
+        const raw = await params.tool.execute(
+          params.toolCallId,
+          params.input,
+          params.signal,
+          params.onUpdate,
+          undefined as never,
+        );
+        await params.acceptResultBeforeProjection(raw);
+        throw executorError;
+      },
+    });
+
+    await expect(fixture.runtime.call("orchard_rejected_terminal")).rejects.toBe(executorError);
+    expect(fixture.outcomes).toHaveLength(2);
+    expect(fixture.outcomes[0]?.terminalPresentation).toBe("Source completed");
+    expect(fixture.outcomes[1]).toEqual(
+      expect.objectContaining({
+        toolCallOrdinal: 8,
+        terminalPresentation: undefined,
+        presentationOnly: true,
+      }),
+    );
+  });
+
+  it("does not publish terminal state after an aborted cancellation-ignoring source", async () => {
+    const sourceResult = jsonResult({ ok: true });
+    const sourceStarted = createDeferred();
+    const source = createDeferred<typeof sourceResult>();
+    let toolCallId: string | undefined;
+    let sourceCompletion: Promise<unknown> | undefined;
+    const fixture = observedRuntimeFixture({
+      name: "orchard_aborted_late_terminal",
+      ordinal: 13,
+      execute: async (id) => {
+        toolCallId = id;
+        sourceStarted.resolve();
+        return await source.promise;
+      },
+      executeTool: async (params) => {
+        const execution = params.tool.execute(
+          params.toolCallId,
+          params.input,
+          params.signal,
+          params.onUpdate,
+          undefined as never,
+        );
+        sourceCompletion = execution;
+        return await raceWithAbortSignal(
+          execution.then(params.acceptResultBeforeProjection),
+          expectDefined(params.signal, "abort-race signal"),
+        );
+      },
+    });
+    const controller = new AbortController();
+    const call = fixture.runtime.call(
+      "orchard_aborted_late_terminal",
+      {},
+      { signal: controller.signal },
+    );
+    await sourceStarted.promise;
+    controller.abort();
+
+    await expect(call).rejects.toMatchObject({ name: "AbortError" });
+    expect(fixture.outcomes).toHaveLength(0);
+    source.resolve(sourceResult);
+    await expectDefined(sourceCompletion, "late source completion");
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    expect(fixture.outcomes).toHaveLength(1);
+    expect(fixture.outcomes[0]?.toolCallOrdinal).toBe(13);
+
+    finalizeToolTerminalPresentation({
+      toolCallId: expectDefined(toolCallId, "aborted late terminal tool call"),
+      runId: fixture.runId,
+      result: sourceResult,
+      isError: false,
+    });
+    expect(fixture.outcomes).toHaveLength(1);
+  });
+
   it("rejects final catalog details that drift from a declared output schema", async () => {
     const catalogRef = createToolSearchCatalogRef();
     const target = pluginTool("orchard_bad_output", "Return a bad orchard result");
@@ -974,6 +1849,34 @@ describe("Tool Search", () => {
     );
 
     await expect(runtime.callValue("orchard_mutated_output")).rejects.toThrow(
+      "returned details that do not match its declared outputSchema",
+    );
+  });
+
+  it("revalidates accepted snapshots after executor-side schema mutation", async () => {
+    const catalogRef = createToolSearchCatalogRef();
+    const target = pluginTool("orchard_mutated_schema", "Return a mutable orchard schema");
+    const idSchema = { type: "string" };
+    target.outputSchema = {
+      type: "object",
+      properties: { id: idSchema },
+      required: ["id"],
+      additionalProperties: false,
+    } as never;
+    registerHeadlessToolSearchCatalog({ catalogRef, tools: [target] });
+    const runtime = new ToolSearchRuntime(
+      {
+        catalogRef,
+        executeTool: async (params) => {
+          const accepted = await params.acceptResultBeforeProjection(jsonResult({ id: "P-1" }));
+          idSchema.type = "number";
+          return accepted;
+        },
+      },
+      resolveToolSearchConfig({ tools: { toolSearch: { mode: "tools" } } } as never),
+    );
+
+    await expect(runtime.callValue("orchard_mutated_schema")).rejects.toThrow(
       "returned details that do not match its declared outputSchema",
     );
   });
@@ -1141,7 +2044,10 @@ describe("Tool Search", () => {
       callCount?: number;
     };
     expect(telemetry.catalogSize).toBe(2);
-    expect(telemetry.counterScope).toMatch(/^[A-Za-z0-9_-]{16}$/);
+    // The lowercase-hex alphabet is a contract: a wider alphabet can emit
+    // credential-shaped scopes (e.g. hf_…) that tool-payload redaction rewrites,
+    // breaking byte-exact persistence of results embedding the telemetry.
+    expect(telemetry.counterScope).toMatch(/^[0-9a-f]{24}$/);
     expect(telemetry.searchCount).toBe(1);
     expect(telemetry.describeCount).toBe(1);
     expect(telemetry.callCount).toBe(1);
@@ -1176,6 +2082,54 @@ describe("Tool Search", () => {
     expect(result.content[0]).not.toMatchObject({
       text: expect.stringContaining("<|endoftext|>"),
     });
+  });
+
+  it("keeps structured call content compact while preserving complete result details and termination", async () => {
+    const catalogRef = createToolSearchCatalogRef();
+    const target = pluginTool("compact_result_target", "Long tool instructions. ".repeat(1_000));
+    target.label = "Long display label. ".repeat(500);
+    target.parameters = Type.Object({
+      value: Type.String({ enum: Array.from({ length: 100 }, (_, index) => `option_${index}`) }),
+    });
+    const targetResult = {
+      ...jsonResult({
+        value: "preserved",
+        nested: { description: "Target-owned description", input: "Target-owned input" },
+      }),
+      terminate: true,
+    };
+    target.execute = vi.fn(async () => targetResult);
+    registerHeadlessToolSearchCatalog({ catalogRef, tools: [target] });
+    const entry = expectDefined(catalogRef.current?.entries[0], "registered target");
+    const call = expectDefined(
+      createToolSearchTools({ catalogRef }).find((tool) => tool.name === TOOL_CALL_RAW_TOOL_NAME),
+      "structured tool_call tool",
+    );
+
+    const result = await call.execute("compact-result-call", {
+      id: target.name,
+      args: { value: "option_0" },
+    });
+
+    expect(result.details).toEqual({
+      tool: compactToolSearchCatalogEntry(entry),
+      result: targetResult,
+    });
+    expect(result.details).toMatchObject({
+      tool: { description: target.description, label: target.label },
+    });
+    expect(result.terminate).toBe(true);
+    const content = expectDefined(result.content[0], "model-facing content");
+    if (content.type !== "text") {
+      throw new Error("Expected model-facing text");
+    }
+    expect(content.text.length).toBeLessThan(1_000);
+    expect(JSON.parse(content.text)).toEqual({
+      tool: { id: entry.id, name: target.name, source: entry.source },
+      result: targetResult,
+    });
+    expect(content.text).not.toContain("Long tool instructions");
+    expect(content.text).not.toContain("option_99");
   });
 
   it("isolates concurrent network and local structured tool_call output", async () => {
@@ -1911,7 +2865,7 @@ describe("Tool Search", () => {
       config: { tools: { toolSearch: { enabled: true, mode: "directory" } } } as never,
     });
     expect(directory).toContain("- fake_message");
-    expect(directory).toContain("Call tool_describe");
+    expect(directory).toContain("tool_describe for a full schema");
     expect(directory).not.toContain("upload-file");
 
     const runtimeTools = createToolSearchTools({
@@ -1938,7 +2892,7 @@ describe("Tool Search", () => {
     expect(target.execute).toHaveBeenCalledWith(
       "tool_search_code:call-schema-directory:fake_message:1",
       { action: "send", message: "hello" },
-      undefined,
+      expect.objectContaining({ aborted: false }),
       undefined,
       undefined,
     );
@@ -2051,7 +3005,7 @@ describe("Tool Search", () => {
 
   it.each(["code", "tools", "directory"] as const)(
     "bounds the %s capability directory and keeps omitted tools searchable",
-    (mode) => {
+    async (mode) => {
       const catalogRef = createToolSearchCatalogRef();
       const config = { tools: { toolSearch: { enabled: true, mode } } } as never;
       const catalogTools = Array.from({ length: 200 }, (_, index) =>
@@ -2073,17 +3027,83 @@ describe("Tool Search", () => {
         applyToolSearchCatalog({ tools, config, catalogRef });
       }
 
-      const directory = buildToolSchemaDirectoryPrompt({ config, catalogRef });
+      const directory = buildToolSchemaDirectoryPrompt(
+        { config, catalogRef },
+        { contextTokenBudget: 32_768 },
+      );
 
-      expect(directory.length).toBeLessThanOrEqual(testing.maxToolSchemaDirectoryPromptChars);
+      expect(directory.length).toBeLessThanOrEqual(3_276);
       expect(directory).toContain("- fake_directory_tool_000");
       expect(directory).not.toContain("- fake_directory_tool_199");
       expect(directory).toContain("additional tools omitted");
       expect(directory).toContain(
         mode === "code"
           ? "Use tool_search_code with openclaw.tools.search(query)"
-          : "Use tool_search to find them",
+          : "Use tool_search to find a tool and its input signature",
       );
+      if (mode === "tools") {
+        expect(directory).toContain("Deferred names are not directly callable.");
+        expect(directory).toContain("result id or name in id and all tool parameters in args");
+        expect(directory).not.toContain("Call a unique deferred tool name directly");
+      } else if (mode === "directory") {
+        expect(directory).toContain("Call a unique deferred tool name directly, or use tool_call");
+        expect(directory).not.toContain("Deferred names are not directly callable.");
+      } else {
+        expect(directory).not.toContain("Call tool_call");
+        expect(directory).not.toContain("Call a unique deferred tool name directly");
+      }
+      const runtime = new ToolSearchRuntime(
+        { config, catalogRef },
+        resolveToolSearchConfig(config),
+      );
+      expect(await runtime.search("fake_directory_tool_199", { limit: 1 })).toEqual([
+        expect.objectContaining({ name: "fake_directory_tool_199" }),
+      ]);
+    },
+  );
+
+  it.each([
+    { mode: "code" as const, descriptionChars: 145, longerDescriptions: 69 },
+    { mode: "tools" as const, descriptionChars: 144, longerDescriptions: 10 },
+    { mode: "directory" as const, descriptionChars: 145, longerDescriptions: 25 },
+  ])(
+    "shortens descriptions only beyond the exact directory boundary in $mode mode",
+    ({ mode, descriptionChars, longerDescriptions }) => {
+      const render = (overflow: boolean) => {
+        const catalogRef = createToolSearchCatalogRef();
+        // These fixed names and descriptions fill the 18,000-character prompt exactly.
+        const tools = Array.from({ length: 100 }, (_, index) =>
+          pluginTool(
+            `boundary_${String(index).padStart(3, "0")}`,
+            "x".repeat(
+              descriptionChars +
+                Number(index < longerDescriptions) +
+                Number(overflow && index === 99),
+            ),
+          ),
+        );
+        registerHeadlessToolSearchCatalog({ catalogRef, tools });
+        try {
+          return buildToolSchemaDirectoryPrompt({
+            catalogRef,
+            config: { tools: { toolSearch: { enabled: true, mode } } },
+          });
+        } finally {
+          clearToolSearchCatalog({ catalogRef });
+        }
+      };
+
+      const full = render(false);
+      expect(full).toHaveLength(18_000);
+      expect(full).toContain("- boundary_099 (fake-catalog):");
+      expect(full).not.toContain("additional tools omitted");
+
+      const overflow = render(true);
+      expect(overflow.length).toBeLessThanOrEqual(18_000);
+      expect(overflow).toContain("- boundary_098 (fake-catalog):");
+      expect(overflow).toContain("- boundary_099 (fake-catalog):");
+      expect(overflow).not.toContain("additional tools omitted");
+      expect(overflow).toContain(`${"x".repeat(61)}...`);
     },
   );
 
@@ -2695,8 +3715,17 @@ describe("Tool Search", () => {
     );
     expect(secondExecuteInput.parentToolCallId).toBe("call-lifecycle-structured");
     expect(secondExecuteInput.input).toEqual({ value: "structured" });
-    expect(secondExecuteInput.signal).toBe(abortController.signal);
+    expect(secondExecuteInput.signal).toBeInstanceOf(AbortSignal);
     expect(secondExecuteInput.onUpdate).toBe(onUpdate);
+    const forwardedSignal = secondExecuteInput.signal;
+    if (!(forwardedSignal instanceof AbortSignal)) {
+      throw new Error("expected catalog cancellation signal");
+    }
+    expect(forwardedSignal.aborted).toBe(false);
+    const reason = new Error("cancel lifecycle caller");
+    abortController.abort(reason);
+    expect(forwardedSignal.aborted).toBe(true);
+    expect(forwardedSignal.reason).toBe(reason);
   });
 
   it("does not execute fire-and-forget bridged calls after code returns", async () => {
@@ -2881,6 +3910,44 @@ describe("Tool Search", () => {
       ),
     ).rejects.toThrow("Did you mean: openclaw:first-plugin:write, openclaw:second-plugin:write?");
   });
+
+  it.each(["call", "callExactId", "describe"] as const)(
+    "redirects mistaken skill IDs to admitted instructions during %s",
+    async (operation) => {
+      const catalogRef = createToolSearchCatalogRef();
+      registerHeadlessToolSearchCatalog({ catalogRef, tools: [fakeTool("read", "Read a file")] });
+      const reader = vi.fn();
+      const codeModeSkills = [
+        {
+          name: "ledger-audit",
+          description: "Audit the ledger",
+          location: "/workspace/skills/ledger-audit/SKILL.md",
+          source: { filePath: "/private-host/skills/ledger-audit/SKILL.md" },
+          reader,
+        },
+      ];
+      const runtime = new ToolSearchRuntime(
+        { catalogRef, codeModeSkills },
+        resolveToolSearchConfig(),
+      );
+      await expect(runtime[operation]("ledger-audit")).rejects.toThrow(
+        'Load its complete instructions from "/workspace/skills/ledger-audit/SKILL.md"',
+      );
+      expect(reader).not.toHaveBeenCalled();
+      const withoutSkill = new ToolSearchRuntime({ catalogRef }, resolveToolSearchConfig());
+      await expect(withoutSkill[operation]("ledger-audit")).rejects.toThrow("Unknown tool id");
+      registerHeadlessToolSearchCatalog({ catalogRef, tools: [fakeTool("exec", "Run a command")] });
+      await expect(runtime[operation]("ledger-audit")).rejects.toThrow("Unknown tool id");
+      registerHeadlessToolSearchCatalog({
+        catalogRef,
+        tools: [fakeTool("ledger-audit", "Real tool")],
+      });
+      expect(await runtime.call("ledger-audit", {})).toHaveProperty(
+        "result.details.name",
+        "ledger-audit",
+      );
+    },
+  );
 
   it("keeps raw Tool Search recovery guidance when no suggestion matches", async () => {
     const callTool = fakeTool(TOOL_CALL_RAW_TOOL_NAME, "call");
@@ -3138,7 +4205,7 @@ describe("Tool Search", () => {
     expect(abortCount).toBe(1);
   });
 
-  it("reuses an unchanged catalog within the same run", () => {
+  it("reuses an unchanged catalog only on the same ref", () => {
     const codeTool = fakeTool(TOOL_SEARCH_CODE_MODE_TOOL_NAME, "code mode");
     const alpha = pluginTool("fake_reuse_alpha", "Alpha tool");
     const beta = pluginTool("fake_reuse_beta", "Beta tool");
@@ -3178,7 +4245,7 @@ describe("Tool Search", () => {
       sessionKey: "agent:main:tool-search-reuse",
       catalogRef: laterRef,
     });
-    expect(later.catalogReused).toBe(true);
+    expect(later.catalogReused).toBe(false);
     expect(laterRef.current).not.toBe(catalogAfterFirst);
     expect(laterRef.current?.entries).not.toBe(catalogAfterFirst.entries);
     expect(laterRef.current?.entries).toEqual(catalogAfterFirst.entries);
@@ -3205,7 +4272,7 @@ describe("Tool Search", () => {
   });
 
   it.each(["fresh", "same"] as const)(
-    "restores an unchanged catalog after run cleanup on a %s ref",
+    "registers a fresh catalog after run cleanup on a %s ref",
     async (refMode) => {
       const codeTool = fakeTool(TOOL_SEARCH_CODE_MODE_TOOL_NAME, "code mode");
       const alpha = pluginTool("fake_xrun_alpha", "Alpha tool");
@@ -3246,49 +4313,49 @@ describe("Tool Search", () => {
       expect(firstRef.current).toBeUndefined();
       expect(firstRuntime.telemetry()).toMatchObject(firstCounters);
 
-      const restoredRef = refMode === "same" ? firstRef : createToolSearchCatalogRef();
+      const nextRef = refMode === "same" ? firstRef : createToolSearchCatalogRef();
       const second = applyToolSearchCatalog({
         tools: [codeTool, alpha, beta],
         config,
         sessionId,
         runId: "run-2",
-        catalogRef: restoredRef,
+        catalogRef: nextRef,
       });
       expect(second.catalogRegistered).toBe(true);
-      expect(second.catalogReused).toBe(true);
-      const restoredCatalog = expectDefined(restoredRef.current, "restored run catalog");
-      const restoredAlphaEntry = expectDefined(
-        restoredCatalog.entries.find((entry) => entry.name === alpha.name),
-        "restored alpha entry",
+      expect(second.catalogReused).toBe(false);
+      const nextCatalog = expectDefined(nextRef.current, "next run catalog");
+      const nextAlphaEntry = expectDefined(
+        nextCatalog.entries.find((entry) => entry.name === alpha.name),
+        "next run alpha entry",
       );
-      expect(restoredAlphaEntry).not.toBe(firstAlphaEntry);
-      expect(restoredAlphaEntry).toEqual(firstAlphaEntry);
-      expect(restoredAlphaEntry.tool).toBe(alpha);
-      expect(restoredCatalog.counterScope).not.toBe(firstCatalog.counterScope);
-      expect(restoredCatalog.searchCount).toBe(0);
-      const restoredRuntime = new ToolSearchRuntime(
-        { catalogRef: restoredRef },
+      expect(nextAlphaEntry).not.toBe(firstAlphaEntry);
+      expect(nextAlphaEntry).toEqual(firstAlphaEntry);
+      expect(nextAlphaEntry.tool).toBe(alpha);
+      expect(nextCatalog.counterScope).not.toBe(firstCatalog.counterScope);
+      expect(nextCatalog.searchCount).toBe(0);
+      const nextRuntime = new ToolSearchRuntime(
+        { catalogRef: nextRef },
         resolveToolSearchConfig(config),
       );
-      const restoredCounters = {
-        counterScope: restoredCatalog.counterScope,
+      const nextCounters = {
+        counterScope: nextCatalog.counterScope,
         searchCount: 0,
         describeCount: 0,
         callCount: 0,
       };
       for (const phase of ["active", "closed"] as const) {
         if (phase === "closed") {
-          clearToolSearchCatalog({ sessionId, catalogRef: restoredRef });
+          clearToolSearchCatalog({ sessionId, catalogRef: nextRef });
         }
-        expect(restoredRuntime.telemetry(), phase).toMatchObject(restoredCounters);
+        expect(nextRuntime.telemetry(), phase).toMatchObject(nextCounters);
         expect(firstRuntime.telemetry(), phase).toMatchObject(
-          refMode === "same" ? restoredCounters : firstCounters,
+          refMode === "same" ? nextCounters : firstCounters,
         );
       }
     },
   );
 
-  it("notifies catalog-ref lifecycle hooks across snapshot restore and disposal", () => {
+  it("notifies catalog-ref lifecycle hooks across registration and disposal", () => {
     const codeTool = fakeTool(TOOL_SEARCH_CODE_MODE_TOOL_NAME, "code mode");
     const alpha = pluginTool("fake_lifecycle_alpha", "Alpha tool");
     const config = { tools: { toolSearch: true } } as never;
@@ -3323,14 +4390,14 @@ describe("Tool Search", () => {
       runId: "run-lifecycle-2",
       catalogRef: secondRef,
     });
-    expect(second.catalogReused).toBe(true);
+    expect(second.catalogReused).toBe(false);
     expect(secondChange).toHaveBeenCalledOnce();
   });
 
-  it("applies Code Mode projection filtering to restored catalogs", async () => {
+  it("applies Code Mode projection filtering to a newly registered catalog", async () => {
     const codeTool = fakeTool(TOOL_SEARCH_CODE_MODE_TOOL_NAME, "code mode");
     // The unprojected tool is the stronger match for the query; only projection
-    // filtering can keep it out of a one-result search on the restored catalog.
+    // filtering can keep it out of a one-result search on the next run's catalog.
     const shadowing = pluginTool("fake_projection_probe", "Projection probe projection probe");
     shadowing.execute = vi.fn(async () => jsonResult({ marker: "shadowing" }));
     const projected = pluginTool("fake_projection_secondary", "Projection probe secondary");
@@ -3356,11 +4423,11 @@ describe("Tool Search", () => {
       runId: "run-projection-2",
       catalogRef: secondRef,
     });
-    expect(second.catalogReused).toBe(true);
-    const restored = expectDefined(secondRef.current, "restored projection catalog");
+    expect(second.catalogReused).toBe(false);
+    const nextCatalog = expectDefined(secondRef.current, "next projection catalog");
     const projectedId = expectDefined(
-      restored.entries.find((entry) => entry.name === projected.name),
-      "restored projected entry",
+      nextCatalog.entries.find((entry) => entry.name === projected.name),
+      "next projected entry",
     ).id;
 
     const runtime = new ToolSearchRuntime(
@@ -3380,7 +4447,7 @@ describe("Tool Search", () => {
     expect(shadowing.execute).not.toHaveBeenCalled();
   });
 
-  it("does not reuse snapshots for prewrapped input tools across runs", async () => {
+  it("binds prewrapped input tools to their current run", async () => {
     const codeTool = fakeTool(TOOL_SEARCH_CODE_MODE_TOOL_NAME, "code mode");
     const config = { tools: { toolSearch: true } } as never;
     const sessionId = "session-prewrapped-tool";
@@ -3501,7 +4568,7 @@ describe("Tool Search", () => {
     ]);
   });
 
-  it("reuses fresh MCP wrappers while executing the current run wrapper", async () => {
+  it("registers fresh MCP wrappers and executes the current run wrapper", async () => {
     const codeTool = fakeTool(TOOL_SEARCH_CODE_MODE_TOOL_NAME, "code mode");
     const config = { tools: { toolSearch: true } } as never;
     const sessionId = "session-mcp-wrapper-reuse";
@@ -3585,7 +4652,7 @@ describe("Tool Search", () => {
       catalogRef: secondRef,
       toolHookContext: { sessionId, runId: "run-mcp-2" },
     });
-    expect(second.catalogReused).toBe(true);
+    expect(second.catalogReused).toBe(false);
 
     const runtime = new ToolSearchRuntime(
       { catalogRef: secondRef },
@@ -3654,7 +4721,7 @@ describe("Tool Search", () => {
     expect(second.catalogReused).toBe(false);
   });
 
-  it("degrades to a miss when a tool disappears from the current run", () => {
+  it("registers only tools present in the current run", () => {
     const codeTool = fakeTool(TOOL_SEARCH_CODE_MODE_TOOL_NAME, "code mode");
     const config = { tools: { toolSearch: true } } as never;
     const sessionId = "session-tool-removed";
@@ -3701,3 +4768,90 @@ describe("Tool Search", () => {
   });
 });
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */
+
+function createCatalog(count = 40) {
+  const config = { tools: { toolSearch: { enabled: true, mode: "tools" as const } } };
+  const entries = Array.from({ length: count }, (_, index) => {
+    const name = `capability_${String(index).padStart(2, "0")}`;
+    const tool = {
+      name,
+      label: name,
+      description: `Inspect the archive for ${name}. ${"Preserve complete source records. ".repeat(6)}`,
+      parameters: Type.Object({ target: Type.String(), limit: Type.Optional(Type.Integer()) }),
+      execute: vi.fn(async () => jsonResult({ completed: true })),
+    };
+    return {
+      id: `openclaw:archive:${name}`,
+      name,
+      description: tool.description,
+      source: "openclaw" as const,
+      sourceName: "archive",
+      parameters: tool.parameters,
+      tool,
+    };
+  });
+  const catalogRef: ToolSearchCatalogRef = {
+    current: {
+      entries,
+      counterScope: "budget-test",
+      searchCount: 0,
+      describeCount: 0,
+      callCount: 0,
+    },
+  };
+  return { config, catalogRef, entries };
+}
+
+describe("context-sized tool discovery", () => {
+  it("shortens descriptions before names and keeps the complete executable catalog", async () => {
+    const ctx = createCatalog();
+    const full = buildToolSchemaDirectoryPrompt(ctx);
+    const small = buildToolSchemaDirectoryPrompt(ctx, { contextTokenBudget: 32_768 });
+    expect(small.length).toBeLessThanOrEqual(3_276);
+    expect(small.length).toBeLessThan(full.length / 2);
+    for (const entry of ctx.entries) {
+      expect(small).toContain(entry.name);
+    }
+    expect(buildToolSchemaDirectoryPrompt(ctx)).toBe(full);
+    expect(buildToolSchemaDirectoryPrompt(ctx, { contextTokenBudget: 32_768 })).toBe(small);
+    const runtime = new ToolSearchRuntime(ctx, resolveToolSearchConfig(ctx.config));
+    const last = expectDefined(ctx.entries.at(-1), "last catalog entry");
+    expect(await runtime.search(last.name, { limit: 1 })).toEqual([
+      expect.objectContaining({ id: last.id }),
+    ]);
+    await runtime.call(last.id, { target: "archive" });
+    expect(last.tool.execute).toHaveBeenCalledOnce();
+  });
+
+  it("does not reuse directory text across changing authorization filters", () => {
+    const ctx = createCatalog(2);
+    const firstEntry = expectDefined(ctx.entries[0], "first catalog entry");
+    const secondEntry = expectDefined(ctx.entries[1], "second catalog entry");
+    const first = new Set([firstEntry.id]);
+    const second = new Set([secondEntry.id]);
+    const firstPrompt = buildToolSchemaDirectoryPrompt(ctx, { allowedIds: first });
+    const secondPrompt = buildToolSchemaDirectoryPrompt(ctx, { allowedIds: second });
+    expect(firstPrompt).toContain(firstEntry.name);
+    expect(firstPrompt).not.toContain(secondEntry.name);
+    expect(secondPrompt).toContain(secondEntry.name);
+    expect(secondPrompt).not.toContain(firstEntry.name);
+    first.clear();
+    expect(buildToolSchemaDirectoryPrompt(ctx, { allowedIds: first })).not.toContain(
+      firstEntry.name,
+    );
+  });
+
+  it("returns the expected input shape with a validation error before executing", async () => {
+    const ctx = createCatalog(1);
+    const entry = expectDefined(ctx.entries[0], "catalog entry");
+    const runtime = new ToolSearchRuntime(ctx, resolveToolSearchConfig(ctx.config), {
+      validateInput: true,
+    });
+    await expect(runtime.call(entry.id, { limit: 2 })).rejects.toThrow(
+      "Expected input: { target: string; limit?: number /* integer */ }",
+    );
+    expect(entry.tool.execute).not.toHaveBeenCalled();
+    await runtime.call(entry.id, { target: "archive", limit: 2 });
+    expect(entry.tool.execute).toHaveBeenCalledOnce();
+  });
+});

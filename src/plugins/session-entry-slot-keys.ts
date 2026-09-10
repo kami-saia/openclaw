@@ -19,6 +19,7 @@ const SESSION_ENTRY_RESERVED_SLOT_KEY_LIST = [
   "incognito",
   "archivedAt",
   "archivedBy",
+  "archiveReason",
   "pinnedAt",
   "lastReadAt",
   "agentStatus",
@@ -37,6 +38,7 @@ const SESSION_ENTRY_RESERVED_SLOT_KEY_LIST = [
   "sessionDiffBaselineCapture",
   "worktree",
   "projectId",
+  "repositoryWorkspaceId",
   "pendingProjectGitUrl",
   "pendingWorktree",
   "parentSessionKey",
@@ -158,11 +160,13 @@ const SESSION_ENTRY_RESERVED_SLOT_KEY_LIST = [
   "transcriptByteCompactionLatch",
   "compactionCheckpoints",
   "memoryFlush",
+  "cliHistoryBoundary",
   "cliSessionIds",
   "cliSessionBindings",
   "acpSessionBinding",
   "claudeCliSessionId",
   "label",
+  "autoLabel",
   "icon",
   "color",
   "category",
@@ -174,6 +178,7 @@ const SESSION_ENTRY_RESERVED_SLOT_KEY_LIST = [
   "groupChannel",
   "space",
   "skillsSnapshot",
+  "skillLibrarySelections",
   "systemPromptReport",
   "pluginDebugEntries",
   "hookExternalContentSource",
@@ -184,6 +189,7 @@ const SESSION_ENTRY_RESERVED_SLOT_KEY_LIST = [
   // FORK: Skill Workshop autocapture state on SessionEntry.
   "pendingSkillSuggestion",
   "skillCaptureSignalHashes",
+  "publicShare",
 ] as const satisfies ReadonlyArray<
   keyof SessionEntry | "__proto__" | "constructor" | "prototype" | "sessionFile" | "transcriptPath"
 >;

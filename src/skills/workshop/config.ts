@@ -8,7 +8,6 @@ type SkillWorkshopConfig = {
   autonomous: {
     mode: SkillsWorkshopAutonomousMode;
   };
-  allowSymlinkTargetWrites: boolean;
   /** Fork-only: agent gets full skill-admin rights (skips run-usage + ownership gates). */
   trustAgentSkillAdmin: boolean;
   approvalPolicy: "pending" | "auto";
@@ -20,16 +19,11 @@ const DEFAULT_CONFIG: SkillWorkshopConfig = {
   autonomous: {
     mode: "auto",
   },
-  allowSymlinkTargetWrites: false,
   trustAgentSkillAdmin: false,
   approvalPolicy: "auto",
   maxPending: 50,
   maxSkillBytes: 40_000,
 };
-
-function readBooleanOr(value: unknown, fallback: boolean): boolean {
-  return typeof value === "boolean" ? value : fallback;
-}
 
 function readInteger(value: unknown, fallback: number, min: number, max: number): number {
   return typeof value === "number" && Number.isFinite(value)
@@ -55,10 +49,6 @@ export function resolveSkillWorkshopConfig(config?: OpenClawConfig): SkillWorksh
     autonomous: {
       mode: readAutonomousMode(autonomous.mode, DEFAULT_CONFIG.autonomous.mode),
     },
-    allowSymlinkTargetWrites: readBooleanOr(
-      raw.allowSymlinkTargetWrites,
-      DEFAULT_CONFIG.allowSymlinkTargetWrites,
-    ),
     trustAgentSkillAdmin: readBooleanOr(
       raw.trustAgentSkillAdmin,
       DEFAULT_CONFIG.trustAgentSkillAdmin,

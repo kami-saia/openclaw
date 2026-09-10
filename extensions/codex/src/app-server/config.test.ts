@@ -5,9 +5,9 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { MAX_TIMER_TIMEOUT_MS } from "openclaw/plugin-sdk/number-runtime";
 import { withTempDir } from "openclaw/plugin-sdk/test-env";
 import { describe, expect, it, vi } from "vitest";
+import { codexAppServerStartOptionsKey } from "./config-runtime.js";
 import {
   canUseCodexModelBackedApprovalsReviewerForModel,
-  codexAppServerStartOptionsKey,
   codexSandboxPolicyForTurn,
   isCodexSandboxExecServerEnabled,
   readCodexPluginConfig,
@@ -24,6 +24,11 @@ import {
 } from "./config.js";
 
 type RuntimeOptionsParams = NonNullable<Parameters<typeof resolveCodexAppServerRuntimeOptions>[0]>;
+const retiredTurnIdleTimeoutKeys = [
+  "turnCompletionIdleTimeoutMs",
+  "turnAssistantCompletionIdleTimeoutMs",
+  "postToolRawAssistantCompletionIdleTimeoutMs",
+];
 
 function resolveRuntimeForTest(params: RuntimeOptionsParams = {}) {
   return resolveCodexAppServerRuntimeOptions({ env: {}, requirementsToml: null, ...params });
@@ -132,9 +137,6 @@ describe("Codex app-server config", () => {
           serviceTier: "flex",
           codeModeOnly: true,
           loopDetectionPreToolUseRelay: false,
-          turnCompletionIdleTimeoutMs: 120_000,
-          turnAssistantCompletionIdleTimeoutMs: 30_000,
-          postToolRawAssistantCompletionIdleTimeoutMs: 180_000,
         },
       },
       env: {
@@ -151,9 +153,6 @@ describe("Codex app-server config", () => {
       serviceTier: "flex",
       codeModeOnly: true,
       loopDetectionPreToolUseRelay: false,
-      turnCompletionIdleTimeoutMs: 120_000,
-      turnAssistantCompletionIdleTimeoutMs: 30_000,
-      postToolRawAssistantCompletionIdleTimeoutMs: 180_000,
     });
     expectFields(runtime.start, "runtime start", {
       transport: "websocket",
@@ -164,10 +163,6 @@ describe("Codex app-server config", () => {
 
   it("keeps the Codex loop-detection PreToolUse relay enabled by default", () => {
     expect(resolveRuntimeForTest().loopDetectionPreToolUseRelay).toBe(true);
-  });
-
-  it("keeps the existing assistant completion idle timeout by default", () => {
-    expect(resolveRuntimeForTest().turnAssistantCompletionIdleTimeoutMs).toBe(10_000);
   });
 
   it("builds Codex permissions-profile config for app-server network proxy", () => {
@@ -268,18 +263,12 @@ describe("Codex app-server config", () => {
       pluginConfig: {
         appServer: {
           requestTimeoutMs: Number.MAX_SAFE_INTEGER,
-          turnCompletionIdleTimeoutMs: Number.MAX_SAFE_INTEGER,
-          turnAssistantCompletionIdleTimeoutMs: Number.MAX_SAFE_INTEGER,
-          postToolRawAssistantCompletionIdleTimeoutMs: Number.MAX_SAFE_INTEGER,
         },
       },
     });
 
     expectFields(runtime, "runtime", {
       requestTimeoutMs: MAX_TIMER_TIMEOUT_MS,
-      turnCompletionIdleTimeoutMs: MAX_TIMER_TIMEOUT_MS,
-      turnAssistantCompletionIdleTimeoutMs: MAX_TIMER_TIMEOUT_MS,
-      postToolRawAssistantCompletionIdleTimeoutMs: MAX_TIMER_TIMEOUT_MS,
     });
   });
 
@@ -288,16 +277,12 @@ describe("Codex app-server config", () => {
       pluginConfig: {
         appServer: {
           requestTimeoutMs: 0,
-          turnCompletionIdleTimeoutMs: -1,
-          turnAssistantCompletionIdleTimeoutMs: 0,
         },
       },
     });
 
     expectFields(runtime, "runtime", {
       requestTimeoutMs: 60_000,
-      turnCompletionIdleTimeoutMs: 60_000,
-      turnAssistantCompletionIdleTimeoutMs: 10_000,
     });
   });
 
@@ -415,16 +400,16 @@ describe("Codex app-server config", () => {
     );
   });
 
-  it("rejects unknown app-server fields", () => {
-    expect(
-      readCodexPluginConfig({
-        appServer: {
-          postToolRawAssistantCompletionIdleTimeoutMs: 180_000,
-          unknownTimeoutMs: 1,
-        },
-      }),
-    ).toStrictEqual({});
-  });
+  it.each(["unknownTimeoutMs", ...retiredTurnIdleTimeoutKeys])(
+    "rejects unknown or retired app-server field %s",
+    (key) => {
+      expect(
+        readCodexPluginConfig({
+          appServer: { requestTimeoutMs: 120_000, [key]: 1 },
+        }),
+      ).toStrictEqual({});
+    },
+  );
 
   it("rejects removed app-server topology fields", () => {
     expect(
@@ -2625,7 +2610,6 @@ allowed_sandbox_modes = ["read-only", "workspace-write"]
           mode: "yolo",
           transport: "stdio",
           requestTimeoutMs: 60_000,
-          turnCompletionIdleTimeoutMs: 60_000,
         },
         codexDynamicToolsLoading: "searchable",
         codexDynamicToolsExclude: [],
@@ -3272,7 +3256,7 @@ allowed_sandbox_modes = ["read-only", "workspace-write"]
     const first = codexAppServerStartOptionsKey(startOptions);
 
     vi.resetModules();
-    const reloaded = await import("./config.js");
+    const reloaded = await import("./config-runtime.js");
 
     expect(reloaded.codexAppServerStartOptionsKey(startOptions)).toEqual(first);
     expect(first).not.toContain("tok_reload");
@@ -3316,8 +3300,15 @@ allowed_sandbox_modes = ["read-only", "workspace-write"]
           };
         };
       };
+      uiHints: Record<string, unknown>;
     };
     const appServerProperties = manifest.configSchema.properties.appServer.properties;
+    const runtime = resolveRuntimeForTest();
+    for (const key of retiredTurnIdleTimeoutKeys) {
+      expect(appServerProperties).not.toHaveProperty(key);
+      expect(manifest.uiHints).not.toHaveProperty([`appServer.${key}`]);
+      expect(runtime).not.toHaveProperty(key);
+    }
 
     expect(appServerProperties.mode?.default).toBeUndefined();
     expect(appServerProperties.command?.default).toBeUndefined();

@@ -521,7 +521,9 @@ On the canonical outbound path used by CLI and standard message actions, core:
    select option count when the adapter advertises them. Chart and table blocks
    become deterministic text unless the adapter explicitly advertises
    `charts: true` or `tables: true`, respectively.
-5. Calls `renderPresentation` when the adapter can render the payload.
+5. Calls `renderPresentation` when the adapter can render the payload. Its
+   `presentation` is adapted for native limits; `sourcePresentation` retains
+   the normalized original for channel-specific text fallbacks.
 6. Falls back to conservative text when the adapter is absent or cannot render.
 7. Sends the resulting payload through the normal channel delivery path.
 8. Applies delivery metadata such as `delivery.pin` after the first successful
@@ -532,7 +534,10 @@ must either enter that canonical path or materialize the same presentation
 fallback before projecting the payload down to plain text/media.
 
 Core owns fallback behavior so producers can stay channel-agnostic. Channel
-plugins own native rendering and interaction handling.
+plugins own native rendering and interaction handling. When a renderer falls
+back to text because its complete native card cannot fit, use
+`sourcePresentation` to preserve full labels and apply the channel's text and
+URL sanitation. Continue using `presentation` for native controls.
 
 ## Degradation rules
 
@@ -597,16 +602,16 @@ required and the channel cannot pin the sent message, delivery reports failure.
 
 Current bundled renderers:
 
-| Channel         | Native render target                      | Notes                                                                                                                                                                                                             |
-| --------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Discord         | Components and component containers       | Supports the documented Discord-specific `components` extension for native layouts that `presentation` cannot express. Portable shared sends should use `presentation`.                                           |
-| Feishu          | Interactive cards                         | Card header uses `title` once. Within native cards, disabled or unsupported buttons retain label-only text; rejected URL targets and opaque callback values are omitted.                                          |
-| Matrix          | Text fallback plus structured event field | Buttons/selects advertise as supported, but every block currently renders as `renderMessagePresentationFallbackText` output carried in a `com.openclaw.presentation` event field, not native interactive widgets. |
-| Mattermost      | Text plus interactive props               | Selects and dividers are not supported; those blocks degrade to text.                                                                                                                                             |
-| Microsoft Teams | Adaptive Cards                            | Plain `message` text is included with the card when both are provided. Selects, styles, and disabled state are not supported.                                                                                     |
-| Slack           | Block Kit                                 | Renders `chart` as native `data_visualization` and `table` as native `data_table`; preserves legacy `channelData.slack.blocks`, but new shared sends should use `presentation`.                                   |
-| Telegram        | Text plus inline keyboards                | Buttons/selects require inline button capability for the target surface; otherwise text fallback is used.                                                                                                         |
-| Plain channels  | Text fallback                             | Channels without a renderer still get readable output.                                                                                                                                                            |
+| Channel         | Native render target                      | Notes                                                                                                                                                                                                   |
+| --------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Discord         | Components and component containers       | Supports the documented Discord-specific `components` extension for native layouts that `presentation` cannot express. Portable shared sends should use `presentation`.                                 |
+| Feishu          | Interactive cards                         | Card header uses `title` once. Within native cards, disabled or unsupported buttons retain label-only text; rejected URL targets and opaque callback values are omitted.                                |
+| Matrix          | Text fallback plus structured event field | Buttons/selects advertise as supported, but every block renders as `renderMessagePresentationFallbackText` output carried in a `com.openclaw.presentation` event field, not native interactive widgets. |
+| Mattermost      | Text plus interactive props               | Selects and dividers are not supported; those blocks degrade to text.                                                                                                                                   |
+| Microsoft Teams | Adaptive Cards                            | Plain `message` text is included with the card when both are provided. Selects, styles, and disabled state are not supported.                                                                           |
+| Slack           | Block Kit                                 | Renders `chart` as native `data_visualization` and `table` as native `data_table`; preserves legacy `channelData.slack.blocks`, but new shared sends should use `presentation`.                         |
+| Telegram        | Text plus inline keyboards                | Buttons/selects require inline button capability for the target surface; otherwise text fallback is used.                                                                                               |
+| Plain channels  | Text fallback                             | Channels without a renderer still get readable output.                                                                                                                                                  |
 
 Provider-native payload compatibility is a transition affordance for existing
 reply producers. New native fields require the explicit exception review above.

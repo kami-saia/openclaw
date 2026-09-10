@@ -3,6 +3,7 @@ import { afterEach, describe, it, expect, vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.js";
 import { resetLogger, setLoggerOverride } from "../logging/logger.js";
 import { createWarnLogCapture } from "../logging/test-helpers/warn-log-capture.js";
+import { createPluginMetadataSnapshotFixture } from "../plugins/plugin-metadata.test-support.js";
 import { resolveAgentHarnessPolicy } from "./harness/policy.js";
 import {
   getModelRefStatus as getNarrowModelRefStatus,
@@ -13,6 +14,7 @@ import {
   buildAllowedModelSet,
   buildConfiguredModelCatalog,
   inferUniqueProviderFromConfiguredModels,
+  resolveBareModelDefaultProvider,
   getModelRefStatus,
   parseModelRef,
   buildModelAliasIndex,
@@ -33,70 +35,72 @@ import {
 } from "./model-selection.js";
 import { createModelVisibilityPolicy } from "./model-visibility-policy.js";
 
-const manifestNormalizationSnapshot = vi.hoisted(() => ({
+const manifestNormalizationSnapshot = {
   configFingerprint: "model-selection-test-normalizers",
-  plugins: [
-    {
-      id: "model-selection-test-normalizers",
-      modelIdNormalization: {
-        providers: {
-          anthropic: {
-            aliases: {
-              "opus-4.6": "claude-opus-4-6",
-              "opus-4.5": "claude-opus-4-5",
-              "sonnet-4.6": "claude-sonnet-4-6",
-              "sonnet-4.5": "claude-sonnet-4-5",
-            },
-          },
-          google: {
-            aliases: {
-              "gemini-3-pro": "gemini-3.1-pro-preview",
-              "gemini-3-flash": "gemini-3-flash-preview",
-              "gemini-3.1-pro": "gemini-3.1-pro-preview",
-              "gemini-3.1-flash-lite-preview": "gemini-3.1-flash-lite",
-              "gemini-3.1-flash": "gemini-3-flash-preview",
-              "gemini-3.1-flash-preview": "gemini-3-flash-preview",
-            },
-          },
-          "google-vertex": {
-            aliases: {
-              "gemini-3-pro": "gemini-3.1-pro-preview",
-              "gemini-3-flash": "gemini-3-flash-preview",
-              "gemini-3.1-pro": "gemini-3.1-pro-preview",
-              "gemini-3.1-flash-lite-preview": "gemini-3.1-flash-lite",
-              "gemini-3.1-flash": "gemini-3-flash-preview",
-              "gemini-3.1-flash-preview": "gemini-3-flash-preview",
-            },
-          },
-          xai: { aliases: {} },
-          openrouter: {
-            prefixWhenBare: "openrouter",
-          },
-          huggingface: {
-            stripPrefixes: ["huggingface/"],
-          },
-          "vercel-ai-gateway": {
-            aliases: {
-              "opus-4.6": "claude-opus-4-6",
-              "opus-4.5": "claude-opus-4-5",
-              "sonnet-4.6": "claude-sonnet-4-6",
-              "sonnet-4.5": "claude-sonnet-4-5",
-            },
-            prefixWhenBareAfterAliasStartsWith: [
-              {
-                modelPrefix: "claude-",
-                prefix: "anthropic",
+  ...createPluginMetadataSnapshotFixture({
+    plugins: [
+      {
+        id: "model-selection-test-normalizers",
+        modelIdNormalization: {
+          providers: {
+            anthropic: {
+              aliases: {
+                "opus-4.6": "claude-opus-4-6",
+                "opus-4.5": "claude-opus-4-5",
+                "sonnet-4.6": "claude-sonnet-4-6",
+                "sonnet-4.5": "claude-sonnet-4-5",
               },
-            ],
-          },
-          nvidia: {
-            prefixWhenBare: "nvidia",
+            },
+            google: {
+              aliases: {
+                "gemini-3-pro": "gemini-3.1-pro-preview",
+                "gemini-3-flash": "gemini-3-flash-preview",
+                "gemini-3.1-pro": "gemini-3.1-pro-preview",
+                "gemini-3.1-flash-lite-preview": "gemini-3.1-flash-lite",
+                "gemini-3.1-flash": "gemini-3-flash-preview",
+                "gemini-3.1-flash-preview": "gemini-3-flash-preview",
+              },
+            },
+            "google-vertex": {
+              aliases: {
+                "gemini-3-pro": "gemini-3.1-pro-preview",
+                "gemini-3-flash": "gemini-3-flash-preview",
+                "gemini-3.1-pro": "gemini-3.1-pro-preview",
+                "gemini-3.1-flash-lite-preview": "gemini-3.1-flash-lite",
+                "gemini-3.1-flash": "gemini-3-flash-preview",
+                "gemini-3.1-flash-preview": "gemini-3-flash-preview",
+              },
+            },
+            xai: { aliases: {} },
+            openrouter: {
+              prefixWhenBare: "openrouter",
+            },
+            huggingface: {
+              stripPrefixes: ["huggingface/"],
+            },
+            "vercel-ai-gateway": {
+              aliases: {
+                "opus-4.6": "claude-opus-4-6",
+                "opus-4.5": "claude-opus-4-5",
+                "sonnet-4.6": "claude-sonnet-4-6",
+                "sonnet-4.5": "claude-sonnet-4-5",
+              },
+              prefixWhenBareAfterAliasStartsWith: [
+                {
+                  modelPrefix: "claude-",
+                  prefix: "anthropic",
+                },
+              ],
+            },
+            nvidia: {
+              prefixWhenBare: "nvidia",
+            },
           },
         },
       },
-    },
-  ],
-}));
+    ],
+  }),
+};
 
 const providerModelNormalizationMock = vi.hoisted(() => ({
   normalizeProviderModelIdWithRuntime: vi.fn(() => undefined),
@@ -685,6 +689,12 @@ describe("model-selection", () => {
         expected: "anthropic",
       },
       {
+        name: "retains a unique case-insensitive configured match",
+        cfg: createProviderInferenceAllowlistConfig("custom/Model"),
+        model: "MODEL",
+        expected: "custom",
+      },
+      {
         name: "infers provider for slash-containing model id when allowlist match is unique",
         cfg: createProviderInferenceAllowlistConfig(
           "vercel-ai-gateway/anthropic/claude-sonnet-4-6",
@@ -748,23 +758,30 @@ describe("model-selection", () => {
       expect(inferUniqueProviderFromConfiguredModels({ cfg, model })).toBeUndefined();
     });
 
-    it("prefers a unique agent match over global and provider-config collisions", () => {
-      const cfg = {
-        agents: {
-          defaults: { models: { "openai/shared-model": {} } },
-          entries: {
-            worker: { models: { "anthropic/shared-model": {} } },
+    it.each(["shared-model", "SHARED-MODEL"])(
+      "prefers a unique agent match over global and provider-config collisions (%s)",
+      (agentModel) => {
+        const cfg = {
+          agents: {
+            defaults: { models: { "openai/shared-model": {} } },
+            entries: {
+              worker: { models: { [`anthropic/${agentModel}`]: {} } },
+            },
           },
-        },
-        models: {
-          providers: { minimax: { models: [{ id: "shared-model" }] } },
-        },
-      } as unknown as OpenClawConfig;
+          models: {
+            providers: { minimax: { models: [{ id: "shared-model" }] } },
+          },
+        } as unknown as OpenClawConfig;
 
-      expect(
-        inferUniqueProviderFromConfiguredModels({ cfg, agentId: "worker", model: "shared-model" }),
-      ).toBe("anthropic");
-    });
+        expect(
+          inferUniqueProviderFromConfiguredModels({
+            cfg,
+            agentId: "worker",
+            model: "shared-model",
+          }),
+        ).toBe("anthropic");
+      },
+    );
 
     it("keeps ambiguous agent matches unresolved without falling back globally", () => {
       const cfg = {
@@ -786,6 +803,48 @@ describe("model-selection", () => {
       ).toBeUndefined();
     });
   });
+
+  describe.each(["defaults", "agent", "configured catalog", "catalog"] as const)(
+    "bare provider inference from %s",
+    (scope) => {
+      it.each([false, true])(
+        "prefers exact case regardless of row order (reverse=%s)",
+        (reverse) => {
+          const rows = [
+            { provider: "first", id: "model", name: "model" },
+            { provider: "second", id: "MODEL", name: "MODEL" },
+            { provider: "third", id: "Model", name: "Model" },
+          ];
+          if (reverse) {
+            rows.reverse();
+          }
+          const models = Object.fromEntries(rows.map((row) => [`${row.provider}/${row.id}`, {}]));
+          const cfg: OpenClawConfig =
+            scope === "defaults"
+              ? { agents: { defaults: { models } } }
+              : scope === "agent"
+                ? { agents: { entries: { worker: { models } } } }
+                : scope === "configured catalog"
+                  ? createProviderInferenceCatalogConfig(
+                      Object.fromEntries(rows.map((row) => [row.provider, [row.id]])),
+                    )
+                  : {};
+          const resolve = (model: string) =>
+            resolveBareModelDefaultProvider({
+              cfg,
+              catalog: scope === "catalog" ? rows : [],
+              agentId: "worker",
+              model,
+              defaultProvider: "fallback",
+            });
+
+          expect(resolve(" Model ")).toBe("third");
+          expect(resolve("MODEL")).toBe("second");
+          expect(resolve("mOdEl")).toBe("fallback");
+        },
+      );
+    },
+  );
 
   describe("buildConfiguredModelCatalog", () => {
     it.each([
@@ -1053,6 +1112,56 @@ describe("model-selection", () => {
   });
 
   describe("buildAllowedModelSet", () => {
+    it("retains every configured row in a large allowlist without admitting other rows", () => {
+      const catalog = Array.from({ length: 400 }, (_, index) => ({
+        provider: "custom",
+        id: `synthetic-${index}`,
+        name: `Synthetic ${index}`,
+      }));
+      const result = buildAllowedModelSet({
+        cfg: {
+          agents: {
+            defaults: {
+              modelPolicy: { allow: catalog.map((entry) => `custom/${entry.id}`) },
+            },
+          },
+        },
+        catalog: [...catalog, { provider: "other", id: "synthetic-0", name: "Other provider" }],
+        defaultProvider: "custom",
+      });
+
+      expect(result.allowAny).toBe(false);
+      expect(result.allowedCatalog).toEqual(catalog);
+      expect(result.allowedKeys.size).toBe(400);
+    });
+
+    it("keeps case-insensitive visibility inside the exact provider namespace", () => {
+      const result = buildAllowedModelSet({
+        cfg: {
+          agents: {
+            defaults: {
+              modelPolicy: { allow: ["custom/team/Reader", "custom/READER"] },
+            },
+          },
+        },
+        catalog: [
+          { provider: "custom", id: "team/Reader", name: "Nested model" },
+          { provider: "custom/team", id: "Reader", name: "Namespaced provider" },
+          { provider: "custom", id: "Reader", name: "Uppercase" },
+          { provider: "custom", id: "reader", name: "Lowercase" },
+          { provider: "other", id: "READER", name: "Other provider" },
+        ],
+        defaultProvider: "custom",
+      });
+
+      expect(result.allowedCatalog.map(({ provider, id }) => [provider, id])).toEqual([
+        ["custom", "team/Reader"],
+        ["custom", "Reader"],
+        ["custom", "reader"],
+        ["custom", "READER"],
+      ]);
+    });
+
     it("keeps explicitly allowlisted models even when missing from bundled catalog", () => {
       const result = buildAllowedModelSet({
         cfg: EXPLICIT_ALLOWLIST_CONFIG,

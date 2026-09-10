@@ -40,6 +40,15 @@ require the `node` role.
 | `operator.talk`         | Creating, steering, and closing Talk sessions without general Gateway write access. `operator.write` also satisfies this scope.                               |
 | `operator.talk.secrets` | Reading Talk configuration with secrets included.                                                                                                             |
 
+Personal GitHub connection management is a narrowly self-scoped exception to
+read-only behavior: `users.github.*` requires `operator.read` plus the exact
+authenticated durable profile. An identified reader can connect, poll, cancel,
+reconnect, or disconnect only their own account. These methods do not expose
+team secrets, mutate shared configuration, or grant OpenClaw write/admin scopes. System
+and per-agent GitHub changes remain `operator.admin`; publication remains
+`operator.write` plus current session authorization. See
+[GitHub connections](/concepts/user-model#github-connections).
+
 Unknown future `operator.*` scopes require an exact match unless the caller
 already holds `operator.admin`.
 
@@ -238,7 +247,9 @@ dispatch so authorization failures have one canonical structured response:
   `projectId`, and `operator.admin` for incognito sessions or any `execNode`
   request. For non-admin callers, the handler limits `cwd` to configured agent
   workspaces; `projectId` cannot be combined with `cwd` or `execNode`.
-- `environments.list` needs `operator.read`. Session placement methods derive
+- `environments.list` needs `operator.read` for plain inventory and
+  `operator.write` when `runtimeId` requests runtime-specific command eligibility.
+  Session placement methods derive
   their scope from the requested target before schema validation:
   `sessions.dispatch` needs `operator.write` for `deviceId` and
   `operator.admin` for `profileId` or a target-less
@@ -399,3 +410,8 @@ shared-secret bearer auth, even if a caller sends narrower declared scopes.
 Identity-bearing modes, such as trusted proxy auth or private-ingress `none`,
 can still honor explicit declared scopes. Use separate Gateways for real trust
 boundary separation.
+
+## Related
+
+- [Trusted proxy auth](/gateway/trusted-proxy-auth) — how a trusted proxy supplies the operator identity these scopes attach to
+- [Gateway protocol](/gateway/protocol) — the methods these scopes authorize

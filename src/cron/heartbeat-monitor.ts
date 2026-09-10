@@ -1,4 +1,5 @@
 /** Canonical projection from heartbeat config to system-owned cron monitor jobs. */
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 import { DEFAULT_HEARTBEAT_EVERY } from "../auto-reply/heartbeat.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -8,9 +9,9 @@ import {
   resolveHeartbeatSchedulerSeed,
 } from "../infra/heartbeat-schedule.js";
 import type { CronService } from "./service.js";
+import { partitionSystemMonitors } from "./system-monitor-jobs.js";
+import { HEARTBEAT_DECLARATION_PREFIX } from "./system-owned-declaration.js";
 import type { CronJob, CronJobCreate } from "./types.js";
-
-const HEARTBEAT_DECLARATION_PREFIX = "heartbeat:";
 
 type HeartbeatMonitorSpec = { agentId: string; input: CronJobCreate };
 
@@ -31,17 +32,6 @@ type HeartbeatMonitorReconcileResult = {
 
 function heartbeatMonitorDeclarationKey(agentId: string): string {
   return `${HEARTBEAT_DECLARATION_PREFIX}${agentId}`;
-}
-
-/**
- * Deterministic survivor for duplicate monitors on one agentId: oldest row wins,
- * with the job id as a stable tiebreak so every gateway agrees on the same keep.
- */
-function preferredHeartbeatMonitor(a: CronJob, b: CronJob): CronJob {
-  if (a.createdAtMs !== b.createdAtMs) {
-    return a.createdAtMs <= b.createdAtMs ? a : b;
-  }
-  return a.id <= b.id ? a : b;
 }
 
 function heartbeatMonitorAgentId(job: CronJob): string | undefined {
@@ -84,26 +74,12 @@ export function resolveHeartbeatMonitorPlan(
   existingJobs: readonly CronJob[],
   options: { schedulerSeed?: string } = {},
 ): HeartbeatMonitorPlan {
-  const existingByAgentId = new Map<string, CronJob>();
-  // FORK: a plain Map.set() here silently dropped extra monitors sharing one
-  // agentId, so a duplicated declarationKey row stayed invisible to the plan --
-  // never updated, never removed, firing forever alongside the survivor.
-  // Collect the losers explicitly and retire them as part of convergence.
-  const duplicateMonitors: Array<{ agentId: string; job: CronJob }> = [];
-  for (const job of existingJobs) {
-    const agentId = heartbeatMonitorAgentId(job);
-    if (!agentId) {
-      continue;
-    }
-    const incumbent = existingByAgentId.get(agentId);
-    if (!incumbent) {
-      existingByAgentId.set(agentId, job);
-      continue;
-    }
-    const keep = preferredHeartbeatMonitor(incumbent, job);
-    existingByAgentId.set(agentId, keep);
-    duplicateMonitors.push({ agentId, job: keep === incumbent ? job : incumbent });
-  }
+  // FORK(retired): our duplicate-monitor collection landed upstream as
+  // partitionSystemMonitors, which retains the same losers list. Using it.
+  const { retained: existingByAgentId, duplicates } = partitionSystemMonitors(
+    existingJobs,
+    heartbeatMonitorAgentId,
+  );
 
   const schedulerSeed = resolveHeartbeatSchedulerSeed(options.schedulerSeed);
   const specs: HeartbeatMonitorSpec[] = resolveHeartbeatAgents(cfg).flatMap((agent) => {
@@ -146,7 +122,13 @@ export function resolveHeartbeatMonitorPlan(
     ];
   });
 
-  const changes: HeartbeatMonitorChange[] = [];
+  // Remove duplicate declaration keys before declarative upserts, which reject
+  // ambiguous matches by design.
+  const changes: HeartbeatMonitorChange[] = duplicates.map(({ agentId, job }) => ({
+    kind: "remove",
+    agentId,
+    job,
+  }));
   for (const spec of specs) {
     const existing = existingByAgentId.get(spec.agentId);
     if (!existing) {
@@ -164,9 +146,6 @@ export function resolveHeartbeatMonitorPlan(
     }
   }
   for (const [agentId, job] of existingByAgentId) {
-    changes.push({ kind: "remove", agentId, job });
-  }
-  for (const { agentId, job } of duplicateMonitors) {
     changes.push({ kind: "remove", agentId, job });
   }
   return { specs, changes };
@@ -195,6 +174,10 @@ export async function applyHeartbeatMonitorJobs(params: {
   const applied: HeartbeatMonitorChange[] = [];
   const failures: HeartbeatMonitorReconcileResult["failures"] = [];
   for (const change of changes) {
+    // Settled CRUD promises do not yield to I/O; reject a superseded pass
+    // after the event-loop turn, before entering its next mutation wrapper.
+    await yieldToEventLoop();
+    params.commitGuard?.();
     try {
       if (change.kind === "remove") {
         await params.cron.remove(change.job.id, {

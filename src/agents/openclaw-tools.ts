@@ -8,6 +8,7 @@ import { getActiveSecretsRuntimeConfigSnapshot } from "../secrets/runtime-state.
 import { getActiveRuntimeWebToolsMetadataFromState } from "../secrets/runtime-web-tools-state.js";
 import { isCronRunSessionKey } from "../sessions/session-key-utils.js";
 import { resolveAgentWorkspaceDir, resolveSessionAgentIds } from "./agent-scope.js";
+import { finalizeAgentToolAvailability } from "./agent-tool-availability.js";
 import { bindAssembledAgentToolActionDescriptor } from "./agent-tool-metadata.js";
 import {
   type HookContext,
@@ -123,6 +124,8 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
   const spawnWorkspaceDir = resolveWorkspaceRoot(options?.spawnWorkspaceDir ?? workspaceDir);
   options?.recordToolPrepStage?.("openclaw-tools:session-workspace");
   const widgetPresentation = resolveWidgetPresentationForRun(options);
+  const inlineWidgetClientAvailable = options?.clientCaps?.includes("inline-widgets") === true;
+  const sessionKey = normalizeOptionalString(options?.runSessionKey ?? options?.agentSessionKey);
   const gatewayCallerAccountId = options?.gatewayCallerAccountId ?? options?.agentAccountId;
   const runtimeWebTools = getActiveRuntimeWebToolsMetadataFromState();
   const sandbox =
@@ -142,6 +145,7 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
     preparedModelRuntime: options?.preparedModelRuntime,
   });
   const trimmedRunSessionKey = options?.runSessionKey?.trim();
+  const requesterSessionKey = trimmedRunSessionKey || options?.agentSessionKey;
   const mediaGenerationAgentSessionKey =
     trimmedRunSessionKey && isCronRunSessionKey(trimmedRunSessionKey)
       ? trimmedRunSessionKey
@@ -150,7 +154,6 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
     sessionKey: mediaGenerationAgentSessionKey,
     onYield: options?.onYield,
   });
-  const taskKey = normalizeOptionalString(options?.runSessionKey ?? options?.agentSessionKey);
   const imageTool =
     options?.agentDir &&
     resolveImageToolFactoryAvailable({
@@ -316,6 +319,20 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
     resolvedConfig?.tools?.deny,
     options?.pluginToolDenylist,
   );
+  const scheduledWidgetExplicitlyAllowed = isToolExplicitlyAllowedByFactoryPolicy({
+    toolName: "show_widget",
+    allowlist: options?.runtimeToolAllowlist,
+    denylist: explicitFactoryDenylist,
+  });
+  // Admitted Control UI recovery and explicitly capped scheduled turns can
+  // keep authoring their durable board without claiming an inline renderer.
+  const pinnedWidgetOnly =
+    (options?.pinnedWidgetAuthoring === true ||
+      (options?.gatewayCallerScheduled === true && scheduledWidgetExplicitlyAllowed)) &&
+    !inlineWidgetClientAvailable &&
+    !widgetPresentation.currentChannelPresenter &&
+    Boolean(sessionKey) &&
+    !isCronRunSessionKey(sessionKey);
   const includeMessageTool =
     !embedded ||
     options?.sourceReplyDeliveryMode === "message_tool_only" ||
@@ -336,7 +353,8 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
     agentId: sessionAgentId,
   })
     ? createProgressCardTool({
-        agentSessionKey: options?.runSessionKey ?? options?.agentSessionKey,
+        agentSessionKey: sessionKey,
+        agentId: sessionAgentId,
       })
     : null;
   const transcriptsTool = resolveTranscriptsTool(resolvedConfig, sessionAgentId, options);
@@ -355,6 +373,7 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
             : [
                 createComputerTool({
                   transport: options?.computerTransport,
+                  pairedNodeComputerUse: options?.pairedNodeComputerUse,
                   config: options?.config,
                   modelHasVision: options?.modelHasVision,
                   // Run ids expire before later assistant runs can reuse a provider call id.
@@ -409,9 +428,9 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
                 createPortalTool(),
               ]),
         ]),
-    ...(!embedded && taskKey && options?.taskSuggestionDeliveryMode === "gateway"
+    ...(!embedded && sessionKey && options?.taskSuggestionDeliveryMode === "gateway"
       ? createTaskSuggestionTools({
-          sessionKey: taskKey,
+          sessionKey,
           agentId: sessionAgentId,
           cwd: resolveWorkspaceRoot(options?.cwd ?? options?.workspaceDir ?? inferredWorkspaceDir),
         })
@@ -425,9 +444,10 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
           createShowWidgetTool({
             sessionId: options?.sessionId,
             agentId: sessionAgentId,
-            agentSessionKey: options?.runSessionKey ?? options?.agentSessionKey,
+            agentSessionKey: sessionKey,
             inlineHostEnabled: isCoreCanvasHostEnabled(resolvedConfig),
-            inlineClientAvailable: options?.clientCaps?.includes("inline-widgets") === true,
+            inlineClientAvailable: inlineWidgetClientAvailable,
+            pinnedOnly: pinnedWidgetOnly,
             presenters: widgetPresentation.presenters,
             presenterContext: widgetPresentation.context,
           }),
@@ -448,7 +468,10 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
     ...(embedded
       ? []
       : [
-          createGatewayTool(),
+          createGatewayTool({
+            senderIsOwner: options?.senderIsOwner,
+            requesterSenderId: options?.requesterSenderId,
+          }),
           ...createOpenClawDelegateToolsForRun({ ...options, sessionAgentId }),
         ]),
     createAgentsListTool({
@@ -473,7 +496,7 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
       sessionAgentId,
       config: resolvedConfig,
     }),
-    ...(options?.sandboxed
+    ...((options?.sandboxed && !options.skillWorkshop?.libraryAuthoring) || !resolvedConfig
       ? []
       : [
           createConfiguredSkillWorkshopTool({
@@ -499,6 +522,7 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
             agentId: sessionAgentId,
             sessionKey: options?.runSessionKey ?? options?.agentSessionKey,
             runId: options?.runId,
+            ...(options?.questionPrompt ? { questionPrompt: options.questionPrompt } : {}),
           }),
         ]
       : []),
@@ -513,6 +537,7 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
             agentId: sessionAgentId,
             sessionKey: options?.runSessionKey ?? options?.agentSessionKey,
             runId: options?.runId,
+            ...(options?.questionPrompt ? { questionPrompt: options.questionPrompt } : {}),
           }),
         ]
       : []),
@@ -561,8 +586,9 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
     ...(!embedded || options?.allowGatewaySubagentBinding === true
       ? [
           createSessionsSpawnTool({
-            agentSessionKey: options?.agentSessionKey,
+            agentSessionKey: options?.runSessionKey ?? options?.agentSessionKey,
             requesterTurnRunId: options?.runId,
+            requesterThinkingLevel: options?.requesterThinkingLevel,
             completionOwnerKey: options?.runSessionKey,
             agentChannel: options?.agentChannel,
             agentAccountId: options?.agentAccountId,
@@ -592,7 +618,7 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
     createSessionsYieldTool({
       sessionId: options?.sessionId,
       claimYield: createRequesterYieldCallback({
-        requesterSessionKey: trimmedRunSessionKey || options?.agentSessionKey,
+        requesterSessionKey,
         requesterAgentId: sessionAgentId,
         requesterTurnRunId: options?.runId,
         claimYieldCompletion: options?.claimYieldCompletion,
@@ -600,7 +626,14 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
       onYield: options?.onYield,
     }),
     createSubagentsTool({
-      agentSessionKey: options?.agentSessionKey,
+      // Match the durable controller key the spawn tool registers runs under, so split-key
+      // callers (e.g. Telegram DM with a policy key distinct from the durable run key) still
+      // see their spawned runs in the active/recent list. Mirrors createSessionsSpawnTool above.
+      agentSessionKey: options?.runSessionKey ?? options?.agentSessionKey,
+      // Retained task rows created before the durable-key alignment still carry the policy
+      // key in owner_key; let the listing/cancel tool match both so those rows stay reachable
+      // for split-key callers instead of disappearing with "Task outside session tree".
+      callerPolicySessionKey: options?.agentSessionKey,
       agentId: sessionAgentId,
       config: sessionConfig,
     }),
@@ -636,7 +669,7 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
     options?.recordToolPrepStage?.("openclaw-tools:plugin-tools");
   }
 
-  allTools = filterToolsByClientCaps(allTools, options?.clientCaps);
+  allTools = finalizeAgentToolAvailability(filterToolsByClientCaps(allTools, options?.clientCaps));
   options?.recordToolPrepStage?.("openclaw-tools:client-capabilities");
   for (const tool of allTools) {
     bindAssembledAgentToolActionDescriptor(tool);

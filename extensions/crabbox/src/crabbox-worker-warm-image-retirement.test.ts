@@ -59,7 +59,7 @@ describe("Crabbox checkpoint retirement", () => {
       const retained = listCrabboxWarmImages()[0]!;
       expect(retained.retirement?.checkpointId).toBe("chk_capture_1");
       const retainedResources = new Set(resources);
-      initial.provider.dispose();
+      await initial.provider.dispose();
       resetPluginStateStoreForTests();
       const restarted = createWarmProvider(command, initial.stateDir);
       failDeletion = false;
@@ -120,7 +120,7 @@ describe("Crabbox checkpoint retirement", () => {
         if (argv[2] === "create") {
           const id = `chk_capture_${++captures}`;
           resources.add(id);
-          return checkpointResult(id, argv[argv.indexOf("--id") + 1]!, "pending");
+          return checkpointResult(id, argv[argv.indexOf("--id") + 1]!, "completed");
         }
         if (argv[2] === "delete") {
           if (failDeletion) {
@@ -146,7 +146,7 @@ describe("Crabbox checkpoint retirement", () => {
       clock.mockReturnValue(now + DAY_MS);
       await captureWarmImage(initial.provider, PROFILE, "refresh");
       expect(resources).toEqual(new Set(["chk_capture_1", "chk_capture_2"]));
-      initial.provider.dispose();
+      await initial.provider.dispose();
       resetPluginStateStoreForTests();
       const restarted = createWarmProvider(command, initial.stateDir);
       clock.mockReturnValue(now + 2 * DAY_MS);
@@ -168,7 +168,7 @@ describe("Crabbox checkpoint retirement", () => {
       } else if (cleanup === "capacity") {
         for (let index = 0; index < 127; index++) {
           store.register(`reserved-${index}`, {
-            version: 2,
+            version: 3,
             allocations: {},
             operation: {
               type: "capture",
@@ -309,12 +309,17 @@ describe("Crabbox checkpoint retirement", () => {
             image: {
               ...image.value.image!,
               checkpointId: `chk_idle_${index}`,
-              lastUsedAtMs: now + 1,
+              lastDemandAtMs: now + 1,
             },
           });
         }
       } else if (cleanup === "expiry") {
         vi.spyOn(Date, "now").mockReturnValue(now + 15 * DAY_MS);
+      } else {
+        store.update(image.key, () => ({
+          ...image.value,
+          image: { ...image.value.image!, state: "pending" },
+        }));
       }
       cleaning = true;
       await captureWarmImage(

@@ -63,8 +63,6 @@ export type SkillsWorkshopConfig = {
     /** Capture policy for durable conversation signals and substantial completed work. */
     mode?: SkillsWorkshopAutonomousMode;
   };
-  /** Allow Skill Workshop apply to write through trusted skill symlink targets. */
-  allowSymlinkTargetWrites?: boolean;
   /**
    * Fork-only: grant the agent full skill-admin rights in the Workshop. Skips the
    * same-run usage gate and the Workshop-ownership check, so agents may patch and

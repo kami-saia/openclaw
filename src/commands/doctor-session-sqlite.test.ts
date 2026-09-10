@@ -1,25 +1,43 @@
 // Doctor session SQLite tests exercise real temp stores and per-agent SQLite files.
+import { AsyncResource } from "node:async_hooks";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import fsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
-import { CURRENT_SESSION_VERSION, SessionManager } from "../agents/sessions/session-manager.js";
+import { SessionManager } from "../agents/sessions/session-manager.js";
 import {
   loadExactSessionEntry,
   upsertSessionEntryCore,
 } from "../config/sessions/session-accessor.sqlite-entry.js";
 import {
+  readSessionTranscriptHistoryEvents,
+  readSessionTranscriptHistoryEventById,
+  readSessionTranscriptHistoryEventCount,
+  readSessionTranscriptHistoryEventPage,
+} from "../config/sessions/session-accessor.sqlite-history-events.js";
+import { importSqliteSessionRows } from "../config/sessions/session-accessor.sqlite-import.js";
+import {
   loadTranscriptEventsSync,
   readTranscriptStatsSync,
 } from "../config/sessions/session-accessor.sqlite-read.js";
 import * as directoryDurability from "../infra/directory-durability.js";
+import { prepareGithubIssue } from "../infra/github-issue.js";
 import * as nodeSqlite from "../infra/node-sqlite.js";
 import * as replaceFile from "../infra/replace-file.js";
 import { resolveSqliteDatabaseFilePaths } from "../infra/sqlite-files.js";
+import * as sqlitePrivateDirectory from "../infra/sqlite-private-directory.js";
+import * as windowsPrivateDirectory from "../infra/windows-private-directory.js";
 import { ExitError } from "../runtime.js";
+import {
+  AGENT_DATABASE_MAINTENANCE_LEASE,
+  claimOpenClawAgentDatabaseLease,
+  releaseOpenClawAgentDatabaseLease,
+} from "../state/openclaw-agent-db-lease.js";
 import {
   closeOpenClawAgentDatabasesForTest,
   openOpenClawAgentDatabase,
@@ -30,10 +48,19 @@ import {
   readOpenClawDatabaseQuarantine,
   recordOpenClawDatabaseQuarantine,
 } from "../state/openclaw-quarantine-store.js";
-import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
+import {
+  closeOpenClawStateDatabaseForTest,
+  openOpenClawStateDatabase,
+} from "../state/openclaw-state-db.js";
+import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { sessionDeliveryRoute } from "../utils/delivery-context.shared.js";
 import * as migrationArtifact from "./doctor-session-sqlite-artifact.js";
-import { createSessionSqliteMigrationFailureIssue } from "./doctor-session-sqlite-failure.js";
+import {
+  claimSessionSqliteMigrationGithubIssue,
+  clearSessionSqliteMigrationGithubIssueClaim,
+  createSessionSqliteMigrationFailureIssue,
+  writeSessionSqliteMigrationFailureReports,
+} from "./doctor-session-sqlite-failure.js";
 import * as migrationRun from "./doctor-session-sqlite-migration-run.js";
 import {
   assertSafeSessionSqliteMigrationMove,
@@ -52,7 +79,7 @@ import { inspectSessionSqliteRecovery } from "./doctor-session-sqlite-recovery-i
 import { restoreSessionSqliteMigrationRun } from "./doctor-session-sqlite-restore.js";
 import { retireSessionSqliteRecovery } from "./doctor-session-sqlite-retirement.js";
 import { createDoctorSessionSqliteTargetReport } from "./doctor-session-sqlite-types.js";
-import { runDoctorSessionSqlite } from "./doctor-session-sqlite.js";
+import { runDoctorSessionSqlite, type DoctorSessionSqliteReport } from "./doctor-session-sqlite.js";
 import { withDoctorSqliteMaintenanceLock } from "./doctor-sqlite-maintenance-lock.js";
 import { doctorCommand } from "./doctor.js";
 
@@ -587,11 +614,7 @@ describe("runDoctorSessionSqlite", () => {
         });
       let imported;
       try {
-        imported = await runDoctorSessionSqlite({
-          env: store.env,
-          mode: "import",
-          store: store.storePath,
-        });
+        imported = await importLegacyStore(store);
       } finally {
         spy.mockRestore();
       }
@@ -652,11 +675,7 @@ describe("runDoctorSessionSqlite", () => {
         siblingSource,
         JSON.stringify({ type: "session", id: "second", version: 3 }) + "\n",
       );
-      const imported = await runDoctorSessionSqlite({
-        env: store.env,
-        mode: "import",
-        store: store.storePath,
-      });
+      const imported = await importLegacyStore(store);
       expect(imported.targets[0]?.issues).toEqual([]);
       const manifestPath = requireMigrationManifestPath(imported.migrationRun?.manifestPath);
       const manifest = readMigrationManifest(manifestPath);
@@ -701,11 +720,7 @@ describe("runDoctorSessionSqlite", () => {
   it("retires a successful reimport generation after restore consumed its predecessor", async () => {
     const { store } = await createVerifiedRecoveryStore();
     await runDoctorSessionSqlite({ env: store.env, mode: "restore", store: store.storePath });
-    const reimported = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const reimported = await importLegacyStore(store);
     expect(reimported.targets[0]?.issues).toEqual([]);
     closeOpenClawAgentDatabasesForTest();
     const result = await retireSessionSqliteRecovery({
@@ -740,22 +755,21 @@ describe("runDoctorSessionSqlite", () => {
       await runDoctorSessionSqlite({ env: store.env, mode: "restore", store: store.storePath });
       const source = kind === "transcript" ? store.transcriptPath : store.storePath;
       const original = fs.readFileSync(source);
+      const token = "sk-abcdefghijklmnopqrstuv";
       const unlink = fs.unlinkSync;
       let injected = false;
       const spy = vi.spyOn(fs, "unlinkSync").mockImplementation((file) => {
         if (!injected && file === source) {
           injected = true;
-          throw new Error("injected interruption before source unlink");
+          throw new Error(
+            `injected interruption before source unlink: Authorization: Bearer ${token}`,
+          );
         }
         return unlink(file);
       });
       let interrupted;
       try {
-        interrupted = await runDoctorSessionSqlite({
-          env: store.env,
-          mode: "import",
-          store: store.storePath,
-        });
+        interrupted = await importLegacyStore(store);
       } finally {
         spy.mockRestore();
       }
@@ -764,6 +778,12 @@ describe("runDoctorSessionSqlite", () => {
       const move = readMigrationManifest(manifestPath).targets[0]!.plannedMoves.find(
         (item) => item.sourcePath === source,
       )!;
+      const issueCode =
+        kind === "transcript" ? "transcript_archive_failed" : "legacy_store_archive_failed";
+      const issue = interrupted.targets[0]?.issues.find((item) => item.code === issueCode);
+      expect(issue?.message).toContain("injected interruption before source unlink");
+      expect(issue?.message).not.toContain(token);
+      expect(fs.readFileSync(source)).toEqual(original);
       expect(fs.statSync(source).nlink).toBe(2);
       expect(fs.statSync(source).ino).toBe(fs.statSync(move.archivePath).ino);
       if (entry === "public") {
@@ -796,11 +816,7 @@ describe("runDoctorSessionSqlite", () => {
       if (mode === "restore") {
         expect(fs.statSync(source).nlink).toBe(1);
         expect(fs.readFileSync(source)).toEqual(original);
-        const reimport = await runDoctorSessionSqlite({
-          env: store.env,
-          mode: "import",
-          store: store.storePath,
-        });
+        const reimport = await importLegacyStore(store);
         expect(reimport.targets[0]?.issues).toEqual([]);
       }
       closeOpenClawAgentDatabasesForTest();
@@ -882,6 +898,48 @@ describe("runDoctorSessionSqlite", () => {
     },
   );
 
+  it("preserves a support receipt version while adopting recovery evidence", async () => {
+    const { store, imported, archivePath } = await createVerifiedRecoveryStore([
+      JSON.stringify({ type: "session", id: "session-1", version: 1 }),
+      JSON.stringify({ type: "message", message: { role: "user", content: "legacy IDs" } }),
+    ]);
+    const manifestPath = requireMigrationManifestPath(imported.migrationRun?.manifestPath);
+    const manifest = readMigrationManifest(manifestPath);
+    const jsonPath = manifestPath.replace(/\.json$/u, ".failure.json");
+    const markdownPath = manifestPath.replace(/\.json$/u, ".failure.md");
+    manifest.failureReports = { jsonPath, markdownPath };
+    for (const target of manifest.targets) {
+      for (const move of [...target.plannedMoves, ...target.completedMoves]) {
+        delete move.artifact;
+      }
+    }
+    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+    fs.writeFileSync(markdownPath, "sanitized report\n", { mode: 0o600 });
+    const { marker, title } = prepareGithubIssue(
+      expectDefined(createSessionSqliteMigrationFailureIssue(manifestPath), "adoption report"),
+    );
+    const issue = { marker, title };
+    expect(
+      claimSessionSqliteMigrationGithubIssue(manifestPath, issue, { assertCurrent: vi.fn() }),
+    ).toMatchObject({ status: "claimed" });
+    const preview = inspectSessionSqliteRecovery({ cfg: {}, env: store.env });
+    expect(preview.artifacts.find((item) => item.path === archivePath)?.outcome).toBe(
+      "verification-required",
+    );
+
+    await retireSessionSqliteRecovery({
+      env: store.env,
+      preview,
+      readConfig: async () => ({}),
+      confirm: async () => true,
+    });
+
+    expect(readMigrationManifest(manifestPath)).toMatchObject({
+      failureReports: { githubIssue: { ...issue, status: "attempted" } },
+      manifestVersion: 4,
+    });
+  });
+
   it.each([
     { name: "invalid message", rows: [{ type: "message", id: "bad", message: {} }] },
     { name: "unknown event", rows: [{ type: "future_event", id: "unknown", payload: "unique" }] },
@@ -921,11 +979,7 @@ describe("runDoctorSessionSqlite", () => {
       ],
     });
     const original = fs.readFileSync(store.transcriptPath);
-    const imported = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const imported = await importLegacyStore(store);
     const move = readMigrationManifest(
       imported.migrationRun?.manifestPath,
     ).targets[0]!.completedMoves.find((item) => item.kind === "transcript");
@@ -954,6 +1008,190 @@ describe("runDoctorSessionSqlite", () => {
     }
     expect(fs.readFileSync(move?.archivePath ?? store.transcriptPath)).toEqual(original);
   });
+
+  it("archives identical indexed and leaf replays after normalized history verification", async () => {
+    const repeatedMessage = {
+      type: "message",
+      id: "reply",
+      parentId: "root",
+      message: { role: "assistant", content: "same replay" },
+    };
+    const repeatedLeaf = {
+      type: "leaf",
+      id: "selection",
+      parentId: "reply",
+      targetId: "reply",
+    };
+    const store = createLegacyStore({
+      transcriptLines: [
+        JSON.stringify({ type: "session", id: "session-1", version: 3 }),
+        JSON.stringify({
+          type: "message",
+          id: "root",
+          parentId: null,
+          message: { role: "user", content: "root" },
+        }),
+        JSON.stringify(repeatedMessage),
+        JSON.stringify(repeatedMessage),
+        JSON.stringify(repeatedLeaf),
+        JSON.stringify(repeatedLeaf),
+      ],
+    });
+
+    const imported = await importLegacyStore(store);
+
+    expect(imported.targets[0]?.issues).toEqual([]);
+    const move = readMigrationManifest(
+      imported.migrationRun?.manifestPath,
+    ).targets[0]!.completedMoves.find((item) => item.kind === "transcript");
+    expect(move).toBeDefined();
+    expect(fs.existsSync(store.transcriptPath)).toBe(false);
+    expect(
+      loadTranscriptEventsSync({
+        agentId: "main",
+        env: store.env,
+        sessionId: "session-1",
+      }).map((event) => (event as { id?: string }).id),
+    ).toEqual(["session-1", "root", "reply", "selection"]);
+
+    const scope = { agentId: "main", env: store.env, sessionId: "session-1" };
+    const history = readSessionTranscriptHistoryEvents(scope);
+    expect(history.map((row) => (row.event as { id?: string }).id)).toEqual(["root", "reply"]);
+    expect(readSessionTranscriptHistoryEventCount(scope)).toBe(2);
+    expect(
+      readSessionTranscriptHistoryEventPage(scope, { maxMessages: 1, offset: 0 }),
+    ).toMatchObject({
+      activeLeafEntryId: "reply",
+      totalMessages: 2,
+      events: [expect.objectContaining({ event: expect.objectContaining({ id: "reply" }) })],
+    });
+    expect(readSessionTranscriptHistoryEventById(scope, "reply")).toMatchObject({
+      event: expect.objectContaining({ id: "reply" }),
+    });
+  });
+
+  it("retains complete recovery when durable transcript verification is short", async () => {
+    const store = createLegacyStore({
+      transcriptLines: [
+        JSON.stringify({ type: "session", id: "session-1", version: 3 }),
+        JSON.stringify({
+          type: "message",
+          id: "root",
+          parentId: null,
+          message: { role: "user", content: "root" },
+        }),
+      ],
+    });
+    const snapshot = sqliteReaders.readOnlySqliteValidationSnapshot;
+    const spy = vi
+      .spyOn(sqliteReaders, "readOnlySqliteValidationSnapshot")
+      .mockImplementation((target) => {
+        const result = snapshot(target);
+        if (!result.ok) {
+          return result;
+        }
+        const counts = new Map(result.snapshot.transcriptEventCountsBySessionId);
+        counts.set("session-1", 1);
+        return {
+          ok: true,
+          snapshot: { ...result.snapshot, transcriptEventCountsBySessionId: counts },
+        };
+      });
+    let imported;
+    try {
+      imported = await importLegacyStore(store);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(imported.targets[0]?.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "sqlite_transcript_count_mismatch" }),
+      ]),
+    );
+    expect(fs.existsSync(store.transcriptPath)).toBe(true);
+    expect(
+      readMigrationManifest(imported.migrationRun?.manifestPath).targets[0]?.completedMoves.some(
+        (item) => item.kind === "transcript",
+      ),
+    ).toBe(false);
+  });
+
+  it.each([
+    {
+      name: "identical",
+      repeated: { role: "assistant", content: "same replay" },
+      archived: true,
+    },
+    {
+      name: "divergent",
+      repeated: { role: "assistant", content: "different replay" },
+      archived: false,
+    },
+  ])(
+    "handles a $name replay against an existing destination and retry",
+    async ({ repeated, archived }) => {
+      const first = {
+        type: "message",
+        id: "reply",
+        parentId: "root",
+        message: { role: "assistant", content: "same replay" },
+      };
+      const sourceEvents = [
+        { type: "session", id: "session-1", version: 3 },
+        {
+          type: "message",
+          id: "root",
+          parentId: null,
+          message: { role: "user", content: "root" },
+        },
+        first,
+        { ...first, message: repeated },
+      ];
+      const store = createLegacyStore({
+        transcriptLines: sourceEvents.map((event) => JSON.stringify(event)),
+      });
+      await importSqliteSessionRows({
+        agentId: "main",
+        env: store.env,
+        sessionKey: "agent:main:main",
+        storePath: store.storePath,
+        entry: { sessionId: "session-1", updatedAt: 1000 },
+        readTranscriptEvents: (append) => sourceEvents.slice(0, 3).forEach(append),
+      });
+
+      const run = () => importLegacyStore(store);
+      const imported = await run();
+      expect(fs.existsSync(store.transcriptPath)).toBe(!archived);
+      expect(
+        readMigrationManifest(imported.migrationRun?.manifestPath).targets[0]?.completedMoves.some(
+          (item) => item.kind === "transcript",
+        ),
+      ).toBe(archived);
+      expect(
+        imported.targets[0]?.issues.some(
+          (issue) => issue.code === "sqlite_transcript_count_mismatch",
+        ),
+      ).toBe(!archived);
+      expect(
+        loadTranscriptEventsSync({
+          agentId: "main",
+          env: store.env,
+          sessionId: "session-1",
+        }).map((event) => (event as { id?: string }).id),
+      ).toEqual(["session-1", "root", "reply"]);
+
+      if (!archived) {
+        const retried = await run();
+        expect(
+          retried.targets[0]?.issues.some(
+            (issue) => issue.code === "sqlite_transcript_count_mismatch",
+          ),
+        ).toBe(true);
+        expect(fs.existsSync(store.transcriptPath)).toBe(true);
+      }
+    },
+  );
 
   it("retains a recreated archive while resuming an interrupted unlink", async () => {
     const { store, archivePath } = await createVerifiedRecoveryStore();
@@ -988,27 +1226,23 @@ describe("runDoctorSessionSqlite", () => {
   it.each(["intent", "intent-sync", "claim", "unlink", "unlink-later", "receipt"])(
     "resumes retirement after a %s failure without overclaiming removed bytes",
     async (phase) => {
-      const { store, archivePath } = await createVerifiedRecoveryStore();
+      const { store, imported, archivePath } = await createVerifiedRecoveryStore();
+      const manifestDir = path.dirname(
+        requireMigrationManifestPath(imported.migrationRun?.manifestPath),
+      );
       const original = fs.readFileSync(archivePath);
       let injected = false;
       let claimUnlinks = 0;
       const write = replaceFile.replaceFileAtomicSync;
       const unlink = fs.unlinkSync;
-      const sync = directoryDurability.syncDirectory;
-      const syncSpy = vi
-        .spyOn(directoryDurability, "syncDirectory")
-        .mockImplementation(async (directory, options) => {
-          if (
-            !injected &&
-            phase === "intent-sync" &&
-            typeof directory === "string" &&
-            path.basename(directory) === "session-sqlite-migration-runs"
-          ) {
-            injected = true;
-            throw new Error("injected intent-sync");
-          }
-          return sync(directory, options);
-        });
+      const fsync = fs.fsyncSync;
+      const syncSpy = vi.spyOn(fs, "fsyncSync").mockImplementation((fd) => {
+        if (!injected && phase === "intent-sync" && isDirectoryDescriptor(fd, manifestDir)) {
+          injected = true;
+          throw new Error("injected intent-sync");
+        }
+        fsync(fd);
+      });
       const writeSpy = vi
         .spyOn(replaceFile, "replaceFileAtomicSync")
         .mockImplementation((options) => {
@@ -1087,28 +1321,34 @@ describe("runDoctorSessionSqlite", () => {
       const manifestPath = requireMigrationManifestPath(imported.migrationRun?.manifestPath);
       const original = fs.readFileSync(archivePath);
       const preview = inspectSessionSqliteRecovery({ cfg: {}, env: store.env });
-      const sync = directoryDurability.syncDirectory;
-      const platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue(platform);
-      const syncSpy = vi
-        .spyOn(directoryDurability, "syncDirectory")
-        .mockImplementation(async (directory, options) => {
-          if (directory !== path.dirname(manifestPath)) {
-            return sync(directory, options);
-          }
-          // Assert the persisted intent at the commit boundary, before any original moves.
-          const manifest = readMigrationManifest(manifestPath);
-          if (fs.existsSync(archivePath)) {
-            expect(
-              manifest.targets[0]?.completedMoves.find((move) => move.archivePath === archivePath)
-                ?.artifact?.disposal.state,
-            ).toBe("pending-disposal");
-            expect(fs.readFileSync(archivePath)).toEqual(original);
-          }
-          if (syncFailure === "EIO") {
-            throw Object.assign(new Error("injected manifest EIO"), { code: "EIO" });
-          }
-          return { status: "unsupported", code: platform === "win32" ? "EPERM" : "ENOTSUP" };
+      const fsync = fs.fsyncSync;
+      const failureCode =
+        syncFailure === "EIO" ? "EIO" : platform === "win32" ? "EPERM" : "ENOTSUP";
+      // Simulate directory-sync policy without invoking foreign-platform ACL APIs.
+      const stagingRootSpy = vi
+        .spyOn(sqlitePrivateDirectory, "resolvePrivateSqliteSnapshotStagingRoot")
+        .mockReturnValue(store.tempDir);
+      const privateDirectorySpy = vi
+        .spyOn(windowsPrivateDirectory, "createPrivateWindowsDirectory")
+        .mockImplementation((directoryPath) => {
+          fs.mkdirSync(directoryPath, { mode: 0o700 });
         });
+      const platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue(platform);
+      const syncSpy = vi.spyOn(fs, "fsyncSync").mockImplementation((fd) => {
+        if (!isDirectoryDescriptor(fd, path.dirname(manifestPath))) {
+          return fsync(fd);
+        }
+        // Assert the persisted intent at the commit boundary, before any original moves.
+        const manifest = readMigrationManifest(manifestPath);
+        if (fs.existsSync(archivePath)) {
+          expect(
+            manifest.targets[0]?.completedMoves.find((move) => move.archivePath === archivePath)
+              ?.artifact?.disposal.state,
+          ).toBe("pending-disposal");
+          expect(fs.readFileSync(archivePath)).toEqual(original);
+        }
+        throw Object.assign(new Error(`injected manifest ${failureCode}`), { code: failureCode });
+      });
       try {
         const cleanup = retireSessionSqliteRecovery({
           env: store.env,
@@ -1130,14 +1370,14 @@ describe("runDoctorSessionSqlite", () => {
             )?.artifact?.disposal.state,
           ).toBe("disposed");
         } else {
-          await expect(cleanup).rejects.toThrow(
-            syncFailure === "EIO" ? "injected manifest EIO" : "crash-durable",
-          );
+          await expect(cleanup).rejects.toThrow(`injected manifest ${failureCode}`);
           expect(fs.readFileSync(archivePath)).toEqual(original);
         }
       } finally {
         syncSpy.mockRestore();
         platformSpy.mockRestore();
+        privateDirectorySpy.mockRestore();
+        stagingRootSpy.mockRestore();
       }
     },
   );
@@ -1310,28 +1550,25 @@ describe("runDoctorSessionSqlite", () => {
       }
       expect(fs.statSync(databasePath, { bigint: true }).ino).toBe(before.ino);
     };
-    const sync = directoryDurability.syncDirectory;
-    const spy = vi
-      .spyOn(directoryDurability, "syncDirectory")
-      .mockImplementation(async (dir, opts) => {
-        const result = await sync(dir, opts);
-        if (!injected && phase !== "confirmation") {
-          const moves = readMigrationManifest(manifestPath).targets[0]!.completedMoves;
-          const atUnlink = moves.some(
-            (move) =>
-              move.artifact?.disposal.state === "pending-disposal" &&
-              move.artifact.disposal.phase === "unlink-pending",
-          );
-          if (
-            (phase === "publication" &&
-              dir === path.dirname(target.completedMoves[0]!.archivePath)) ||
-            (phase === "unlink-intent" && dir === path.dirname(manifestPath) && atUnlink)
-          ) {
-            mutate();
-          }
-        }
-        return result;
-      });
+    const mutateAfterSync = (directory: string) => {
+      if (injected || phase === "confirmation") {
+        return;
+      }
+      const moves = readMigrationManifest(manifestPath).targets[0]!.completedMoves;
+      const atUnlink = moves.some(
+        (move) =>
+          move.artifact?.disposal.state === "pending-disposal" &&
+          move.artifact.disposal.phase === "unlink-pending",
+      );
+      if (
+        (phase === "publication" &&
+          directory === path.dirname(target.completedMoves[0]!.archivePath)) ||
+        (phase === "unlink-intent" && directory === path.dirname(manifestPath) && atUnlink)
+      ) {
+        mutate();
+      }
+    };
+    const restoreSync = observeRecoveryDirectorySync(path.dirname(manifestPath), mutateAfterSync);
     try {
       const cleanup = retireSessionSqliteRecovery({
         env: store.env,
@@ -1365,7 +1602,7 @@ describe("runDoctorSessionSqlite", () => {
         expect(fs.readFileSync(retainedPath)).toEqual(originals[index]);
       }
     } finally {
-      spy.mockRestore();
+      restoreSync();
       writer?.close();
     }
   });
@@ -1388,11 +1625,7 @@ describe("runDoctorSessionSqlite", () => {
         sessionFile: "second.jsonl",
       };
       fs.writeFileSync(store.storePath, JSON.stringify(index));
-      const imported = await runDoctorSessionSqlite({
-        env: store.env,
-        mode: "import",
-        store: store.storePath,
-      });
+      const imported = await importLegacyStore(store);
       expect(imported.targets[0]?.issues).toEqual([]);
       closeOpenClawAgentDatabasesForTest();
       const manifestPath = requireMigrationManifestPath(imported.migrationRun?.manifestPath);
@@ -1405,39 +1638,35 @@ describe("runDoctorSessionSqlite", () => {
         target.completedMoves.map((move) => [move.archivePath, fs.readFileSync(move.archivePath)]),
       );
       let injected = false;
-      const sync = directoryDurability.syncDirectory;
-      const spy = vi
-        .spyOn(directoryDurability, "syncDirectory")
-        .mockImplementation(async (dir, opts) => {
-          const result = await sync(dir, opts);
-          const moves = readMigrationManifest(manifestPath).targets[0]!.completedMoves;
-          const atUnlink = moves.some(
-            (move) =>
-              move.artifact?.disposal.state === "pending-disposal" &&
-              move.artifact.disposal.phase === "unlink-pending",
+      const mutateAfterSync = (directory: string) => {
+        const moves = readMigrationManifest(manifestPath).targets[0]!.completedMoves;
+        const atUnlink = moves.some(
+          (move) =>
+            move.artifact?.disposal.state === "pending-disposal" &&
+            move.artifact.disposal.phase === "unlink-pending",
+        );
+        if (
+          !injected &&
+          ((phase === "intent-sync" && directory === path.dirname(manifestPath) && !atUnlink) ||
+            (phase === "publication" && directory === path.dirname(changed.archivePath)) ||
+            (phase === "unlink-intent" && directory === path.dirname(manifestPath) && atUnlink))
+        ) {
+          injected = true;
+          const move = expectDefined(
+            moves.find((mappedMove) => mappedMove.archivePath === changed.archivePath),
+            "changed transcript receipt",
           );
-          if (
-            !injected &&
-            ((phase === "intent-sync" && dir === path.dirname(manifestPath) && !atUnlink) ||
-              (phase === "publication" && dir === path.dirname(changed.archivePath)) ||
-              (phase === "unlink-intent" && dir === path.dirname(manifestPath) && atUnlink))
-          ) {
-            injected = true;
-            const move = expectDefined(
-              moves.find((mappedMove) => mappedMove.archivePath === changed.archivePath),
-              "changed transcript receipt",
-            );
-            const disposal = move.artifact!.disposal;
-            const file = fs.existsSync(move.archivePath)
-              ? move.archivePath
-              : disposal.state === "pending-disposal"
-                ? disposal.claimPath
-                : move.archivePath;
-            fs.appendFileSync(file, "unique late history\n");
-            originals.set(move.archivePath, fs.readFileSync(file));
-          }
-          return result;
-        });
+          const disposal = move.artifact!.disposal;
+          const file = fs.existsSync(move.archivePath)
+            ? move.archivePath
+            : disposal.state === "pending-disposal"
+              ? disposal.claimPath
+              : move.archivePath;
+          fs.appendFileSync(file, "unique late history\n");
+          originals.set(move.archivePath, fs.readFileSync(file));
+        }
+      };
+      const restoreSync = observeRecoveryDirectorySync(path.dirname(manifestPath), mutateAfterSync);
       const invoke = () =>
         retireSessionSqliteRecovery({
           env: store.env,
@@ -1451,7 +1680,7 @@ describe("runDoctorSessionSqlite", () => {
         expect(result.status).toBe("blocked");
         expect(result.totals.removedFiles).toBe(0);
       } finally {
-        spy.mockRestore();
+        restoreSync();
       }
       expect((await invoke()).totals.removedFiles).toBe(0);
       for (const move of readMigrationManifest(manifestPath).targets[0]!.completedMoves) {
@@ -1590,11 +1819,7 @@ describe("runDoctorSessionSqlite", () => {
       ],
     });
     const original = fs.readFileSync(store.transcriptPath);
-    const imported = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const imported = await importLegacyStore(store);
     expect(imported.targets[0]?.issues).toEqual([]);
     const manifest = readMigrationManifest(imported.migrationRun?.manifestPath);
     const originalMove = manifest.targets[0]!.completedMoves.find(
@@ -1672,11 +1897,7 @@ describe("runDoctorSessionSqlite", () => {
   it("retains archived source mappings after more than 50 successful migration runs", async () => {
     const store = createLegacyStore();
     const original = fs.readFileSync(store.transcriptPath);
-    const imported = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const imported = await importLegacyStore(store);
     const manifestPath = requireMigrationManifestPath(imported.migrationRun?.manifestPath);
     const manifest = readMigrationManifest(manifestPath);
     const archive = manifest.targets[0]!.completedMoves.find((move) => move.kind === "transcript")!;
@@ -2139,11 +2360,7 @@ describe("runDoctorSessionSqlite", () => {
       ],
     });
 
-    const report = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const report = await importLegacyStore(store);
 
     expect(report.totals).toMatchObject({ importedEntries: 1, issues: 0 });
     const imported = loadExactSessionEntry({
@@ -2169,7 +2386,7 @@ describe("runDoctorSessionSqlite", () => {
     expect(events[0]).toMatchObject({
       id: "session-1",
       type: "session",
-      version: CURRENT_SESSION_VERSION,
+      version: 3,
     });
     expect(events[0]).not.toHaveProperty("sessionId");
     expect(events[1]).toEqual({
@@ -2272,9 +2489,9 @@ describe("runDoctorSessionSqlite", () => {
     }) as typeof fs.statSync);
 
     try {
-      await expect(
-        runDoctorSessionSqlite({ env: store.env, mode: "import", store: store.storePath }),
-      ).rejects.toThrow(/stop active session writers and rerun `openclaw doctor --fix`/);
+      await expect(importLegacyStore(store)).rejects.toThrow(
+        /stop active session writers and rerun `openclaw doctor --fix`/,
+      );
       expect(fs.existsSync(store.transcriptPath)).toBe(true);
     } finally {
       statSpy.mockRestore();
@@ -2287,11 +2504,7 @@ describe("runDoctorSessionSqlite", () => {
     const transcriptMtime = new Date(transcriptMtimeMs);
     fs.utimesSync(store.transcriptPath, transcriptMtime, transcriptMtime);
 
-    const report = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const report = await importLegacyStore(store);
 
     expect(report.totals).toMatchObject({ importedEntries: 1, issues: 0 });
     expect(
@@ -2322,11 +2535,7 @@ describe("runDoctorSessionSqlite", () => {
         updatedAt: 3000,
       },
     );
-    const report = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const report = await importLegacyStore(store);
 
     expect(report.totals).toMatchObject({ importedEntries: 1, issues: 0 });
     expect(
@@ -2373,11 +2582,7 @@ describe("runDoctorSessionSqlite", () => {
         updatedAt: 3000,
       });
 
-      const report = await runDoctorSessionSqlite({
-        env: store.env,
-        mode: "import",
-        store: store.storePath,
-      });
+      const report = await importLegacyStore(store);
 
       expect(report.totals).toMatchObject({ importedEntries: 1, issues: 0 });
       const imported = loadExactSessionEntry(scope)?.entry;
@@ -2399,16 +2604,8 @@ describe("runDoctorSessionSqlite", () => {
   it("imports and validates legacy sessions idempotently", async () => {
     const store = createLegacyStore();
 
-    const firstImport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
-    const secondImport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const firstImport = await importLegacyStore(store);
+    const secondImport = await importLegacyStore(store);
     const validation = await runDoctorSessionSqlite({
       env: store.env,
       mode: "validate",
@@ -2496,11 +2693,7 @@ describe("runDoctorSessionSqlite", () => {
     legacyStore[cronStubKey] = { updatedAt: 1500 };
     fs.writeFileSync(store.storePath, `${JSON.stringify(legacyStore, null, 2)}\n`, { mode: 0o600 });
 
-    const report = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const report = await importLegacyStore(store);
 
     expect(report.totals).toMatchObject({
       archivedLegacyStoreFiles: 1,
@@ -2577,11 +2770,7 @@ describe("runDoctorSessionSqlite", () => {
       } finally {
         database.close();
       }
-      const imported = await runDoctorSessionSqlite({
-        env: store.env,
-        mode: "import",
-        store: store.storePath,
-      });
+      const imported = await importLegacyStore(store);
       expect(imported.totals.issues).toBe(0);
       const cleanup = expectDefined(imported.targets[0]?.compact, "import cleanup");
       expect(cleanup.freelistAfterPages).toBe(0);
@@ -2628,11 +2817,7 @@ describe("runDoctorSessionSqlite", () => {
         ),
       ],
     });
-    const importReport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const importReport = await importLegacyStore(store);
     const sqlitePath = importReport.targets[0]?.sqlitePath;
     expect(sqlitePath).toBeTruthy();
     const sqlite = nodeSqlite.requireNodeSqlite();
@@ -2680,6 +2865,43 @@ describe("runDoctorSessionSqlite", () => {
       expect(fs.readFileSync(externalStorePath, "utf8")).toBe("{}\n");
     },
   );
+
+  it("preserves the typed maintenance cause when import finalization fails", async () => {
+    const store = createLegacyStore();
+    fs.writeFileSync(store.storePath, "{}\n");
+    openOpenClawAgentDatabase({ agentId: "main", env: store.env });
+    closeOpenClawAgentDatabasesForTest();
+    closeOpenClawStateDatabaseForTest();
+    const openDatabase = nodeSqlite.openNodeSqliteDatabase;
+    const sharedPath = resolveOpenClawStateSqlitePath(store.env);
+    const spy = vi
+      .spyOn(nodeSqlite, "openNodeSqliteDatabase")
+      .mockImplementation((file, options) => {
+        if (file === sharedPath && !options?.readOnly) {
+          throw Object.assign(new Error("fixture lease storage failure"), { code: "SQLITE_IOERR" });
+        }
+        return openDatabase(file, options);
+      });
+    try {
+      const report = await importLegacyStore(store);
+      expect(report.targets[0]?.issues).toContainEqual(
+        expect.objectContaining({
+          code: "sqlite_compact_failed",
+          message: expect.stringContaining("fixture lease storage failure | SQLITE_IOERR"),
+        }),
+      );
+      expect(fs.readFileSync(store.storePath, "utf8")).toBe("{}\n");
+      const failureReportPath = expectDefined(
+        report.migrationRun?.failureReportMarkdownPath,
+        "failure report",
+      );
+      expect(fs.readFileSync(failureReportPath, "utf8")).toContain(
+        "fixture lease storage failure | SQLITE_IOERR",
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
 
   it("refuses compaction while this process owns an open agent database handle", async () => {
     const { sqlitePath, store } = await createImportedStoreForCompaction();
@@ -2858,6 +3080,78 @@ describe("runDoctorSessionSqlite", () => {
     },
   );
 
+  it("fences quarantine clearing and later recovery targets after an awaited repair loses maintenance", async () => {
+    const { sqlitePath, store } = await createImportedStoreForCompaction();
+    createCanonicalCacheIndexDrift(sqlitePath);
+    const laterPath = resolveOpenClawAgentSqlitePath({ agentId: "later", env: store.env });
+    fs.mkdirSync(path.dirname(laterPath), { recursive: true });
+    const laterBytes = Buffer.from("synthetic corrupt database\n");
+    fs.writeFileSync(laterPath, laterBytes, { mode: 0o600 });
+    for (const databasePath of [sqlitePath, laterPath]) {
+      expect(
+        recordOpenClawDatabaseQuarantine({
+          env: store.env,
+          kind: "agent",
+          path: databasePath,
+          reason: "synthetic recovery quarantine",
+        }),
+      ).toBe(true);
+    }
+    const quarantineBefore = [sqlitePath, laterPath].map((databasePath) =>
+      readOpenClawDatabaseQuarantine(databasePath, { env: store.env }),
+    );
+    const agentDatabase = await import("../state/openclaw-agent-db.js");
+    const migrate = agentDatabase.migrateOpenClawAgentDatabaseForMaintenance;
+    // The competitor must not inherit the maintenance authority being revoked.
+    const claimCompetingLease = AsyncResource.bind(claimOpenClawAgentDatabaseLease);
+    let competingLeaseId: string | undefined;
+    const repair = vi
+      .spyOn(agentDatabase, "migrateOpenClawAgentDatabaseForMaintenance")
+      .mockImplementationOnce(async (options, maintenance) => {
+        await migrate(options, maintenance);
+        // Lose the real owner at the caller's new await boundary, after native repair succeeds.
+        const removed = openOpenClawStateDatabase({ env: store.env })
+          .db.prepare("DELETE FROM state_leases WHERE scope = ? AND lease_key = ?")
+          .run(AGENT_DATABASE_MAINTENANCE_LEASE.scope, AGENT_DATABASE_MAINTENANCE_LEASE.key);
+        expect(removed.changes).toBe(1);
+        competingLeaseId = claimCompetingLease({
+          agentId: "later",
+          path: laterPath,
+          env: store.env,
+        });
+      });
+    try {
+      await expect(
+        recoverDoctorSessionSqliteTargets({
+          env: store.env,
+          options: { mode: "recover" },
+          targets: [
+            { agentId: "main", storePath: sqlitePath },
+            { agentId: "later", storePath: laterPath },
+          ],
+          validateTarget: async () => {
+            throw new Error("Expected direct recovery without a failed migration manifest");
+          },
+        }),
+      ).rejects.toThrow(/maintenance lease.*was lost/iu);
+      expect(competingLeaseId).toBeDefined();
+      expect(
+        [sqlitePath, laterPath].map((databasePath) =>
+          readOpenClawDatabaseQuarantine(databasePath, { env: store.env }),
+        ),
+      ).toEqual(quarantineBefore);
+      expect(fs.readFileSync(laterPath)).toEqual(laterBytes);
+      expect(
+        fs.readdirSync(path.dirname(laterPath)).some((name) => name.includes(".corrupt-")),
+      ).toBe(false);
+    } finally {
+      repair.mockRestore();
+      if (competingLeaseId) {
+        releaseOpenClawAgentDatabaseLease(competingLeaseId, { env: store.env });
+      }
+    }
+  });
+
   it.each(["newer schema", "mismatched older schema", "I/O error"] as const)(
     "keeps canonical-index repair failures in place after %s",
     async (failure) => {
@@ -3031,11 +3325,7 @@ describe("runDoctorSessionSqlite", () => {
       { mode: 0o600 },
     );
 
-    const report = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const report = await importLegacyStore(store);
     const validation = await runDoctorSessionSqlite({
       env: store.env,
       mode: "validate",
@@ -3062,37 +3352,90 @@ describe("runDoctorSessionSqlite", () => {
     ).not.toHaveProperty("sessionFile");
   });
 
-  it("validates missing SQLite rows without creating the agent database", async () => {
-    const store = createLegacyStore();
+  it.each([
+    ["missing row", undefined, 0, false, "sqlite_entry_missing", 0, 0],
+    ["different session", "other", 2, false, "sqlite_entry_mismatch", 0, 0],
+    ["short transcript", "session-1", 1, false, "sqlite_transcript_count_mismatch", 1, 0],
+    ["matching transcript", "session-1", 2, false, undefined, 1, 2],
+    ["longer transcript", "session-1", 3, false, "sqlite_transcript_count_mismatch", 1, 0],
+    ["missing source", "session-1", 2, true, undefined, 1, 2],
+  ] as const)(
+    "validates a %s against SQLite",
+    async (
+      _name,
+      sessionId,
+      eventCount,
+      missingSource,
+      issueCode,
+      validatedEntries,
+      validatedTranscriptEvents,
+    ) => {
+      const events = [
+        { type: "session", id: "session-1", version: 3 },
+        {
+          type: "message",
+          id: "one",
+          parentId: null,
+          message: { role: "user", content: "source" },
+        },
+        {
+          type: "message",
+          id: "two",
+          parentId: "one",
+          message: { role: "assistant", content: "later" },
+        },
+      ];
+      const store = createLegacyStore({
+        transcriptLines: events.slice(0, 2).map((event) => JSON.stringify(event)),
+      });
+      if (sessionId) {
+        await importSqliteSessionRows({
+          agentId: "main",
+          env: store.env,
+          sessionKey: "agent:main:main",
+          storePath: store.storePath,
+          entry: { sessionId, updatedAt: 2000 },
+          readTranscriptEvents: (append) => events.slice(0, eventCount).forEach(append),
+        });
+      }
+      if (missingSource) {
+        fs.rmSync(store.transcriptPath);
+      }
 
-    const report = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "validate",
-      store: store.storePath,
-    });
+      const report = await runDoctorSessionSqlite({
+        env: store.env,
+        mode: "validate",
+        store: store.storePath,
+      });
 
-    expect(report.totals).toMatchObject({
-      issues: 1,
-      sqliteEntries: 0,
-      validatedEntries: 0,
-      validatedTranscriptEvents: 0,
-    });
-    expect(report.targets[0]?.issues[0]).toMatchObject({
-      code: "sqlite_entry_missing",
-      sessionKey: "agent:main:main",
-    });
-    expect(fs.existsSync(report.targets[0]?.sqlitePath ?? "")).toBe(false);
-  });
+      const expectedIssueCodes = [
+        ...(issueCode ? [issueCode] : []),
+        ...(sessionId === "session-1" && !missingSource ? ["active_sqlite_transcript_jsonl"] : []),
+      ];
+      expect(report.totals).toMatchObject({
+        issues: expectedIssueCodes.length,
+        sqliteEntries: sessionId ? 1 : 0,
+        validatedEntries,
+        validatedTranscriptEvents,
+      });
+      expect(report.targets[0]?.issues.map((issue) => issue.code)).toEqual(expectedIssueCodes);
+      if (issueCode) {
+        expect(report.targets[0]?.issues[0]?.sessionKey).toBe("agent:main:main");
+      }
+      expect(fs.existsSync(report.targets[0]?.sqlitePath ?? "")).toBe(Boolean(sessionId));
+      if (eventCount === 3) {
+        const imported = await importLegacyStore(store);
+        expect(imported.targets[0]?.issues).toEqual([]);
+        expect(fs.existsSync(store.transcriptPath)).toBe(false);
+      }
+    },
+  );
 
   it("writes a migration manifest with planned and completed archive moves", async () => {
     const store = createLegacyStore();
     const expectedStorePath = fs.realpathSync.native(store.storePath);
 
-    const report = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const report = await importLegacyStore(store);
     const manifest = readMigrationManifest(report.migrationRun?.manifestPath);
     const target = expectDefined(manifest.targets[0], "manifest.targets[0] test invariant");
 
@@ -3147,11 +3490,7 @@ describe("runDoctorSessionSqlite", () => {
     const replaceFileAtomicSync = vi.spyOn(replaceFile, "replaceFileAtomicSync");
 
     try {
-      const report = await runDoctorSessionSqlite({
-        env: store.env,
-        mode: "import",
-        store: store.storePath,
-      });
+      const report = await importLegacyStore(store);
       const manifest = readMigrationManifest(report.migrationRun?.manifestPath);
       const manifestWrites = replaceFileAtomicSync.mock.calls.filter(([options]) =>
         options.filePath.includes("session-sqlite-migration-runs"),
@@ -3199,11 +3538,7 @@ describe("runDoctorSessionSqlite", () => {
     );
     const expectedPointerPath = canonicalTestPath(pointerPath);
 
-    const report = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const report = await importLegacyStore(store);
     const archivedNames =
       report.targets[0]?.archivedTranscriptFiles.map((filePath) => path.basename(filePath)) ?? [];
 
@@ -3225,11 +3560,7 @@ describe("runDoctorSessionSqlite", () => {
 
   it("restores archived artifacts from the migration manifest", async () => {
     const store = createLegacyStore();
-    const importReport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const importReport = await importLegacyStore(store);
     const manifest = readMigrationManifest(importReport.migrationRun?.manifestPath);
     const sourcePaths = manifest.targets[0]?.plannedMoves.map((move) => move.sourcePath) ?? [];
 
@@ -3256,11 +3587,7 @@ describe("runDoctorSessionSqlite", () => {
     "restores archived artifacts after the replacement SQLite file is removed (allAgents=%s)",
     async (allAgents) => {
       const store = createLegacyStore();
-      const importReport = await runDoctorSessionSqlite({
-        env: store.env,
-        mode: "import",
-        store: store.storePath,
-      });
+      const importReport = await importLegacyStore(store);
       const sqlitePath = importReport.targets[0]?.sqlitePath;
       if (!sqlitePath) {
         throw new Error("expected imported SQLite path");
@@ -3287,11 +3614,7 @@ describe("runDoctorSessionSqlite", () => {
 
   it("restores planned moves when a crash prevented completed move recording", async () => {
     const store = createLegacyStore();
-    const importReport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const importReport = await importLegacyStore(store);
     const manifestPath = requireMigrationManifestPath(importReport.migrationRun?.manifestPath);
     const manifest = readMigrationManifest(manifestPath);
     expectDefined(manifest.targets[0], "manifest.targets[0] test invariant").completedMoves = [];
@@ -3315,7 +3638,7 @@ describe("runDoctorSessionSqlite", () => {
   it("restores the pre-migration session index when several manifests share one store", async () => {
     const store = createLegacyStore();
     const preMigrationIndex = fs.readFileSync(store.storePath, "utf-8");
-    await runDoctorSessionSqlite({ env: store.env, mode: "import", store: store.storePath });
+    await importLegacyStore(store);
     const emptyArchivePaths: string[] = [];
     // Legacy writers recreate an empty index after a migration archived the real one, so later
     // runs archive that empty file. `persistLegacySessionStore` writes exactly these 3 bytes.
@@ -3325,11 +3648,7 @@ describe("runDoctorSessionSqlite", () => {
         setTimeout(resolve, 2);
       });
       fs.writeFileSync(store.storePath, "{}\n", { mode: 0o600 });
-      const importReport = await runDoctorSessionSqlite({
-        env: store.env,
-        mode: "import",
-        store: store.storePath,
-      });
+      const importReport = await importLegacyStore(store);
       const manifest = readMigrationManifest(importReport.migrationRun?.manifestPath);
       emptyArchivePaths.push(
         expectDefined(
@@ -3355,12 +3674,18 @@ describe("runDoctorSessionSqlite", () => {
   });
 
   it("streams duplicate large transcript archives while selecting an identical restore", async () => {
-    const store = createLegacyStore();
-    const importReport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const transcriptLines = [
+      JSON.stringify({ type: "session", id: "session-1", version: 3 }),
+      JSON.stringify({
+        type: "message",
+        id: "large",
+        parentId: null,
+        message: { role: "user", content: "x".repeat(4 * 1024 * 1024) },
+      }),
+    ];
+    const largeTranscript = `${transcriptLines.join("\n")}\n`;
+    const store = createLegacyStore({ transcriptLines });
+    const importReport = await importLegacyStore(store);
     const firstManifestPath = requireMigrationManifestPath(importReport.migrationRun?.manifestPath);
     const firstManifest = readMigrationManifest(firstManifestPath);
     const firstTarget = expectDefined(firstManifest.targets[0], "first migration target");
@@ -3368,22 +3693,24 @@ describe("runDoctorSessionSqlite", () => {
       firstTarget.plannedMoves.find((move) => move.kind === "transcript"),
       "transcript archive move",
     );
-    const largeTranscript = `${JSON.stringify({
-      payload: "x".repeat(4 * 1024 * 1024),
-      type: "event",
-    })}\n`;
-    fs.writeFileSync(transcriptMove.archivePath, largeTranscript, { mode: 0o600 });
-
     const secondArchivePath = `${transcriptMove.archivePath}.duplicate`;
     fs.copyFileSync(transcriptMove.archivePath, secondArchivePath);
+    const duplicateMove = {
+      ...transcriptMove,
+      archivePath: secondArchivePath,
+      artifact: {
+        ...expectDefined(transcriptMove.artifact, "original transcript identity"),
+        identity: migrationArtifact.readMigrationArtifactIdentity(secondArchivePath),
+      },
+    };
     const duplicateManifest = structuredClone(firstManifest);
     duplicateManifest.runId = `${firstManifest.runId}-duplicate`;
     duplicateManifest.startedAt = new Date(Date.parse(firstManifest.startedAt) + 1).toISOString();
     duplicateManifest.targets = [
       {
         ...firstTarget,
-        completedMoves: [{ ...transcriptMove, archivePath: secondArchivePath }],
-        plannedMoves: [{ ...transcriptMove, archivePath: secondArchivePath }],
+        completedMoves: [duplicateMove],
+        plannedMoves: [duplicateMove],
       },
     ];
     const duplicateManifestPath = path.join(
@@ -3415,11 +3742,7 @@ describe("runDoctorSessionSqlite", () => {
   it("fails closed when several manifests contain distinct nonempty session indexes", async () => {
     const store = createLegacyStore();
     const preMigrationIndex = fs.readFileSync(store.storePath, "utf-8");
-    const firstImport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const firstImport = await importLegacyStore(store);
     const firstArchive = expectDefined(
       readMigrationManifest(firstImport.migrationRun?.manifestPath).targets[0]?.plannedMoves.find(
         (move) => move.kind === "legacy-store",
@@ -3432,11 +3755,7 @@ describe("runDoctorSessionSqlite", () => {
     // An older binary can still write real sessions to the legacy store after the migration.
     const laterIndex = `${JSON.stringify({ "agent:main:later": { channel: "cli", chatType: "direct", sessionFile: "session-2.jsonl", sessionId: "session-2", sessionStartedAt: 3000, updatedAt: 4000 } }, null, 2)}\n`;
     fs.writeFileSync(store.storePath, laterIndex, { mode: 0o600 });
-    const secondImport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const secondImport = await importLegacyStore(store);
     const secondArchive = expectDefined(
       readMigrationManifest(secondImport.migrationRun?.manifestPath).targets[0]?.plannedMoves.find(
         (move) => move.kind === "legacy-store",
@@ -3470,11 +3789,7 @@ describe("runDoctorSessionSqlite", () => {
 
   it("does not hide a missing original archive behind a later empty session index", async () => {
     const store = createLegacyStore();
-    const firstImport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const firstImport = await importLegacyStore(store);
     const firstArchive = expectDefined(
       readMigrationManifest(firstImport.migrationRun?.manifestPath).targets[0]?.plannedMoves.find(
         (move) => move.kind === "legacy-store",
@@ -3486,11 +3801,7 @@ describe("runDoctorSessionSqlite", () => {
       setTimeout(resolve, 2);
     });
     fs.writeFileSync(store.storePath, "{}\n", { mode: 0o600 });
-    const secondImport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const secondImport = await importLegacyStore(store);
     const secondArchive = expectDefined(
       readMigrationManifest(secondImport.migrationRun?.manifestPath).targets[0]?.plannedMoves.find(
         (move) => move.kind === "legacy-store",
@@ -3525,11 +3836,7 @@ describe("runDoctorSessionSqlite", () => {
 
   it("does not replace an invalid original archive with a later empty session index", async () => {
     const store = createLegacyStore();
-    const firstImport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const firstImport = await importLegacyStore(store);
     const firstArchive = expectDefined(
       readMigrationManifest(firstImport.migrationRun?.manifestPath).targets[0]?.plannedMoves.find(
         (move) => move.kind === "legacy-store",
@@ -3541,11 +3848,7 @@ describe("runDoctorSessionSqlite", () => {
       setTimeout(resolve, 2);
     });
     fs.writeFileSync(store.storePath, "{}\n", { mode: 0o600 });
-    const secondImport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const secondImport = await importLegacyStore(store);
     const secondArchive = expectDefined(
       readMigrationManifest(secondImport.migrationRun?.manifestPath).targets[0]?.plannedMoves.find(
         (move) => move.kind === "legacy-store",
@@ -3581,11 +3884,7 @@ describe("runDoctorSessionSqlite", () => {
 
   it("keeps restore clean when a later migration re-archived an already restored path", async () => {
     const store = createLegacyStore();
-    const firstImport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const firstImport = await importLegacyStore(store);
     const firstManifestPath = requireMigrationManifestPath(firstImport.migrationRun?.manifestPath);
     const firstArchive = expectDefined(
       readMigrationManifest(firstManifestPath).targets[0]?.plannedMoves.find(
@@ -3609,11 +3908,7 @@ describe("runDoctorSessionSqlite", () => {
     await new Promise((resolve) => {
       setTimeout(resolve, 2);
     });
-    const secondImport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const secondImport = await importLegacyStore(store);
     const secondManifestPath = requireMigrationManifestPath(
       secondImport.migrationRun?.manifestPath,
     );
@@ -3647,7 +3942,7 @@ describe("runDoctorSessionSqlite", () => {
     );
   });
 
-  it("rejects malformed restore manifests without throwing", () => {
+  it("rejects malformed restore manifests without throwing", async () => {
     const store = createLegacyStore();
     const manifestPath = path.join(store.tempDir, "malformed-manifest.json");
     fs.writeFileSync(
@@ -3660,7 +3955,7 @@ describe("runDoctorSessionSqlite", () => {
       { mode: 0o600 },
     );
 
-    const restore = restoreSessionSqliteMigrationRun({
+    const restore = await restoreSessionSqliteMigrationRun({
       manifestPath,
       trustedTargets: [trustedMigrationTarget(store)],
     });
@@ -3680,11 +3975,7 @@ describe("runDoctorSessionSqlite", () => {
 
   it("rejects restore moves outside the manifest target archive boundary", async () => {
     const store = createLegacyStore();
-    const importReport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const importReport = await importLegacyStore(store);
     const manifestPath = requireMigrationManifestPath(importReport.migrationRun?.manifestPath);
     const manifest = readMigrationManifest(manifestPath);
     const target = expectDefined(
@@ -3703,7 +3994,7 @@ describe("runDoctorSessionSqlite", () => {
     target.completedMoves = [unsafeMove];
     fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
 
-    const restore = restoreSessionSqliteMigrationRun({
+    const restore = await restoreSessionSqliteMigrationRun({
       manifestPath,
       trustedTargets: [trustedMigrationTarget(store)],
     });
@@ -3744,11 +4035,7 @@ describe("runDoctorSessionSqlite", () => {
 
   it("rejects a coherently rewritten target that is not trusted by the caller", async () => {
     const store = createLegacyStore();
-    const importReport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const importReport = await importLegacyStore(store);
     const manifestPath = requireMigrationManifestPath(importReport.migrationRun?.manifestPath);
     const manifest = readMigrationManifest(manifestPath);
     const target = expectDefined(
@@ -3775,7 +4062,7 @@ describe("runDoctorSessionSqlite", () => {
     target.completedMoves = [rewrittenMove];
     fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
 
-    const restore = restoreSessionSqliteMigrationRun({
+    const restore = await restoreSessionSqliteMigrationRun({
       manifestPath,
       trustedTargets: [trustedMigrationTarget(store)],
     });
@@ -3793,11 +4080,7 @@ describe("runDoctorSessionSqlite", () => {
 
   it("rejects recovery manifests with a rewritten SQLite path", async () => {
     const store = createLegacyStore();
-    const importReport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const importReport = await importLegacyStore(store);
     const manifestPath = requireMigrationManifestPath(importReport.migrationRun?.manifestPath);
     const manifest = readMigrationManifest(manifestPath);
     const target = expectDefined(
@@ -3825,11 +4108,7 @@ describe("runDoctorSessionSqlite", () => {
     "uses normalized restore paths instead of symlink-parent traversal paths",
     async () => {
       const store = createLegacyStore();
-      const importReport = await runDoctorSessionSqlite({
-        env: store.env,
-        mode: "import",
-        store: store.storePath,
-      });
+      const importReport = await importLegacyStore(store);
       const manifestPath = requireMigrationManifestPath(importReport.migrationRun?.manifestPath);
       const manifest = readMigrationManifest(manifestPath);
       const target = expectDefined(
@@ -3857,7 +4136,7 @@ describe("runDoctorSessionSqlite", () => {
       target.completedMoves = [traversalMove];
       fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
 
-      const restore = restoreSessionSqliteMigrationRun({
+      const restore = await restoreSessionSqliteMigrationRun({
         manifestPath,
         trustedTargets: [trustedMigrationTarget(store)],
       });
@@ -3878,11 +4157,7 @@ describe("runDoctorSessionSqlite", () => {
     "restores version 1 manifests written through a platform root alias",
     async () => {
       const store = createLegacyStore({ tempRoot: lexicalRootTempDir });
-      const importReport = await runDoctorSessionSqlite({
-        env: store.env,
-        mode: "import",
-        store: store.storePath,
-      });
+      const importReport = await importLegacyStore(store);
       const manifestPath = requireMigrationManifestPath(importReport.migrationRun?.manifestPath);
       const manifest = readMigrationManifest(manifestPath);
       const aliasPath = (filePath: string) =>
@@ -3906,7 +4181,7 @@ describe("runDoctorSessionSqlite", () => {
       }
       fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
 
-      const restore = restoreSessionSqliteMigrationRun({
+      const restore = await restoreSessionSqliteMigrationRun({
         manifestPath,
         trustedTargets: [trustedMigrationTarget(store)],
       });
@@ -3922,11 +4197,7 @@ describe("runDoctorSessionSqlite", () => {
     async () => {
       const store = createLegacyStore({ tempRoot: lexicalRootTempDir });
 
-      const report = await runDoctorSessionSqlite({
-        env: store.env,
-        mode: "import",
-        store: store.storePath,
-      });
+      const report = await importLegacyStore(store);
 
       expect(report.totals).toMatchObject({ importedEntries: 1, issues: 0 });
       const manifest = readMigrationManifest(report.migrationRun?.manifestPath);
@@ -3956,11 +4227,7 @@ describe("runDoctorSessionSqlite", () => {
     "rejects version 1 manifests through non-root directory symlinks",
     async () => {
       const store = createLegacyStore();
-      const importReport = await runDoctorSessionSqlite({
-        env: store.env,
-        mode: "import",
-        store: store.storePath,
-      });
+      const importReport = await importLegacyStore(store);
       const manifestPath = requireMigrationManifestPath(importReport.migrationRun?.manifestPath);
       const manifest = readMigrationManifest(manifestPath);
       const target = expectDefined(
@@ -3989,7 +4256,7 @@ describe("runDoctorSessionSqlite", () => {
       fs.renameSync(agentDir, relocatedAgentDir);
       fs.symlinkSync(relocatedAgentDir, agentDir);
 
-      const restore = restoreSessionSqliteMigrationRun({
+      const restore = await restoreSessionSqliteMigrationRun({
         manifestPath,
         trustedTargets: [trustedMigrationTarget(store)],
       });
@@ -4010,11 +4277,7 @@ describe("runDoctorSessionSqlite", () => {
     "rejects a symlinked ancestor shared by restore directories",
     async () => {
       const store = createLegacyStore();
-      const importReport = await runDoctorSessionSqlite({
-        env: store.env,
-        mode: "import",
-        store: store.storePath,
-      });
+      const importReport = await importLegacyStore(store);
       const manifestPath = requireMigrationManifestPath(importReport.migrationRun?.manifestPath);
       const manifest = readMigrationManifest(manifestPath);
       const target = expectDefined(
@@ -4033,7 +4296,7 @@ describe("runDoctorSessionSqlite", () => {
       fs.renameSync(agentDir, relocatedAgentDir);
       fs.symlinkSync(relocatedAgentDir, agentDir);
 
-      const restore = restoreSessionSqliteMigrationRun({
+      const restore = await restoreSessionSqliteMigrationRun({
         manifestPath,
         trustedTargets: [trustedMigrationTarget(store)],
       });
@@ -4054,11 +4317,7 @@ describe("runDoctorSessionSqlite", () => {
     "rejects restores through a symlinked source directory",
     async () => {
       const store = createLegacyStore();
-      const importReport = await runDoctorSessionSqlite({
-        env: store.env,
-        mode: "import",
-        store: store.storePath,
-      });
+      const importReport = await importLegacyStore(store);
       const manifestPath = requireMigrationManifestPath(importReport.migrationRun?.manifestPath);
       const manifest = readMigrationManifest(manifestPath);
       const target = expectDefined(
@@ -4076,7 +4335,7 @@ describe("runDoctorSessionSqlite", () => {
       fs.renameSync(store.sessionDir, relocatedSessionDir);
       fs.symlinkSync(relocatedSessionDir, store.sessionDir);
 
-      const restore = restoreSessionSqliteMigrationRun({
+      const restore = await restoreSessionSqliteMigrationRun({
         manifestPath,
         trustedTargets: [trustedMigrationTarget(store)],
       });
@@ -4097,11 +4356,7 @@ describe("runDoctorSessionSqlite", () => {
     "rejects restores through a symlinked archive directory",
     async () => {
       const store = createLegacyStore();
-      const importReport = await runDoctorSessionSqlite({
-        env: store.env,
-        mode: "import",
-        store: store.storePath,
-      });
+      const importReport = await importLegacyStore(store);
       const manifestPath = requireMigrationManifestPath(importReport.migrationRun?.manifestPath);
       const manifest = readMigrationManifest(manifestPath);
       const target = expectDefined(
@@ -4120,7 +4375,7 @@ describe("runDoctorSessionSqlite", () => {
       fs.renameSync(archiveDir, relocatedArchiveDir);
       fs.symlinkSync(relocatedArchiveDir, archiveDir);
 
-      const restore = restoreSessionSqliteMigrationRun({
+      const restore = await restoreSessionSqliteMigrationRun({
         manifestPath,
         trustedTargets: [trustedMigrationTarget(store)],
       });
@@ -4139,11 +4394,7 @@ describe("runDoctorSessionSqlite", () => {
 
   it.skipIf(process.platform === "win32")("rejects symlinked archive entries", async () => {
     const store = createLegacyStore();
-    const importReport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const importReport = await importLegacyStore(store);
     const manifestPath = requireMigrationManifestPath(importReport.migrationRun?.manifestPath);
     const manifest = readMigrationManifest(manifestPath);
     const target = expectDefined(
@@ -4162,7 +4413,7 @@ describe("runDoctorSessionSqlite", () => {
     fs.rmSync(move.archivePath);
     fs.symlinkSync(outsidePath, move.archivePath);
 
-    const restore = restoreSessionSqliteMigrationRun({
+    const restore = await restoreSessionSqliteMigrationRun({
       manifestPath,
       trustedTargets: [trustedMigrationTarget(store)],
     });
@@ -4181,11 +4432,7 @@ describe("runDoctorSessionSqlite", () => {
 
   it("treats repeated restore as idempotent when files are already restored", async () => {
     const store = createLegacyStore();
-    const importReport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const importReport = await importLegacyStore(store);
     const manifest = readMigrationManifest(importReport.migrationRun?.manifestPath);
     const sourcePaths = manifest.targets[0]?.plannedMoves.map((move) => move.sourcePath) ?? [];
     await runDoctorSessionSqlite({
@@ -4211,11 +4458,7 @@ describe("runDoctorSessionSqlite", () => {
 
   it("does not restore unrelated manifests for an unmatched explicit store selector", async () => {
     const store = createLegacyStore();
-    await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    await importLegacyStore(store);
 
     const restore = await runDoctorSessionSqlite({
       env: store.env,
@@ -4231,11 +4474,7 @@ describe("runDoctorSessionSqlite", () => {
   it("reports restore conflicts without overwriting existing files", async () => {
     const store = createLegacyStore();
     const transcriptPath = canonicalTestPath(store.transcriptPath);
-    await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    await importLegacyStore(store);
     fs.writeFileSync(store.transcriptPath, '{"type":"event","id":"new"}\n', { mode: 0o600 });
 
     const restore = await runDoctorSessionSqlite({
@@ -4253,13 +4492,543 @@ describe("runDoctorSessionSqlite", () => {
     expect(fs.readFileSync(store.transcriptPath, "utf-8")).toBe('{"type":"event","id":"new"}\n');
   });
 
+  it.each(
+    (
+      [
+        { version: 1, destination: "file" },
+        { version: 2, destination: "file" },
+        { version: 1, destination: "dangling-symlink" },
+        { version: 2, destination: "dangling-symlink" },
+      ] as const
+    ).filter(({ destination }) => destination === "file" || process.platform !== "win32"),
+  )(
+    "preserves a late-created $destination during historical v$version restore without SQLite",
+    async ({ version, destination }) => {
+      const { store, manifestPath, manifest, archivePath } = createHistoricalRestoreStore(version);
+      const original = fs.readFileSync(archivePath);
+      const sourcePath = expectDefined(
+        manifest.targets
+          .flatMap((target) => target.plannedMoves)
+          .find((move) => move.archivePath === archivePath),
+        "transcript restore move",
+      ).sourcePath;
+      const competitorPath = path.join(store.tempDir, "competing-writer.jsonl");
+      const competitorContent = "history written by a separate process\n";
+      if (destination === "file") {
+        fs.writeFileSync(competitorPath, competitorContent, { mode: 0o600 });
+      }
+      let competitorIdentity: fs.BigIntStats | undefined;
+      const insertCompetitor = (from: fs.PathLike, to: fs.PathLike) => {
+        if (competitorIdentity || String(from) !== archivePath || String(to) !== sourcePath) {
+          return;
+        }
+        // Insert after every pathname guard, then forward the real publication syscall.
+        execFileSync(
+          process.execPath,
+          [
+            "-e",
+            `const fs = require("node:fs");
+             const [kind, candidate, target] = process.argv.slice(1);
+             if (kind === "file") fs.copyFileSync(candidate, target, fs.constants.COPYFILE_EXCL);
+             else fs.symlinkSync(candidate, target);`,
+            destination,
+            competitorPath,
+            sourcePath,
+          ],
+          { timeout: 10_000 },
+        );
+        competitorIdentity = fs.lstatSync(sourcePath, { bigint: true });
+      };
+      const rename = fs.renameSync;
+      const link = fsPromises.link;
+      const renameSpy = vi.spyOn(fs, "renameSync").mockImplementation((from, to) => {
+        insertCompetitor(from, to);
+        return rename(from, to);
+      });
+      const linkSpy = vi.spyOn(fsPromises, "link").mockImplementation(async (from, to) => {
+        insertCompetitor(from, to);
+        return link(from, to);
+      });
+      let result: Awaited<ReturnType<typeof runPublicSessionSqlite>>;
+      try {
+        result = await runPublicSessionSqlite(store, "restore");
+      } finally {
+        renameSpy.mockRestore();
+        linkSpy.mockRestore();
+      }
+      const created = expectDefined(competitorIdentity, "separate writer ran at publication");
+      const retained = fs.lstatSync(sourcePath, { bigint: true });
+      expect(retained.ino).toBe(created.ino);
+      expect(retained.dev).toBe(created.dev);
+      if (destination === "file") {
+        expect(fs.readFileSync(sourcePath, "utf8")).toBe(competitorContent);
+      } else {
+        expect(retained.isSymbolicLink()).toBe(true);
+        expect(fs.readlinkSync(sourcePath)).toBe(competitorPath);
+        expect(fs.existsSync(competitorPath)).toBe(false);
+      }
+      expect(fs.readFileSync(archivePath)).toEqual(original);
+      expect(result.exitCode).toBe(1);
+      const restored = readMigrationManifest(manifestPath).restore;
+      expect(restored?.conflicts).toEqual(
+        expect.arrayContaining([expect.objectContaining({ archivePath, sourcePath })]),
+      );
+      expect(restored?.consumedArchives ?? []).not.toContain(archivePath);
+      expect(restored?.restoredFiles ?? []).not.toContain(sourcePath);
+      for (const target of manifest.targets) {
+        expect(fs.existsSync(target.sqlitePath)).toBe(false);
+      }
+    },
+  );
+
+  it.each(
+    ([1, 2] as const).flatMap((version) =>
+      (["transcript", "legacy-store"] as const).map((kind) => ({ version, kind })),
+    ),
+  )(
+    "rejects a changed historical v$version $kind before adopting restore metadata",
+    async ({ version, kind }) => {
+      const { store, manifestPath, manifest } = createHistoricalRestoreStore(version);
+      const target = expectDefined(manifest.targets[0], "historical restore target");
+      const move = expectDefined(
+        target.plannedMoves.find((candidate) => candidate.kind === kind),
+        "selected historical archive",
+      );
+      const original = fs.readFileSync(move.archivePath, "utf8");
+      const changed = original.replace('"session-1"', '"session-2"');
+      expect(changed).not.toBe(original);
+      expect(Buffer.byteLength(changed)).toBe(Buffer.byteLength(original));
+      const identity = fs.statSync(move.archivePath, { bigint: true });
+      const duplicate = { ...move, archivePath: `${move.archivePath}.duplicate` };
+      fs.copyFileSync(move.archivePath, duplicate.archivePath);
+      target.plannedMoves.push(duplicate);
+      target.completedMoves.push({ ...duplicate });
+      fs.writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`, { mode: 0o600 });
+
+      const close = fs.closeSync;
+      let injected = false;
+      const closeSpy = vi.spyOn(fs, "closeSync").mockImplementation((fd) => {
+        const opened = fs.fstatSync(fd, { bigint: true });
+        close(fd);
+        if (!injected && opened.dev === identity.dev && opened.ino === identity.ino) {
+          // Change real bytes after the planner closes its verified descriptor, before adoption.
+          injected = true;
+          fs.writeFileSync(move.archivePath, changed);
+        }
+      });
+      let result: Awaited<ReturnType<typeof runPublicSessionSqlite>>;
+      try {
+        result = await runPublicSessionSqlite(store, "restore");
+      } finally {
+        closeSpy.mockRestore();
+      }
+      expect(injected).toBe(true);
+      expect(result.exitCode).toBe(1);
+      expect(result.report.targets[0]?.restore?.conflicts).toEqual([
+        {
+          archivePath: move.archivePath,
+          sourcePath: move.sourcePath,
+          reason: "archive changed after restore planning; refusing restore",
+        },
+      ]);
+      expect(fs.existsSync(move.sourcePath)).toBe(false);
+      expect(fs.readFileSync(move.archivePath, "utf8")).toBe(changed);
+      expect(fs.statSync(move.archivePath, { bigint: true }).ino).toBe(identity.ino);
+      expect(fs.readFileSync(duplicate.archivePath, "utf8")).toBe(original);
+      const recorded = readMigrationManifest(manifestPath);
+      expect(recorded.restore?.consumedArchives ?? []).not.toContain(move.archivePath);
+      expect(recorded.restore?.restoredFiles ?? []).not.toContain(move.sourcePath);
+      const recordedTarget = expectDefined(recorded.targets[0], "recorded historical target");
+      for (const moves of [recordedTarget.plannedMoves, recordedTarget.completedMoves]) {
+        const recordedMove = expectDefined(
+          moves.find((item) => item.archivePath === move.archivePath),
+          "recorded historical original",
+        );
+        expect(recordedMove.artifact).toBeUndefined();
+      }
+      expect(fs.existsSync(target.sqlitePath)).toBe(false);
+    },
+  );
+
+  it.each(
+    ([1, 2] as const).flatMap((version) =>
+      (["restore", "recover"] as const).map((retryMode) => ({ version, retryMode })),
+    ),
+  )(
+    "retries historical v$version restored-directory edge sync through $retryMode",
+    async ({ version, retryMode }) => {
+      const { store, manifestPath, manifest } = createHistoricalRestoreStore(version);
+      const target = expectDefined(manifest.targets[0], "historical restore target");
+      const originals = target.plannedMoves.map((move) => ({
+        ...move,
+        bytes: fs.readFileSync(move.archivePath),
+        identity: fs.statSync(move.archivePath, { bigint: true }),
+      }));
+      if (retryMode === "recover") {
+        manifest.failedAt = manifest.startedAt;
+        fs.writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`, { mode: 0o600 });
+      }
+      fs.rmdirSync(store.sessionDir);
+      const sourceParent = path.dirname(store.sessionDir);
+      const assertOriginalsRetained = () => {
+        expect(readMigrationManifest(manifestPath).restore?.consumedArchives ?? []).toEqual([]);
+        for (const original of originals) {
+          expect(fs.readFileSync(original.archivePath)).toEqual(original.bytes);
+          expect(fs.statSync(original.archivePath, { bigint: true }).ino).toBe(
+            original.identity.ino,
+          );
+          if (fs.existsSync(original.sourcePath)) {
+            expect(fs.readFileSync(original.sourcePath)).toEqual(original.bytes);
+            expect(fs.statSync(original.sourcePath, { bigint: true }).ino).toBe(
+              original.identity.ino,
+            );
+          }
+        }
+        for (const file of resolveSqliteDatabaseFilePaths(target.sqlitePath)) {
+          expect(fs.existsSync(file)).toBe(false);
+        }
+      };
+      const fsync = fs.fsyncSync;
+      let edgeSyncAttempted = false;
+      const syncSpy = vi.spyOn(fs, "fsyncSync").mockImplementation((fd) => {
+        if (isDirectoryDescriptor(fd, sourceParent)) {
+          edgeSyncAttempted = true;
+          throw Object.assign(new Error("injected restored-directory edge sync"), { code: "EIO" });
+        }
+        fsync(fd);
+      });
+      try {
+        const first = await runPublicSessionSqlite(store, "restore");
+        expect(edgeSyncAttempted).toBe(true);
+        expect(first.exitCode).toBe(1);
+        expect(first.report.targets[0]?.restore?.conflicts).toEqual(
+          expect.arrayContaining(
+            originals.map(({ archivePath, sourcePath }) =>
+              expect.objectContaining({ archivePath, sourcePath }),
+            ),
+          ),
+        );
+        expect(fs.statSync(store.sessionDir).isDirectory()).toBe(true);
+        assertOriginalsRetained();
+
+        edgeSyncAttempted = false;
+        await expect(runPublicSessionSqlite(store, retryMode)).rejects.toThrow(
+          "injected restored-directory edge sync",
+        );
+        expect(edgeSyncAttempted).toBe(true);
+        assertOriginalsRetained();
+      } finally {
+        syncSpy.mockRestore();
+      }
+      const resumed = await runPublicSessionSqlite(store, retryMode);
+      expect(resumed.report.targets[0]?.restore?.conflicts).toEqual([]);
+      const consumed = readMigrationManifest(manifestPath).restore?.consumedArchives;
+      expect(consumed).toHaveLength(originals.length);
+      expect(consumed).toEqual(expect.arrayContaining(originals.map((move) => move.archivePath)));
+      for (const original of originals) {
+        expect(fs.readFileSync(original.sourcePath)).toEqual(original.bytes);
+        expect(fs.statSync(original.sourcePath, { bigint: true }).ino).toBe(original.identity.ino);
+        expect(fs.existsSync(original.archivePath)).toBe(false);
+      }
+      for (const file of resolveSqliteDatabaseFilePaths(target.sqlitePath)) {
+        expect(fs.existsSync(file)).toBe(false);
+      }
+    },
+  );
+
+  it.each(
+    ([1, 2] as const).flatMap((version) =>
+      (
+        [
+          { phase: "metadata-write", retryMode: "restore" },
+          { phase: "metadata-sync", retryMode: "restore" },
+          { phase: "target-sync", retryMode: "recover" },
+          { phase: "receipt-write", retryMode: "restore" },
+          { phase: "receipt-sync", retryMode: "recover" },
+          { phase: "archive-unlink", retryMode: "restore" },
+          { phase: "archive-sync", retryMode: "recover" },
+        ] as const
+      ).map(({ phase, retryMode }) => ({ version, phase, retryMode })),
+    ),
+  )(
+    "resumes historical v$version index restore after $phase through $retryMode",
+    async ({ version, phase, retryMode }) => {
+      const { store, manifestPath, manifest } = createHistoricalRestoreStore(version);
+      const target = expectDefined(manifest.targets[0], "historical restore target");
+      const index = expectDefined(
+        target.plannedMoves.find((move) => move.kind === "legacy-store"),
+        "historical index original",
+      );
+      const originals = target.plannedMoves.map((move) => ({
+        ...move,
+        bytes: fs.readFileSync(move.archivePath),
+        identity: fs.statSync(move.archivePath, { bigint: true }),
+      }));
+      const indexOriginal = expectDefined(
+        originals.find((item) => item.kind === "legacy-store"),
+        "historical index bytes",
+      );
+      if (retryMode === "recover") {
+        manifest.failedAt = manifest.startedAt;
+        fs.writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`, { mode: 0o600 });
+      }
+      const manifestDir = path.dirname(manifestPath);
+      const sourceDir = path.dirname(index.sourcePath);
+      const archiveDir = path.dirname(index.archivePath);
+      let injected = false;
+      let replay = false;
+      let failReplaySync = false;
+      let replaySynced = false;
+      let replayUnlinked = false;
+      const hasReceipt = (candidate: SessionSqliteMigrationManifest) =>
+        candidate.restore?.consumedArchives?.includes(index.archivePath) === true;
+      const failManifestPhase = (
+        candidate: SessionSqliteMigrationManifest,
+        boundary: "write" | "sync",
+      ) => {
+        const recorded = candidate.targets
+          .flatMap((item) => item.plannedMoves)
+          .find((move) => move.archivePath === index.archivePath);
+        const expectedPhase = hasReceipt(candidate)
+          ? `receipt-${boundary}`
+          : `metadata-${boundary}`;
+        if (!injected && recorded?.artifact && phase === expectedPhase) {
+          injected = true;
+          throw new Error(`injected ${phase}`);
+        }
+      };
+      const write = replaceFile.replaceFileAtomicSync;
+      const writeSpy = vi
+        .spyOn(replaceFile, "replaceFileAtomicSync")
+        .mockImplementation((options) => {
+          if (options.filePath === manifestPath) {
+            failManifestPhase(
+              JSON.parse(String(options.content)) as SessionSqliteMigrationManifest,
+              "write",
+            );
+          }
+          return write(options);
+        });
+      const fsync = fs.fsyncSync;
+      const fsyncSpy = vi.spyOn(fs, "fsyncSync").mockImplementation((fd) => {
+        if (isDirectoryDescriptor(fd, manifestDir)) {
+          failManifestPhase(readMigrationManifest(manifestPath), "sync");
+        }
+        fsync(fd);
+      });
+      const open = fsPromises.open;
+      const restoreHandleSpies: Array<() => void> = [];
+      const openSpy = vi.spyOn(fsPromises, "open").mockImplementation(async (...args) => {
+        const handle = await open(...args);
+        if (phase === "target-sync" && String(args[0]) === sourceDir) {
+          const sync = handle.sync.bind(handle);
+          const handleSpy = vi.spyOn(handle, "sync").mockImplementation(async () => {
+            if (!injected && fs.existsSync(index.sourcePath) && fs.existsSync(index.archivePath)) {
+              injected = true;
+              throw Object.assign(new Error("injected target-sync"), { code: "EIO" });
+            }
+            return sync();
+          });
+          restoreHandleSpies.push(() => handleSpy.mockRestore());
+        }
+        return handle;
+      });
+      const sync = directoryDurability.syncDirectory;
+      const syncSpy = vi
+        .spyOn(directoryDurability, "syncDirectory")
+        .mockImplementation(async (directory, options) => {
+          const syncingPath = typeof directory === "string" ? directory : directory.path;
+          if (replay && syncingPath === sourceDir) {
+            if (failReplaySync) {
+              throw new Error("injected replay target-sync");
+            }
+            const result = await sync(directory, options);
+            replaySynced = true;
+            return result;
+          }
+          if (
+            !injected &&
+            phase === "archive-sync" &&
+            syncingPath === archiveDir &&
+            !fs.existsSync(index.archivePath)
+          ) {
+            injected = true;
+            throw new Error("injected archive-sync");
+          }
+          return sync(directory, options);
+        });
+      const unlink = fs.unlinkSync;
+      const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation((file) => {
+        if (String(file) === index.archivePath) {
+          if (!injected && phase === "archive-unlink") {
+            injected = true;
+            throw new Error("injected archive-unlink");
+          }
+          if (replay) {
+            expect(replaySynced).toBe(true);
+            replayUnlinked = true;
+          }
+        }
+        return unlink(file);
+      });
+      const copySpy = vi.spyOn(fs, "copyFileSync");
+      const asyncCopySpy = vi.spyOn(fsPromises, "copyFile");
+      try {
+        const failed = await runPublicSessionSqlite(store, "restore");
+        expect(injected).toBe(true);
+        expect(failed.exitCode).toBe(1);
+        expect(failed.report.targets[0]?.restore?.conflicts).toEqual(
+          expect.arrayContaining([expect.objectContaining({ archivePath: index.archivePath })]),
+        );
+        const interrupted = readMigrationManifest(manifestPath);
+        const consumedBeforeRetry = interrupted.restore?.consumedArchives ?? [];
+        if (phase === "metadata-write" || phase === "metadata-sync") {
+          expect(fs.existsSync(index.sourcePath)).toBe(false);
+        } else {
+          expect(fs.readFileSync(index.sourcePath)).toEqual(indexOriginal.bytes);
+        }
+        if (phase !== "archive-sync") {
+          expect(fs.readFileSync(index.archivePath)).toEqual(indexOriginal.bytes);
+        }
+        if (phase === "archive-unlink" || phase === "archive-sync") {
+          expect(consumedBeforeRetry).toContain(index.archivePath);
+        }
+        replay = fs.existsSync(index.sourcePath) && fs.existsSync(index.archivePath);
+        if (phase === "target-sync") {
+          failReplaySync = true;
+          await expect(runPublicSessionSqlite(store, retryMode)).rejects.toThrow(
+            "injected replay target-sync",
+          );
+          expect(fs.statSync(index.sourcePath).nlink).toBe(2);
+          expect(fs.statSync(index.archivePath).ino).toBe(fs.statSync(index.sourcePath).ino);
+          expect(replayUnlinked).toBe(false);
+          failReplaySync = false;
+        }
+        const resumed = await runPublicSessionSqlite(store, retryMode);
+        expect(resumed.report.targets[0]?.restore?.conflicts).toEqual([]);
+        if (replay) {
+          expect(replaySynced).toBe(true);
+          expect(replayUnlinked).toBe(true);
+        }
+        replay = false;
+        const settled = readMigrationManifest(manifestPath);
+        expect(settled.manifestVersion).toBe(version);
+        expect(settled.restore?.consumedArchives).toEqual(
+          expect.arrayContaining(consumedBeforeRetry),
+        );
+        expect(settled.restore?.consumedArchives).toEqual(
+          expect.arrayContaining(originals.map((item) => item.archivePath)),
+        );
+        for (const original of originals) {
+          expect(fs.readFileSync(original.sourcePath)).toEqual(original.bytes);
+          expect(fs.statSync(original.sourcePath, { bigint: true }).ino).toBe(
+            original.identity.ino,
+          );
+          expect(fs.existsSync(original.archivePath)).toBe(false);
+        }
+        for (const file of resolveSqliteDatabaseFilePaths(target.sqlitePath)) {
+          expect(fs.existsSync(file)).toBe(false);
+        }
+        expect(copySpy).not.toHaveBeenCalled();
+        expect(asyncCopySpy).not.toHaveBeenCalled();
+        expect((await runPublicSessionSqlite(store, "import")).report.totals.issues).toBe(0);
+        expect(
+          (await runPublicSessionSqlite(store, "restore")).report.targets[0]?.restore?.conflicts,
+        ).toEqual([]);
+        expect(readMigrationManifest(manifestPath).restore?.consumedArchives).toEqual(
+          expect.arrayContaining(originals.map((item) => item.archivePath)),
+        );
+      } finally {
+        writeSpy.mockRestore();
+        fsyncSpy.mockRestore();
+        openSpy.mockRestore();
+        syncSpy.mockRestore();
+        unlinkSpy.mockRestore();
+        copySpy.mockRestore();
+        asyncCopySpy.mockRestore();
+        for (const restoreSpy of restoreHandleSpies) {
+          restoreSpy();
+        }
+      }
+    },
+  );
+
+  it.each([1, 2] as const)(
+    "protects historical v%s restore metadata and its retained transcript dependency from cleanup",
+    async (version) => {
+      const { store, manifestPath, manifest, archivePath } = createHistoricalRestoreStore(version);
+      const target = expectDefined(manifest.targets[0], "historical cleanup target");
+      const index = expectDefined(
+        target.plannedMoves.find((move) => move.kind === "legacy-store"),
+        "historical index",
+      );
+      const indexIdentity = migrationArtifact.readMigrationArtifactIdentity(index.archivePath);
+      const indexBytes = fs.readFileSync(index.archivePath);
+      const transcriptBytes = fs.readFileSync(archivePath);
+      fs.writeFileSync(store.transcriptPath, "new source history\n", { mode: 0o600 });
+      const link = fsPromises.link;
+      const linkSpy = vi.spyOn(fsPromises, "link").mockImplementation(async (from, to) => {
+        if (String(from) === index.archivePath && String(to) === index.sourcePath) {
+          throw Object.assign(new Error("injected unsupported hard link"), { code: "EXDEV" });
+        }
+        return link(from, to);
+      });
+      const copySpy = vi.spyOn(fs, "copyFileSync");
+      const asyncCopySpy = vi.spyOn(fsPromises, "copyFile");
+      try {
+        const failed = await runPublicSessionSqlite(store, "restore");
+        expect(failed.exitCode).toBe(1);
+        expect(failed.report.targets[0]?.restore?.conflicts).toEqual(
+          expect.arrayContaining([expect.objectContaining({ archivePath: index.archivePath })]),
+        );
+        expect(copySpy).not.toHaveBeenCalled();
+        expect(asyncCopySpy).not.toHaveBeenCalled();
+      } finally {
+        linkSpy.mockRestore();
+        copySpy.mockRestore();
+        asyncCopySpy.mockRestore();
+      }
+      const recorded = readMigrationManifest(manifestPath);
+      expect(recorded.manifestVersion).toBe(version);
+      const indexMoves = [
+        ...recorded.targets[0]!.plannedMoves,
+        ...recorded.targets[0]!.completedMoves,
+      ].filter((move) => move.archivePath === index.archivePath);
+      expect(indexMoves).toHaveLength(2);
+      for (const move of indexMoves) {
+        expect(move.artifact).toMatchObject({
+          classification: "protected",
+          disposal: { state: "retained" },
+          identity: indexIdentity,
+          dependencies: [canonicalTestPath(store.transcriptPath)],
+        });
+      }
+      const preview = inspectSessionSqliteRecovery({ cfg: {}, env: store.env });
+      expect(preview.artifacts.find((item) => item.path === index.archivePath)?.outcome).toBe(
+        "protected",
+      );
+      expect(preview.artifacts.find((item) => item.path === archivePath)).toMatchObject({
+        outcome: "protected",
+        reason: "retained-recovery-dependency",
+      });
+      const cleanup = await retireSessionSqliteRecovery({
+        env: store.env,
+        preview,
+        readConfig: async () => ({}),
+        confirm: async () => true,
+      });
+      expect(cleanup.totals.removedFiles).toBe(0);
+      expect(fs.readFileSync(index.archivePath)).toEqual(indexBytes);
+      expect(fs.readFileSync(archivePath)).toEqual(transcriptBytes);
+      expect(fs.readFileSync(store.transcriptPath, "utf8")).toBe("new source history\n");
+      expect(fs.existsSync(index.sourcePath)).toBe(false);
+      expect(fs.existsSync(target.sqlitePath)).toBe(false);
+    },
+  );
+
   it("recovers the latest failed migration run and prepares a sanitized GitHub issue", async () => {
     const store = createLegacyStore({ agentDirName: "token=supersecret" });
-    const importReport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const importReport = await importLegacyStore(store);
     const manifestPath = requireMigrationManifestPath(importReport.migrationRun?.manifestPath);
     const manifest = readMigrationManifest(manifestPath);
     manifest.failedAt = "2030-01-01T00:00:00.000Z";
@@ -4299,10 +5068,206 @@ describe("runDoctorSessionSqlite", () => {
     if (process.env.HOME) {
       expect(recover.supportIssue?.body).not.toContain(process.env.HOME);
     }
-    expect(recover.supportIssue?.url).toContain("github.com/openclaw/openclaw/issues/new");
+    expect(recover.supportIssue).not.toHaveProperty("url");
   });
 
-  it("keeps truncated GitHub issue bodies on a valid UTF-16 boundary", () => {
+  it.each(["replaced", "missing"] as const)(
+    "refuses a support claim when the saved report is %s during consent",
+    (change) => {
+      const store = createLegacyStore();
+      writeFailedManifest(store, "consent-race.json", "2030-01-01T00:00:00.000Z");
+      const manifestPath = path.join(
+        store.stateDir,
+        "session-sqlite-migration-runs",
+        "consent-race.json",
+      );
+      const { markdownPath } = writeSessionSqliteMigrationFailureReports(manifestPath, {
+        reason: "recovery before consent",
+      });
+      const approved = prepareGithubIssue(
+        expectDefined(createSessionSqliteMigrationFailureIssue(manifestPath), "approved report"),
+      );
+      if (change === "replaced") {
+        writeSessionSqliteMigrationFailureReports(manifestPath, {
+          reason: "another recovery during consent",
+        });
+      } else {
+        fs.unlinkSync(markdownPath);
+      }
+      const manifestBefore = fs.readFileSync(manifestPath);
+
+      expect(
+        claimSessionSqliteMigrationGithubIssue(manifestPath, approved, { assertCurrent: vi.fn() }),
+      ).toBeUndefined();
+      expect(fs.readFileSync(manifestPath)).toEqual(manifestBefore);
+      if (change === "missing") {
+        expect(createSessionSqliteMigrationFailureIssue(manifestPath)).toBeUndefined();
+        expect(fs.existsSync(markdownPath)).toBe(false);
+        return;
+      }
+
+      const current = prepareGithubIssue(
+        expectDefined(createSessionSqliteMigrationFailureIssue(manifestPath), "current report"),
+      );
+      expect(current.marker).not.toBe(approved.marker);
+      expect(
+        claimSessionSqliteMigrationGithubIssue(manifestPath, current, { assertCurrent: vi.fn() }),
+      ).toMatchObject({ issue: { marker: current.marker }, status: "claimed" });
+      expect(readMigrationManifest(manifestPath).failureReports?.githubIssue?.marker).toBe(
+        current.marker,
+      );
+    },
+  );
+
+  it.each([1, 2, 3] as const)(
+    "persists one support issue receipt on a historical v%s manifest",
+    (manifestVersion) => {
+      const store = createLegacyStore();
+      const manifestPath = path.join(store.tempDir, `historical-v${manifestVersion}.json`);
+      const failureJsonPath = path.join(
+        store.tempDir,
+        `historical-v${manifestVersion}.failure.json`,
+      );
+      const failureMarkdownPath = path.join(
+        store.tempDir,
+        `historical-v${manifestVersion}.failure.md`,
+      );
+      const manifest: SessionSqliteMigrationManifest = {
+        failedAt: "2030-01-01T00:00:00.000Z",
+        failureReports: { jsonPath: failureJsonPath, markdownPath: failureMarkdownPath },
+        manifestVersion,
+        openClawVersion: "historical",
+        runId: `historical-v${manifestVersion}`,
+        startedAt: "2030-01-01T00:00:00.000Z",
+        targets: [
+          {
+            ...trustedMigrationTarget(store),
+            completedMoves: [],
+            issues: [{ code: "startup_failure", message: "sanitized failure" }],
+            plannedMoves: [],
+            validationBeforeArchive: "failed",
+          },
+        ],
+      };
+      fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+      const authority = { assertCurrent: vi.fn() };
+      fs.writeFileSync(failureMarkdownPath, `stable sanitized report v${manifestVersion}\n`, {
+        mode: 0o600,
+      });
+      const { marker, title } = prepareGithubIssue(
+        expectDefined(createSessionSqliteMigrationFailureIssue(manifestPath), "historical report"),
+      );
+      const issue = { marker, title };
+
+      expect(claimSessionSqliteMigrationGithubIssue(manifestPath, issue, authority)).toMatchObject({
+        issue: { ...issue, status: "attempted" },
+        status: "claimed",
+      });
+      expect(
+        claimSessionSqliteMigrationGithubIssue(
+          manifestPath,
+          { ...issue, title: "regenerated title must not replace the claim" },
+          authority,
+        ),
+      ).toMatchObject({ issue: { ...issue, status: "attempted" }, status: "existing" });
+
+      writeSessionSqliteMigrationFailureReports(manifestPath, { reason: "retry" });
+      expect(createSessionSqliteMigrationFailureIssue(manifestPath)).toMatchObject({
+        body: expect.stringContaining(`stable sanitized report v${manifestVersion}`),
+        title: issue.title,
+      });
+      const receiptManifest = readMigrationManifest(manifestPath);
+      expect(receiptManifest).toMatchObject({
+        failureReports: { githubIssue: { ...issue, status: "attempted" } },
+        manifestVersion: 4,
+      });
+      fs.writeFileSync(
+        manifestPath,
+        `${JSON.stringify({ ...receiptManifest, manifestVersion }, null, 2)}\n`,
+        { mode: 0o600 },
+      );
+      expect(migrationRun.readSessionSqliteMigrationManifest(manifestPath)).toBeUndefined();
+      fs.writeFileSync(manifestPath, `${JSON.stringify(receiptManifest, null, 2)}\n`, {
+        mode: 0o600,
+      });
+      const beforeHistoricalRewrite = fs.readFileSync(manifestPath, "utf8");
+      expect(simulateHistoricalFailureReportRewrite(manifestPath)).toBe(false);
+      expect(fs.readFileSync(manifestPath, "utf8")).toBe(beforeHistoricalRewrite);
+      expect(
+        claimSessionSqliteMigrationGithubIssue(
+          manifestPath,
+          {
+            marker: `openclaw-report:${"c".repeat(64)}`,
+            title: "regenerated process must not replace the claim",
+          },
+          authority,
+        ),
+      ).toMatchObject({ issue: { ...issue, status: "attempted" }, status: "existing" });
+      const receiptJson = fs.readFileSync(manifestPath, "utf8");
+      expect(receiptJson).not.toContain(`stable sanitized report v${manifestVersion}`);
+      expect(receiptJson).not.toContain("github.com/openclaw/openclaw/issues/");
+      expect(receiptJson).not.toContain("openclaw doctor");
+      expect(receiptJson).not.toContain('"body"');
+      expect(receiptJson).not.toContain("?body=");
+      expect(fs.readFileSync(failureMarkdownPath, "utf8")).toBe(
+        `stable sanitized report v${manifestVersion}\n`,
+      );
+      expect(
+        clearSessionSqliteMigrationGithubIssueClaim(manifestPath, issue.marker, authority),
+      ).toBe(true);
+      const clearedManifest = readMigrationManifest(manifestPath);
+      expect(clearedManifest.manifestVersion).toBe(4);
+      expect(clearedManifest.failureReports).not.toHaveProperty("githubIssue");
+      expect(simulateHistoricalFailureReportRewrite(manifestPath)).toBe(false);
+      expect(authority.assertCurrent).toHaveBeenCalledTimes(4);
+    },
+  );
+
+  it("derives private report paths instead of trusting persisted destinations", () => {
+    const store = createLegacyStore();
+    const manifestPath = path.join(store.tempDir, "path-ownership.json");
+    const expectedJsonPath = path.join(store.tempDir, "path-ownership.failure.json");
+    const expectedMarkdownPath = path.join(store.tempDir, "path-ownership.failure.md");
+    const untrustedJsonPath = path.join(store.tempDir, "untrusted-destination.json");
+    const untrustedMarkdownPath = path.join(store.tempDir, "untrusted-destination.md");
+    const manifest: SessionSqliteMigrationManifest = {
+      failedAt: "2030-01-01T00:00:00.000Z",
+      failureReports: { jsonPath: untrustedJsonPath, markdownPath: untrustedMarkdownPath },
+      manifestVersion: 3,
+      openClawVersion: "test",
+      runId: "path-ownership",
+      startedAt: "2030-01-01T00:00:00.000Z",
+      targets: [
+        {
+          ...trustedMigrationTarget(store),
+          completedMoves: [],
+          issues: [{ code: "startup_failure", message: "sanitized failure" }],
+          plannedMoves: [],
+          validationBeforeArchive: "failed",
+        },
+      ],
+    };
+    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+    fs.writeFileSync(untrustedJsonPath, "private json sentinel\n", { mode: 0o600 });
+    fs.writeFileSync(untrustedMarkdownPath, "private markdown sentinel\n", { mode: 0o600 });
+
+    expect(writeSessionSqliteMigrationFailureReports(manifestPath, { reason: "failed" })).toEqual({
+      jsonPath: expectedJsonPath,
+      markdownPath: expectedMarkdownPath,
+    });
+    expect(createSessionSqliteMigrationFailureIssue(manifestPath)).toMatchObject({
+      body: expect.not.stringContaining("private markdown sentinel"),
+      bodyPath: expectedMarkdownPath,
+    });
+    expect(fs.readFileSync(untrustedJsonPath, "utf8")).toBe("private json sentinel\n");
+    expect(fs.readFileSync(untrustedMarkdownPath, "utf8")).toBe("private markdown sentinel\n");
+    expect(readMigrationManifest(manifestPath).failureReports).toEqual({
+      jsonPath: expectedJsonPath,
+      markdownPath: expectedMarkdownPath,
+    });
+  });
+
+  it("keeps bounded GitHub issue bodies on a valid UTF-16 boundary", () => {
     const store = createLegacyStore();
     const manifestPath = path.join(store.tempDir, "failed-migration.json");
     const unpairedSurrogate =
@@ -4337,7 +5302,7 @@ describe("runDoctorSessionSqlite", () => {
     expect(fieldIssue?.body).toContain(`${"x".repeat(499)}\n`);
     expect(fieldIssue?.body).not.toContain("🎉tail");
     expect(fieldIssue?.body).not.toMatch(unpairedSurrogate);
-    expect(new URL(fieldIssue?.url ?? "").searchParams.get("body")).not.toContain("�");
+    expect(fieldIssue).not.toHaveProperty("url");
 
     for (const [limit, messageCount] of [
       [6_000, 20],
@@ -4366,14 +5331,10 @@ describe("runDoctorSessionSqlite", () => {
 
       writeManifest([...messages, `${marker}🎉tail`]);
       const issue = createSessionSqliteMigrationFailureIssue(manifestPath);
-      const urlBody = new URL(issue?.url ?? "").searchParams.get("body");
-      expect(urlBody).not.toContain("�");
-      expect(urlBody).toContain("truncated for URL");
       expect(issue?.body).not.toMatch(unpairedSurrogate);
+      expect(issue).not.toHaveProperty("url");
       if (limit === 6_000) {
         expect(issue?.body).toContain(`${marker}🎉tail`);
-        expect(urlBody?.split("\n\n...(truncated for URL")[0]).toHaveLength(limit - 1);
-        expect(urlBody).toContain(`${marker}\n\n...(truncated for URL`);
       } else {
         expect(issue?.body).toHaveLength(limit - 1);
         expect(issue?.body.endsWith(marker)).toBe(true);
@@ -4383,11 +5344,7 @@ describe("runDoctorSessionSqlite", () => {
 
   it("recovers only manifests matching an explicit store selector", async () => {
     const store = createLegacyStore();
-    const importReport = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const importReport = await importLegacyStore(store);
     const manifestPath = requireMigrationManifestPath(importReport.migrationRun?.manifestPath);
     const manifest = readMigrationManifest(manifestPath);
     manifest.failedAt = "2030-01-01T00:00:00.000Z";
@@ -4422,6 +5379,54 @@ describe("runDoctorSessionSqlite", () => {
     expect(fs.existsSync(store.transcriptPath)).toBe(true);
   });
 
+  it("explains hard-linked legacy index refusal and supports an independent copy before retry", async () => {
+    const store = createLegacyStore();
+    const snapshotPath = path.join(store.tempDir, "snapshot-sessions.json");
+    const originalBytes = fs.readFileSync(store.storePath);
+    fs.linkSync(store.storePath, snapshotPath);
+
+    const refused = importLegacyStore(store);
+    await expect(refused).rejects.toThrow(store.storePath);
+    await expect(refused).rejects.toThrow("nlink=2");
+    await expect(refused).rejects.toThrow("another hard link references this inode");
+    await expect(refused).rejects.toThrow("backup");
+    await expect(refused).rejects.toThrow("#hard-linked-legacy-artifacts");
+    expect(fs.lstatSync(store.storePath).nlink).toBe(2);
+    expect(fs.readFileSync(store.storePath)).toEqual(originalBytes);
+    expect(fs.readFileSync(snapshotPath)).toEqual(originalBytes);
+    expect(fs.existsSync(store.transcriptPath)).toBe(true);
+
+    const copyPath = path.join(store.sessionDir, "sessions-copy.tmp");
+    fs.copyFileSync(store.storePath, copyPath, fs.constants.COPYFILE_EXCL);
+    expect(fs.readFileSync(copyPath)).toEqual(originalBytes);
+    fs.renameSync(copyPath, store.storePath);
+    expect(fs.lstatSync(store.storePath).nlink).toBe(1);
+    expect((await importLegacyStore(store)).totals.issues).toBe(0);
+    expect(fs.readFileSync(snapshotPath)).toEqual(originalBytes);
+  });
+
+  it("explains hard-linked transcript archive refusal without changing either link", async () => {
+    const store = createLegacyStore();
+    const snapshotPath = path.join(store.tempDir, "snapshot-transcript.jsonl");
+    const originalBytes = fs.readFileSync(store.transcriptPath);
+    fs.linkSync(store.transcriptPath, snapshotPath);
+
+    const report = await importLegacyStore(store);
+    const issue = expectDefined(
+      report.targets[0]?.issues.find((entry) => entry.code === "transcript_archive_failed"),
+      "hard-linked transcript archive refusal",
+    );
+    expect(issue.message).toContain(store.transcriptPath);
+    expect(issue.message).toContain("nlink=2");
+    expect(issue.message).toContain("another hard link references this inode");
+    expect(issue.message).toContain("backup");
+    expect(issue.message).toContain("#hard-linked-legacy-artifacts");
+    expect(fs.lstatSync(store.transcriptPath).nlink).toBe(2);
+    expect(fs.readFileSync(store.transcriptPath)).toEqual(originalBytes);
+    expect(fs.readFileSync(snapshotPath)).toEqual(originalBytes);
+    expect(fs.existsSync(store.storePath)).toBe(true);
+  });
+
   it.skipIf(process.platform === "win32")(
     "rejects symlink-backed legacy stores before migration",
     async () => {
@@ -4430,13 +5435,9 @@ describe("runDoctorSessionSqlite", () => {
       fs.renameSync(store.storePath, realStorePath);
       fs.symlinkSync(realStorePath, store.storePath);
 
-      await expect(
-        runDoctorSessionSqlite({
-          env: store.env,
-          mode: "import",
-          store: store.storePath,
-        }),
-      ).rejects.toThrow("Refusing session SQLite migration through symbolic link");
+      await expect(importLegacyStore(store)).rejects.toThrow(
+        "Refusing session SQLite migration through symbolic link",
+      );
 
       expect(fs.lstatSync(store.storePath).isSymbolicLink()).toBe(true);
       expect(fs.existsSync(realStorePath)).toBe(true);
@@ -4453,13 +5454,9 @@ describe("runDoctorSessionSqlite", () => {
       fs.mkdirSync(outsideArchiveDir, { recursive: true });
       fs.symlinkSync(outsideArchiveDir, archiveDir);
 
-      await expect(
-        runDoctorSessionSqlite({
-          env: store.env,
-          mode: "import",
-          store: store.storePath,
-        }),
-      ).rejects.toThrow("Refusing session SQLite migration through symbolic link");
+      await expect(importLegacyStore(store)).rejects.toThrow(
+        "Refusing session SQLite migration through symbolic link",
+      );
 
       expect(fs.existsSync(store.storePath)).toBe(true);
       expect(fs.existsSync(store.transcriptPath)).toBe(true);
@@ -4504,11 +5501,7 @@ describe("runDoctorSessionSqlite", () => {
         });
       let report;
       try {
-        report = await runDoctorSessionSqlite({
-          env: store.env,
-          mode: "import",
-          store: store.storePath,
-        });
+        report = await importLegacyStore(store);
       } finally {
         spy.mockRestore();
       }
@@ -4567,11 +5560,7 @@ describe("runDoctorSessionSqlite", () => {
     fs.renameSync(store.transcriptPath, outsideTranscriptPath);
     fs.symlinkSync(outsideTranscriptPath, store.transcriptPath);
 
-    const report = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const report = await importLegacyStore(store);
 
     expect(report.targets[0]?.issues).toEqual(
       expect.arrayContaining([
@@ -4588,11 +5577,7 @@ describe("runDoctorSessionSqlite", () => {
   it("imports explicit stores into the agent database owned by the path", async () => {
     const store = createLegacyStore({ agentDirName: "codex-proof" });
 
-    const report = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const report = await importLegacyStore(store);
 
     expect(report.targets[0]?.agentId).toBe("codex-proof");
     expect(report.totals).toMatchObject({
@@ -4615,11 +5600,7 @@ describe("runDoctorSessionSqlite", () => {
     const store = createLegacyStore();
     fs.rmSync(store.transcriptPath);
 
-    const report = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const report = await importLegacyStore(store);
 
     expect(report.totals).toMatchObject({
       importedEntries: 1,
@@ -4914,11 +5895,7 @@ describe("runDoctorSessionSqlite", () => {
   it("reports active JSONL files left beside SQLite-backed sessions", async () => {
     const store = createLegacyStore();
 
-    await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    await importLegacyStore(store);
     fs.writeFileSync(store.transcriptPath, '{"type":"event","id":"heartbeat"}\n', {
       mode: 0o600,
     });
@@ -5240,11 +6217,7 @@ describe("runDoctorSessionSqlite", () => {
       ],
     });
 
-    await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    await importLegacyStore(store);
     fs.writeFileSync(
       store.transcriptPath,
       '{"type":"message","id":"msg-2","message":{"role":"assistant","content":"second"}}\n',
@@ -5254,11 +6227,7 @@ describe("runDoctorSessionSqlite", () => {
       mode: 0o600,
     });
 
-    const report = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const report = await importLegacyStore(store);
 
     expect(report.totals).toMatchObject({
       archivedTranscriptFiles: 0,
@@ -5279,11 +6248,7 @@ describe("runDoctorSessionSqlite", () => {
   it("reports custom explicit store sqlite paths beside the store", async () => {
     const store = createLegacyStore({ customStore: true });
 
-    const report = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const report = await importLegacyStore(store);
 
     expect(report.targets[0]?.sqlitePath).toBe(
       path.join(store.sessionDir, "openclaw-agent.sqlite"),
@@ -5314,11 +6279,7 @@ describe("runDoctorSessionSqlite", () => {
       { mode: 0o600 },
     );
 
-    const report = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const report = await importLegacyStore(store);
 
     expect(report.totals).toMatchObject({
       importedEntries: 1,
@@ -5344,11 +6305,7 @@ describe("runDoctorSessionSqlite", () => {
       transcriptLines: ['{"type":"session","sessionId":"session-1"}', "{bad"],
     });
 
-    const report = await runDoctorSessionSqlite({
-      env: store.env,
-      mode: "import",
-      store: store.storePath,
-    });
+    const report = await importLegacyStore(store);
     const inspect = await runDoctorSessionSqlite({
       env: store.env,
       mode: "inspect",
@@ -5424,11 +6381,7 @@ async function createImportedStoreForCompaction(shared = false): Promise<{
   store: TestStore;
 }> {
   const store = createLegacyStore({ agentDirName: shared ? "alpha" : undefined });
-  const report = await runDoctorSessionSqlite({
-    env: store.env,
-    mode: "import",
-    store: store.storePath,
-  });
+  const report = await importLegacyStore(store);
   let sqlitePath = report.targets[0]?.sqlitePath;
   if (!sqlitePath) {
     throw new Error("expected imported agent SQLite path");
@@ -5598,29 +6551,131 @@ function createCanonicalCacheIndexDrift(sqlitePath: string): void {
   }
 }
 
-async function createVerifiedRecoveryStore(transcriptLines?: string[]) {
-  const store = createLegacyStore({
-    transcriptLines: transcriptLines ?? [
-      JSON.stringify({
-        type: "session",
-        id: "session-1",
-        version: 3,
-        timestamp: "2026-08-30T00:00:00Z",
-        cwd: "/fixture",
-      }),
-      JSON.stringify({
-        type: "message",
-        id: "one",
-        parentId: null,
-        message: { role: "user", content: "preserved history" },
-      }),
+const RECOVERY_TRANSCRIPT_LINES = [
+  JSON.stringify({
+    type: "session",
+    id: "session-1",
+    version: 3,
+    timestamp: "2026-08-30T00:00:00Z",
+    cwd: "/fixture",
+  }),
+  JSON.stringify({
+    type: "message",
+    id: "one",
+    parentId: null,
+    message: { role: "user", content: "preserved history" },
+  }),
+];
+
+function createHistoricalRestoreStore(version: 1 | 2) {
+  const store = createLegacyStore({ transcriptLines: RECOVERY_TRANSCRIPT_LINES });
+  const archiveDir = path.join(path.dirname(store.sessionDir), "session-sqlite-import-archive");
+  const runsDir = path.join(store.stateDir, "session-sqlite-migration-runs");
+  fs.mkdirSync(archiveDir, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(runsDir, { recursive: true, mode: 0o700 });
+  // Model the historical on-disk contract directly; the current importer is not fixture setup.
+  const moves = (
+    [
+      ["transcript", store.transcriptPath],
+      ["trajectory", store.trajectoryPath],
+      ["unreferenced-jsonl", store.unreferencedJsonlPath],
+      ["legacy-store", store.storePath],
+    ] as const
+  ).map(([kind, sourcePath]) => {
+    const archivePath = path.join(archiveDir, `${kind}.${path.basename(sourcePath)}.imported-1`);
+    fs.renameSync(sourcePath, archivePath);
+    return { kind, sourcePath, archivePath };
+  });
+  const manifest: SessionSqliteMigrationManifest = {
+    manifestVersion: version,
+    openClawVersion: "test",
+    runId: `historical-v${version}`,
+    startedAt: "2026-08-30T00:00:00.000Z",
+    completedAt: "2026-08-30T00:00:01.000Z",
+    targets: [
+      {
+        ...trustedMigrationTarget(store),
+        plannedMoves: moves,
+        completedMoves: structuredClone(moves),
+        issues: [],
+        validationBeforeArchive: "passed",
+      },
     ],
+  };
+  const manifestPath = path.join(runsDir, `${manifest.runId}.json`);
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`, { mode: 0o600 });
+  const archivePath = expectDefined(
+    moves.find((move) => move.kind === "transcript"),
+    "historical transcript archive",
+  ).archivePath;
+  return { store, manifestPath, manifest, archivePath };
+}
+
+async function runPublicSessionSqlite(store: TestStore, mode: "import" | "restore" | "recover") {
+  let exitCode: number | undefined;
+  const runtime = {
+    log: vi.fn(),
+    error: vi.fn(),
+    exit: vi.fn((code: number): never => {
+      exitCode = code;
+      throw new ExitError(code);
+    }),
+  };
+  try {
+    await doctorCommand(runtime, {
+      sessionSqlite: mode,
+      sessionSqliteStore: store.storePath,
+      json: true,
+    });
+  } catch (error) {
+    if (!(error instanceof ExitError)) {
+      throw error;
+    }
+  }
+  const output = expectDefined(runtime.log.mock.calls.at(-1)?.[0], "Doctor JSON report");
+  return {
+    exitCode: expectDefined(exitCode, "Doctor exit code"),
+    report: JSON.parse(String(output)) as DoctorSessionSqliteReport,
+  };
+}
+
+function observeRecoveryDirectorySync(
+  manifestDir: string,
+  onSynced: (directory: string) => void,
+): () => void {
+  const sync = directoryDurability.syncDirectory;
+  const asyncSpy = vi
+    .spyOn(directoryDurability, "syncDirectory")
+    .mockImplementation(async (directory, options) => {
+      const result = await sync(directory, options);
+      onSynced(typeof directory === "string" ? directory : directory.path);
+      return result;
+    });
+  const fsync = fs.fsyncSync;
+  const syncSpy = vi.spyOn(fs, "fsyncSync").mockImplementation((fd) => {
+    fsync(fd);
+    if (isDirectoryDescriptor(fd, manifestDir)) {
+      onSynced(manifestDir);
+    }
   });
-  const imported = await runDoctorSessionSqlite({
-    env: store.env,
-    mode: "import",
-    store: store.storePath,
-  });
+  return () => {
+    asyncSpy.mockRestore();
+    syncSpy.mockRestore();
+  };
+}
+
+function isDirectoryDescriptor(fd: number, directory: string): boolean {
+  const opened = fs.fstatSync(fd);
+  if (!opened.isDirectory()) {
+    return false;
+  }
+  const expected = fs.statSync(directory);
+  return opened.dev === expected.dev && opened.ino === expected.ino;
+}
+
+async function createVerifiedRecoveryStore(transcriptLines = RECOVERY_TRANSCRIPT_LINES) {
+  const store = createLegacyStore({ transcriptLines });
+  const imported = await importLegacyStore(store);
   expect(imported.targets[0]?.issues).toEqual([]);
   const manifest = readMigrationManifest(imported.migrationRun?.manifestPath);
   const archivePath = manifest.targets[0]!.completedMoves.find(
@@ -5762,11 +6817,38 @@ function createLegacyStore(
   };
 }
 
+function importLegacyStore(store: TestStore): Promise<DoctorSessionSqliteReport> {
+  return runDoctorSessionSqlite({
+    env: store.env,
+    mode: "import",
+    store: store.storePath,
+  });
+}
+
 function readMigrationManifest(manifestPath: string | undefined): SessionSqliteMigrationManifest {
   if (!manifestPath) {
     throw new Error("expected migration manifest path");
   }
   return JSON.parse(fs.readFileSync(manifestPath, "utf-8")) as SessionSqliteMigrationManifest;
+}
+
+function simulateHistoricalFailureReportRewrite(manifestPath: string): boolean {
+  const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+    failureReports?: { jsonPath?: unknown; markdownPath?: unknown };
+    manifestVersion?: unknown;
+    [key: string]: unknown;
+  };
+  // Released Doctors accept only v1-v3. Their schema strips the unknown receipt
+  // before the failure-report writer atomically serializes the parsed manifest.
+  if (![1, 2, 3].includes(parsed.manifestVersion as number) || !parsed.failureReports) {
+    return false;
+  }
+  parsed.failureReports = {
+    jsonPath: parsed.failureReports.jsonPath,
+    markdownPath: parsed.failureReports.markdownPath,
+  };
+  fs.writeFileSync(manifestPath, `${JSON.stringify(parsed, null, 2)}\n`, { mode: 0o600 });
+  return true;
 }
 
 function requireMigrationManifestPath(manifestPath: string | undefined): string {

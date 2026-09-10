@@ -67,6 +67,19 @@ export function isPendingMigrationArtifactClaim(
   );
 }
 
+function formatMigrationArtifactRefusal(filePath: string, stat: fs.BigIntStats): string {
+  if (!stat.isFile() || stat.nlink <= 1n) {
+    return "artifact is not an unaliased regular file";
+  }
+  return (
+    `Artifact ${filePath} is not an unaliased regular file ` +
+    `(nlink=${stat.nlink}, dev=${stat.dev}, inode=${stat.ino}): ` +
+    "another hard link references this inode; the migration refuses aliased inputs so a snapshot copy cannot be rewritten in place. " +
+    "Stop the Gateway and make a verified backup, then follow the recovery guidance: " +
+    "https://docs.openclaw.ai/cli/doctor/sqlite-maintenance#hard-linked-legacy-artifacts"
+  );
+}
+
 /** Descriptor reads are bounded; identity and content are checked before and after hashing. */
 export function readMigrationArtifactIdentity(
   filePath: string,
@@ -75,7 +88,7 @@ export function readMigrationArtifactIdentity(
 ): MigrationArtifactIdentity {
   const before = fs.lstatSync(filePath, { bigint: true });
   if (!before.isFile() || before.nlink !== expectedLinks) {
-    throw new Error("artifact is not an unaliased regular file");
+    throw new Error(formatMigrationArtifactRefusal(filePath, before));
   }
   if (
     importedFingerprint &&
@@ -146,6 +159,7 @@ export async function moveMigrationArtifact(
   sourcePath: string,
   targetPath: string,
   expected: MigrationArtifactIdentity,
+  onPublished?: () => undefined,
 ): Promise<void> {
   if (!fs.lstatSync(targetPath, { bigint: true, throwIfNoEntry: false })) {
     if (!sameMigrationArtifact(readMigrationArtifactIdentity(sourcePath), expected)) {
@@ -159,8 +173,19 @@ export async function moveMigrationArtifact(
       onSyncFailure: "preserve",
     });
     requireDirectorySync(published.directorySync, "Recovery artifact publication");
+  } else {
+    // A preserved link may have outlived a failed directory sync. Make its name durable
+    // before an interrupted move can remove the original name.
+    requireDirectorySync(
+      await syncDirectory(path.dirname(targetPath)),
+      "Recovery artifact publication",
+    );
   }
   assertMigrationArtifactPublication(sourcePath, targetPath, expected);
+  if (onPublished) {
+    onPublished();
+    assertMigrationArtifactPublication(sourcePath, targetPath, expected);
+  }
   fs.unlinkSync(sourcePath);
   requireDirectorySync(await syncDirectory(path.dirname(sourcePath)), "Recovery artifact source");
   if (!sameMigrationArtifact(readMigrationArtifactIdentity(targetPath), expected)) {
@@ -169,7 +194,7 @@ export async function moveMigrationArtifact(
 }
 
 /** Only the recorded exact two-name inode can finish or undo an interrupted publication. */
-export function assertMigrationArtifactPublication(
+function assertMigrationArtifactPublication(
   sourcePath: string,
   targetPath: string,
   expected: MigrationArtifactIdentity,
