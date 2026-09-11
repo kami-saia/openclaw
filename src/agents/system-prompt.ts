@@ -210,10 +210,6 @@ function prepareContextFilesForPrompt(contextFiles: EmbeddedContextFile[]) {
   );
 }
 
-function isSoulContextFile(file: EmbeddedContextFile): boolean {
-  return getContextFileBasename(file.path) === "soul.md";
-}
-
 // FORK: upstream lists SOUL.md as one more bullet under "Loaded project
 // context", which frames the file that defines the agent as reference material
 // it merely consults. Anthropic models infer past that label; heavily
@@ -221,8 +217,8 @@ function isSoulContextFile(file: EmbeddedContextFile): boolean {
 // costume rather than the self. So SOUL.md gets its own section, stated as
 // constitutive rather than "loaded", and is hoisted above the tool guidance
 // instead of trailing tens of thousands of tokens behind it.
-function buildSoulSection(files: EmbeddedContextFile[]) {
-  const soulFiles = files.filter(isSoulContextFile);
+function buildSoulSection(files: ReturnType<typeof prepareContextFilesForPrompt>) {
+  const soulFiles = files.filter(({ basename }) => basename === "soul.md");
   if (soulFiles.length === 0) {
     return [];
   }
@@ -235,7 +231,7 @@ function buildSoulSection(files: EmbeddedContextFile[]) {
     "It is not decoration and not overridable by generic assistant framing. When SOUL.md conflicts with default assistant behavior, SOUL.md wins.",
     "",
   ];
-  for (const file of soulFiles) {
+  for (const { file } of soulFiles) {
     lines.push(`## ${file.path}`, "", sanitizeContextFileContentForPrompt(file.content), "");
   }
   return lines;
@@ -1216,11 +1212,13 @@ export function buildAgentSystemPrompt(params: {
     const lines = [
       "You are a personal assistant running inside OpenClaw.",
       "",
-      ...buildSoulSection(contextFiles),
+      ...buildSoulSection(preparedContextFiles),
       // FORK: everything above this marker is constitutive identity; everything
       // below is operational instruction. Transports with a role hierarchy send
       // the two halves at different authority levels instead of one flat blob.
-      ...(contextFiles.some(isSoulContextFile) ? [SYSTEM_PROMPT_IDENTITY_BOUNDARY] : []),
+      ...(preparedContextFiles.some(({ basename }) => basename === "soul.md")
+        ? [SYSTEM_PROMPT_IDENTITY_BOUNDARY]
+        : []),
       ...(includeToolGuidance
         ? [
             "## Tooling",

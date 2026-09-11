@@ -49,10 +49,10 @@ export function resolveSkillWorkshopConfig(config?: OpenClawConfig): SkillWorksh
     autonomous: {
       mode: readAutonomousMode(autonomous.mode, DEFAULT_CONFIG.autonomous.mode),
     },
-    trustAgentSkillAdmin: readBooleanOr(
-      raw.trustAgentSkillAdmin,
-      DEFAULT_CONFIG.trustAgentSkillAdmin,
-    ),
+    trustAgentSkillAdmin:
+      typeof raw.trustAgentSkillAdmin === "boolean"
+        ? raw.trustAgentSkillAdmin
+        : DEFAULT_CONFIG.trustAgentSkillAdmin,
     approvalPolicy: readApprovalPolicy(raw.approvalPolicy, DEFAULT_CONFIG.approvalPolicy),
     maxPending: readInteger(raw.maxPending, DEFAULT_CONFIG.maxPending, 1, 200),
     maxSkillBytes: readInteger(raw.maxSkillBytes, DEFAULT_CONFIG.maxSkillBytes, 1024, 200_000),
