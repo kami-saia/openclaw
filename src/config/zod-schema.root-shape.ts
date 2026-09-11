@@ -490,6 +490,7 @@ export const OpenClawSchemaShape = {
             .optional(),
           approvalPolicy: z.union([z.literal("pending"), z.literal("auto")]).optional(),
           trustAgentSkillAdmin: z.boolean().optional(),
+          skillsDir: z.string().optional(),
           maxPending: z.number().int().min(1).optional(),
           maxSkillBytes: z.number().int().min(1).optional(),
         })

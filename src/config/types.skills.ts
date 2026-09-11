@@ -69,6 +69,14 @@ export type SkillsWorkshopConfig = {
    * apply user-authored skills directly. Preserve across upstream merges.
    */
   trustAgentSkillAdmin?: boolean;
+  /**
+   * Fork-only: absolute (or ~-relative) directory that holds this agent's
+   * Workshop skill collection. Unset keeps the upstream per-agent state
+   * location. Set it to a git-tracked path so applied skills are versioned
+   * where they live instead of needing an export job. Preserve across
+   * upstream merges.
+   */
+  skillsDir?: string;
   /** Whether proposal lifecycle actions need explicit approval. */
   approvalPolicy?: "pending" | "auto";
   /** Maximum pending/quarantined proposals retained per workspace. */
