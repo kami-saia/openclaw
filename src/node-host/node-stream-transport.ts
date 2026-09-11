@@ -87,29 +87,6 @@ function websocketOptions(
 // FORK: node-owned targets are loopback-only, but `localhost` resolution is
 // host-config dependent: a machine whose /etc/hosts names ::1 `ip6-localhost`
 // (not `localhost`) yields a v4-only lookup, so a target bound to ::1 gets
-// ECONNREFUSED instead of a Happy Eyeballs fallback. Resolve loopback from
-// constants and let autoSelectFamily race both families.
-const LOOPBACK_ADDRESSES: { address: string; family: number }[] = [
-  { address: "127.0.0.1", family: 4 },
-  { address: "::1", family: 6 },
-];
-
-const loopbackLookup: net.LookupFunction = (
-  _hostname: string,
-  options: Parameters<net.LookupFunction>[1],
-  callback: Parameters<net.LookupFunction>[2],
-): void => {
-  if (options && typeof options === "object" && options.all) {
-    // SAFETY: options.all selects the all-addresses callback overload of net.LookupFunction.
-    (callback as (err: null, addresses: { address: string; family: number }[]) => void)(
-      null,
-      LOOPBACK_ADDRESSES,
-    );
-    return;
-  }
-  callback(null, LOOPBACK_ADDRESSES[0]!.address, LOOPBACK_ADDRESSES[0]!.family);
-};
-
 async function waitForSocketConnect(socket: net.Socket): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     socket.once("connect", resolve);

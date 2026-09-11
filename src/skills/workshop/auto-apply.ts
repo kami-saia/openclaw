@@ -16,7 +16,7 @@ export async function autoApplySkillProposal(
   params: {
     workspaceDir: string;
     agentId?: string;
-    config?: OpenClawConfig;
+    config: OpenClawConfig;
     env?: NodeJS.ProcessEnv;
     proposalId: string;
     skillName: string;
@@ -29,7 +29,7 @@ export async function autoApplySkillProposal(
     const applied = await deps.apply({
       workspaceDir: params.workspaceDir,
       ...(params.agentId ? { agentId: params.agentId } : {}),
-      ...(params.config ? { config: params.config } : {}),
+      config: params.config,
       ...(params.env ? { env: params.env } : {}),
       proposalId: params.proposalId,
       reason: "Autonomous self-learning capture",

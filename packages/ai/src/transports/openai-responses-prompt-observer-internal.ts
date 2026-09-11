@@ -18,8 +18,10 @@ function readFinalResponsesPrompt(
   }
   const input = Array.isArray(request.input) ? request.input : [];
   const message = input.find((item) => {
+    // SAFETY: probing an unknown input item for a role field; result compared, never trusted.
     const role = (item as EasyInputMessage).role;
     return role === "developer" || role === "system";
+    // SAFETY: find() matched on the role discriminant checked in the predicate above.
   }) as EasyInputMessage | undefined;
   if (!message) {
     return ["missing", ""] as const;
@@ -87,6 +89,7 @@ function isEgressTextPart(part: unknown): part is { type: string; text: string }
   if (typeof part !== "object" || part === null) {
     return false;
   }
+  // SAFETY: guarded by the object typeof check above; both fields re-validated below.
   const candidate = part as { type?: unknown; text?: unknown };
   return typeof candidate.text === "string" && typeof candidate.type === "string";
 }
@@ -102,6 +105,7 @@ function dumpResponsesEgressPayload(
   try {
     const input = Array.isArray(request.input) ? request.input : [];
     const messages = input.flatMap((item) => {
+      // SAFETY: unknown input item narrowed to optional-unknown fields; role checked below.
       const message = item as { role?: unknown; content?: unknown; type?: unknown };
       if (typeof message.role !== "string") {
         return [];

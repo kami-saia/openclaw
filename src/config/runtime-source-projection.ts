@@ -13,7 +13,9 @@ export function projectConfigOntoRuntimeSourceSnapshot(config: OpenClawConfig): 
   if (config === runtimeConfigSnapshot) {
     return runtimeConfigSourceSnapshot;
   }
+  // SAFETY: snapshot is a non-null config object; widened only for key enumeration.
   const runtime = runtimeConfigSnapshot as Record<string, unknown>;
+  // SAFETY: config is a non-null config object; widened only for hasOwn/key reads.
   const candidate = config as Record<string, unknown>;
   for (const key of Object.keys(runtime)) {
     if (!Object.hasOwn(candidate, key)) {
@@ -33,6 +35,7 @@ export function projectConfigOntoRuntimeSourceSnapshot(config: OpenClawConfig): 
     runtimeConfigSourceSnapshot,
     runtimeConfigSnapshot,
     config,
+    // SAFETY: projection preserves the source snapshot shape verified key-by-key above.
   ) as OpenClawConfig;
 }
 
@@ -50,5 +53,6 @@ export function projectLegacyRuntimeConfigWrite(
     projectRuntimeChangesOntoSource(sourceSnapshot, runtimeSnapshot, config, {
       pruneUnauthoredDeletions: true,
     }),
+    // SAFETY: projection of a config onto a config snapshot; empty object is a valid config.
   ) ?? {}) as OpenClawConfig;
 }

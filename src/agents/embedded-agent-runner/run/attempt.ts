@@ -22,10 +22,7 @@ import { log } from "../logger.js";
 import { remapSkillReferencePaths } from "../sandbox-skills.js";
 import { prepareEmbeddedSkills } from "../skill-runtime.js";
 // FORK: overflow fallback session-manager registry.
-import {
-  registerAgentOverflowSessionManager,
-  unregisterAgentOverflowSessionManager,
-} from "./agent-overflow-fallback.js";
+import { unregisterAgentOverflowSessionManager } from "./agent-overflow-fallback.js";
 import { prepareEmbeddedAttemptBootstrap } from "./attempt-bootstrap-prepare.js";
 import { prepareEmbeddedAttemptBundleTools } from "./attempt-bundle-tools.js";
 import { runEmbeddedAttemptExecutionPhase } from "./attempt-execution-phase.js";

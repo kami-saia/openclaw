@@ -193,7 +193,6 @@ export const forkFireAndForgetTesting = {
     forkFireAndForget = true;
   },
 };
-const SESSIONS_SEND_REPLY_HISTORY_LIMIT = 50;
 const SESSIONS_SEND_MESSAGE_ALIASES = ["SendMessage", "content", "text"] as const;
 const NO_REPLY_MESSAGE = "No visible reply or pending announcement. Continue or retry if needed.";
 

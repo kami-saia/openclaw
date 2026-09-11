@@ -504,7 +504,7 @@ export class TelegramPollingSession {
           });
           this.opts.log(`[telegram][diag] isolated polling offset queued updateId=${updateId}`);
           ackSpooledUpdate(message.requestId, { ok: true, updateId });
-          requestImmediateDrain();
+          ingressMonitor.requestDrain();
         })();
         return;
       }

@@ -495,7 +495,7 @@ extensions/github-copilot/login.ts	2
 extensions/github-copilot/models.ts	3
 extensions/github-copilot/oauth.ts	1
 extensions/github-copilot/replay-policy.ts	2
-extensions/github-copilot/runtime-auth.ts	2
+extensions/github-copilot/runtime-auth.ts	1
 extensions/github-copilot/stream.ts	3
 extensions/github-copilot/usage.ts	1
 extensions/google-meet/index.ts	1
@@ -1244,7 +1244,6 @@ extensions/telegram/src/sticker-cache-store.legacy-state.ts	1
 extensions/telegram/src/target-writeback.test-shared.ts	12
 extensions/telegram/src/telegram-ingress-drain-factory.ts	1
 extensions/telegram/src/telegram-ingress-drain.ts	5
-extensions/telegram/src/telegram-ingress-spool.ts	1
 extensions/telegram/src/telegram-ingress-supersede-auth.ts	10
 extensions/telegram/src/telegram-ingress-supersede.ts	7
 extensions/telegram/src/telegram-ingress-worker.runtime.ts	4
@@ -1468,7 +1467,6 @@ packages/ai/src/transports/openai-responses-contracts.ts	1
 packages/ai/src/transports/openai-responses-debug.ts	12
 packages/ai/src/transports/openai-responses-params-internal.ts	9
 packages/ai/src/transports/openai-responses-payload-policy.ts	3
-packages/ai/src/transports/openai-responses-prompt-observer-internal.ts	2
 packages/ai/src/transports/openai-responses-replay-internal.ts	11
 packages/ai/src/transports/openai-responses-replay-messages-internal.ts	15
 packages/ai/src/transports/openai-responses-stream-internal.ts	2
@@ -2542,7 +2540,6 @@ src/config/plugins-allowlist.ts	1
 src/config/redact-snapshot.ts	4
 src/config/runtime-overrides.ts	2
 src/config/runtime-snapshot.ts	1
-src/config/runtime-source-projection.ts	3
 src/config/schema.ts	1
 src/config/sessions/archive-compression.ts	1
 src/config/sessions/cleanup-service.ts	3
@@ -3226,7 +3223,6 @@ src/plugin-sdk/discord.ts	3
 src/plugin-sdk/extension-shared.ts	6
 src/plugin-sdk/facade-activation-check.runtime.ts	2
 src/plugin-sdk/facade-loader.ts	4
-src/plugin-sdk/facade-runtime.ts	1
 src/plugin-sdk/file-lock.ts	10
 src/plugin-sdk/inbound-reply-dispatch.ts	1
 src/plugin-sdk/lazy-value.ts	1

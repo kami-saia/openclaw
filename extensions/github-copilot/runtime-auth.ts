@@ -30,9 +30,13 @@ function parseCopilotApiBaseUrl(value: unknown, domain: string): string {
   if (!value || typeof value !== "object") {
     throw new Error("Unexpected response from GitHub Copilot user endpoint");
   }
+  // SAFETY: guarded by the object typeof check above; property read stays unknown.
   const endpoints = (value as { endpoints?: unknown }).endpoints;
   const api =
-    endpoints && typeof endpoints === "object" ? (endpoints as { api?: unknown }).api : undefined;
+    endpoints && typeof endpoints === "object"
+      ? // SAFETY: guarded by the typeof check in this same expression.
+        (endpoints as { api?: unknown }).api
+      : undefined;
   if (api === undefined || api === null || api === "") {
     return copilotApiBaseFallback(domain);
   }
@@ -89,10 +93,12 @@ async function exchangeCopilotApiToken(params: {
     return undefined;
   }
   const payload = await readProviderJsonResponse(response, "github-copilot.token");
+  // SAFETY: readProviderJsonResponse returns parsed JSON; value validated as string below.
   const token = (payload as { token?: unknown }).token;
   if (typeof token !== "string" || !token.trim()) {
     return undefined;
   }
+  // SAFETY: readProviderJsonResponse returns parsed JSON; value re-validated before use.
   const expiresAtSeconds = (payload as { expires_at?: unknown }).expires_at;
   let baseUrl: string | undefined;
   try {

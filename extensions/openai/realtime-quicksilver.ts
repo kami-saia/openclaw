@@ -26,6 +26,7 @@ export function isSupportedOpenAIGptLiveModel(model: string | undefined): boolea
     return false;
   }
   const normalized = model.trim().toLowerCase();
+  // SAFETY: widening for the readonly-tuple includes() signature; membership is the test itself.
   return OPENAI_GPT_LIVE_MODELS.includes(normalized as (typeof OPENAI_GPT_LIVE_MODELS)[number]);
 }
 

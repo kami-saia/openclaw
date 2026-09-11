@@ -1,4 +1,3 @@
-import { resolveStorePath } from "../../plugin-sdk/session-store-runtime.js";
 import {
   claimSessionSkillCaptureSignals,
   readSessionSkillCaptureSignalHashes,
@@ -11,6 +10,7 @@ import { sha256Hex } from "../../infra/crypto-digest.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 // Research autocapture helpers coordinate replay-safe capture and suggestion state.
 import { KeyedAsyncQueue } from "../../plugin-sdk/keyed-async-queue.js";
+import { resolveStorePath } from "../../plugin-sdk/session-store-runtime.js";
 import { readWorkspaceSkillFile } from "../lifecycle/workspace-skill-write.js";
 import { autoApplySkillProposal } from "../workshop/auto-apply.js";
 import { resolveSkillWorkshopConfig } from "../workshop/config.js";
@@ -22,8 +22,8 @@ import {
   proposeUpdateSkill,
   reviseSkillProposal,
 } from "../workshop/service.js";
-import { listWritableWorkspaceSkillSummaries } from "../workshop/workspace-skill-read.js";
 import { resolveSkillProposalTarget } from "../workshop/store.js";
+import { listWritableWorkshopSkillSummaries } from "../workshop/workspace-skill-read.js";
 import {
   type DurableInstruction,
   extractDurableInstructions,
@@ -227,6 +227,13 @@ export async function runSkillResearchAutoCapture(params: {
   if (!workspaceDir) {
     return;
   }
+  // FORK: upstream moved the Workshop store from workspace-scoped to agent-scoped;
+  // both the active agent id and a resolved config are now mandatory for every call.
+  const config = params.config;
+  const agentId = params.ctx.agentId;
+  if (!config || !agentId) {
+    return;
+  }
   if (!isSkillResearchAutoCaptureEligible(params.ctx)) {
     return;
   }
@@ -267,9 +274,9 @@ export async function runSkillResearchAutoCapture(params: {
 
     // Discovery runs only after cheap signal extraction, and uses the same writable status as
     // proposeUpdateSkill (including .agents/skills project skills).
-    const existingSkills = listWritableWorkspaceSkillSummaries(workspaceDir, {
-      config: params.config,
-      agentId: params.ctx.agentId,
+    const existingSkills = listWritableWorkshopSkillSummaries({
+      config,
+      agentId,
     });
     const proposals = groupDurableInstructionProposals({
       instructions,
@@ -279,7 +286,7 @@ export async function runSkillResearchAutoCapture(params: {
       return;
     }
 
-    const manifest = await listSkillProposals({ workspaceDir });
+    const manifest = await listSkillProposals({ agentId, config });
     const allInstructionSignalHashes = instructionSignalHashes(instructions);
     if (workshopConfig.autonomous.mode === "off") {
       const proposal = proposals.at(-1);
@@ -307,8 +314,9 @@ export async function runSkillResearchAutoCapture(params: {
       try {
         if (!proposal.existingSkill) {
           const target = resolveSkillProposalTarget({
-            workspaceDir,
             skillName: proposal.skillName,
+            config,
+            agentId,
           });
           if ((await readWorkspaceSkillFile(target.skillFile)) !== null) {
             await recordSessionSkillCaptureSignals({
@@ -375,7 +383,7 @@ export async function runSkillResearchAutoCapture(params: {
           | NonNullable<Awaited<ReturnType<typeof inspectSkillProposal>>>
           | undefined;
         for (const entry of pendingEntries) {
-          const inspected = await inspectSkillProposal(entry.id, { workspaceDir });
+          const inspected = await inspectSkillProposal(entry.id, { agentId, config });
           if (inspected?.record.createdBy === "skill-workshop") {
             autocapturePending = inspected;
             break;
@@ -391,12 +399,13 @@ export async function runSkillResearchAutoCapture(params: {
         const matched = existingSkills.find((entry) => entry.name === proposal.skillName);
         const skillFile =
           matched?.filePath ??
-          resolveSkillProposalTarget({ workspaceDir, skillName: proposal.skillName }).skillFile;
+          resolveSkillProposalTarget({ skillName: proposal.skillName, config, agentId }).skillFile;
         const existingSkill = await readWorkspaceSkillFile(skillFile);
         const result = autocapturePending
           ? await reviseSkillProposal({
               workspaceDir,
-              config: params.config,
+              config,
+              agentId,
               proposalId: autocapturePending.record.id,
               content: buildAutoCaptureUpdateContent(
                 stripProposalFrontmatterForSkill(autocapturePending.content),
@@ -409,7 +418,8 @@ export async function runSkillResearchAutoCapture(params: {
           : existingSkill === null
             ? await proposeCreateSkill({
                 workspaceDir,
-                config: params.config,
+                config,
+                agentId,
                 name: proposal.skillName,
                 description: proposal.description,
                 content: proposal.content,
@@ -421,8 +431,8 @@ export async function runSkillResearchAutoCapture(params: {
               })
             : await proposeUpdateSkill({
                 workspaceDir,
-                config: params.config,
-                agentId: params.ctx.agentId,
+                config,
+                agentId,
                 skillName: proposal.skillName,
                 description: proposal.description,
                 content: buildAutoCaptureUpdateContent(existingSkill, proposal.content),
@@ -441,8 +451,8 @@ export async function runSkillResearchAutoCapture(params: {
         ) {
           await autoApplySkillProposal({
             workspaceDir,
-            ...(params.ctx.agentId ? { agentId: params.ctx.agentId } : {}),
-            ...(params.config ? { config: params.config } : {}),
+            agentId,
+            config,
             proposalId: result.record.id,
             skillName: result.record.target.skillName,
           });
