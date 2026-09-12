@@ -2,7 +2,6 @@ import type {
   DesktopObserveResult,
   DesktopSource,
   EnvironmentSummary,
-  WorkerDesktopLaunchResult,
 } from "@openclaw/gateway-protocol";
 import type { ControlUiFocusBuildTarget } from "@openclaw/session-url-contract";
 import { html, nothing } from "lit";
@@ -30,6 +29,7 @@ import {
 } from "./desktop-panel-connection.ts";
 import { desktopCredentialRequirement, rfbCredentials } from "./desktop-panel-credentials.ts";
 import { DesktopPanelFullscreenController } from "./desktop-panel-fullscreen-controller.ts";
+import { requestDesktopAppLaunch } from "./desktop-panel-launch.ts";
 import { desktopPanelLayout } from "./desktop-panel-layout.ts";
 import { type DesktopPanelState, renderDesktopPanelRecovery } from "./desktop-panel-state.ts";
 import { desktopPanelElementStyles } from "./desktop-panel-styles.ts";
@@ -593,20 +593,16 @@ class OpenClawDesktopPanel extends OpenClawLitElement {
     const operationId = ++this.launchOperationId;
     this.launchingApp = app;
     this.launchErrorText = null;
-    try {
-      await client.request<WorkerDesktopLaunchResult>("desktop.launch", {
-        source,
-        app,
-      });
-      if (operationId !== this.launchOperationId) {
-        return;
-      }
-    } catch (error) {
-      if (operationId !== this.launchOperationId) {
-        return;
-      }
-      this.launchErrorText = formatUiError(error);
+    const outcome = await requestDesktopAppLaunch({
+      client,
+      source,
+      app,
+      isStale: () => operationId !== this.launchOperationId,
+    });
+    if (outcome.stale) {
+      return;
     }
+    this.launchErrorText = outcome.errorText;
     this.launchingApp = null;
   }
 

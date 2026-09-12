@@ -66,6 +66,7 @@ import {
   type ResolvePluginNodeCapabilityRoute,
 } from "./server-http-plugin-auth.js";
 import { handleGatewayProbeRequest } from "./server-http-probes.js";
+import { isWebSocketUpgradeRequest } from "./server-http-upgrades.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
 import type { HooksRequestHandler } from "./server/hooks-request-handler.js";
 import { runWithGatewayHttpWorkAdmission } from "./server/http-work-admission.js";
@@ -139,20 +140,6 @@ const getHttpAuthUtilsModule = createLazyRuntimeModule(() => import("./http-auth
 const getPluginRouteRuntimeScopesModule = createLazyRuntimeModule(
   () => import("./server/plugin-route-runtime-scopes.js"),
 );
-
-function isWebSocketUpgradeRequest(req: IncomingMessage): boolean {
-  const headerContains = (value: string | readonly string[] | undefined, token: string) =>
-    (typeof value === "string" ? [value] : (value ?? [])).some((entry) =>
-      entry
-        .toLowerCase()
-        .split(",")
-        .some((part) => part.trim() === token),
-    );
-  return (
-    headerContains(req.headers.upgrade, "websocket") &&
-    headerContains(req.headers.connection, "upgrade")
-  );
-}
 
 type GatewayHttpRequestStage = () => Promise<boolean> | boolean;
 
@@ -769,4 +756,4 @@ export function createGatewayHttpServer(opts: {
   return httpServer;
 }
 
-export { attachGatewayUpgradeHandler } from "./server-http-upgrades.js";
+export { attachGatewayUpgradeHandler, isWebSocketUpgradeRequest } from "./server-http-upgrades.js";

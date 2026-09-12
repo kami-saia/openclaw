@@ -52,13 +52,17 @@ const EGRESS_DUMP_CONTROL_FILE = "/home/damon/.openclaw/workspace/tmp/egress-dum
 
 function readEgressDumpPath(): string | undefined {
   const raw = process.env.OPENCLAW_EGRESS_PAYLOAD_DUMP;
-  if (typeof raw === "string" && raw.trim().length > 0) return raw.trim();
+  if (typeof raw === "string" && raw.trim().length > 0) {
+    return raw.trim();
+  }
   // Fallback: a control file. The gateway runs under a systemd user unit whose
   // manager is unreachable from the agent's mount namespace, so its Environment=
   // cannot be reloaded. Presence of this file enables the dump; its contents are
   // the destination path. Delete the file to turn the dump off.
   const now = Date.now();
-  if (now - egressControlCheckedAt < EGRESS_CONTROL_TTL_MS) return egressControlCached;
+  if (now - egressControlCheckedAt < EGRESS_CONTROL_TTL_MS) {
+    return egressControlCached;
+  }
   egressControlCheckedAt = now;
   try {
     const fromFile = readFileSync(EGRESS_DUMP_CONTROL_FILE, "utf8").trim();
