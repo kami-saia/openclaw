@@ -110,7 +110,7 @@ async function readWorkspaceState(dir: string): Promise<{
   bootstrapSeededAt?: string;
   setupCompletedAt?: string;
 }> {
-  return readWorkspaceStateSnapshot(dir).setup;
+  return (await readWorkspaceStateSnapshot(dir)).setup;
 }
 
 async function writeLegacyWorkspaceState(dir: string, state: unknown): Promise<void> {
@@ -182,9 +182,9 @@ describe("ensureAgentWorkspace", () => {
     const seededAt = "2026-07-31T12:00:00.000Z";
     await fs.mkdir(workspace);
     await fs.symlink(workspace, workspaceAlias, process.platform === "win32" ? "junction" : "dir");
-    mergeWorkspaceSetupState(workspace, { bootstrapSeededAt: seededAt }, Date.now(), options);
+    await mergeWorkspaceSetupState(workspace, { bootstrapSeededAt: seededAt }, Date.now(), options);
 
-    expect(readWorkspaceStateSnapshot(workspaceAlias, options).setup).toEqual({
+    expect((await readWorkspaceStateSnapshot(workspaceAlias, options)).setup).toEqual({
       version: 1,
       bootstrapSeededAt: seededAt,
     });
@@ -198,7 +198,7 @@ describe("ensureAgentWorkspace", () => {
     await expectBootstrapSeeded(tempDir);
     await expectNoLegacyWorkspaceStateWrites(tempDir);
     expect((await readWorkspaceState(tempDir)).setupCompletedAt).toBeUndefined();
-    expect(readWorkspaceStateSnapshot(tempDir).attestation).toBeDefined();
+    expect((await readWorkspaceStateSnapshot(tempDir)).attestation).toBeDefined();
   });
 
   it("does not overwrite a foreign root workspace-state.json file", async () => {
@@ -226,13 +226,13 @@ describe("ensureAgentWorkspace", () => {
     await expect(
       fs.access(path.join(tempDir, ...LEGACY_WORKSPACE_STATE_PATH_SEGMENTS)),
     ).resolves.toBeUndefined();
-    expect(readWorkspaceStateSnapshot(tempDir).setupExists).toBe(false);
+    expect((await readWorkspaceStateSnapshot(tempDir)).setupExists).toBe(false);
   });
 
   it("requires Doctor when partial SQLite state coexists with legacy setup state", async () => {
     const tempDir = await makeTempWorkspace("openclaw-workspace-");
     const seededAt = "2026-07-15T10:00:00.000Z";
-    mergeWorkspaceSetupState(tempDir, { bootstrapSeededAt: seededAt });
+    await mergeWorkspaceSetupState(tempDir, { bootstrapSeededAt: seededAt });
     await writeLegacyWorkspaceState(tempDir, {
       version: 1,
       setupCompletedAt: "2026-07-15T10:01:00.000Z",
@@ -244,7 +244,7 @@ describe("ensureAgentWorkspace", () => {
     await expect(
       fs.access(path.join(tempDir, ...LEGACY_WORKSPACE_STATE_PATH_SEGMENTS)),
     ).resolves.toBeUndefined();
-    expect(readWorkspaceStateSnapshot(tempDir).setup).toEqual({
+    expect((await readWorkspaceStateSnapshot(tempDir)).setup).toEqual({
       version: 1,
       bootstrapSeededAt: seededAt,
     });
@@ -253,7 +253,7 @@ describe("ensureAgentWorkspace", () => {
   it("refuses to re-seed a recently attested workspace after the directory disappears", async () => {
     const tempDir = await makeTempWorkspace("openclaw-workspace-");
     await ensureAgentWorkspace({ dir: tempDir, ensureBootstrapFiles: true });
-    expect(readWorkspaceStateSnapshot(tempDir).attestation).toBeDefined();
+    expect((await readWorkspaceStateSnapshot(tempDir)).attestation).toBeDefined();
 
     await fs.rm(tempDir, { recursive: true, force: true });
 
@@ -274,7 +274,7 @@ describe("ensureAgentWorkspace", () => {
       ensureAgentWorkspace({ dir: tempDir, ensureBootstrapFiles: true }),
     );
     await expectPathMissing(path.join(tempDir, DEFAULT_BOOTSTRAP_FILENAME));
-    expect(readWorkspaceStateSnapshot(tempDir).setupExists).toBe(true);
+    expect((await readWorkspaceStateSnapshot(tempDir)).setupExists).toBe(true);
   });
 
   it("refuses to re-seed a recently attested workspace after only generated remnants survive", async () => {
@@ -290,15 +290,15 @@ describe("ensureAgentWorkspace", () => {
       ensureAgentWorkspace({ dir: tempDir, ensureBootstrapFiles: true }),
     );
     await expectPathMissing(path.join(tempDir, DEFAULT_BOOTSTRAP_FILENAME));
-    expect(readWorkspaceStateSnapshot(tempDir).setupExists).toBe(true);
+    expect((await readWorkspaceStateSnapshot(tempDir)).setupExists).toBe(true);
   });
 
   it("refuses to re-seed a future-attested workspace after only generated remnants survive", async () => {
     const tempDir = await makeTempWorkspace("openclaw-workspace-");
     await ensureAgentWorkspace({ dir: tempDir, ensureBootstrapFiles: true });
-    const snapshot = readWorkspaceStateSnapshot(tempDir);
+    const snapshot = await readWorkspaceStateSnapshot(tempDir);
     const generatedAgents = await fs.readFile(path.join(tempDir, DEFAULT_AGENTS_FILENAME), "utf-8");
-    replaceWorkspaceAttestation({
+    await replaceWorkspaceAttestation({
       workspaceDir: tempDir,
       attestedAtMs: Date.now() + 60_000,
       generatedHashes: snapshot.attestation!.generatedHashes,
@@ -332,11 +332,11 @@ describe("ensureAgentWorkspace", () => {
     const tempDir = await makeTempWorkspace("openclaw-workspace-");
     const oldGeneratedAgents = "old generated agents\n";
     await fs.writeFile(path.join(tempDir, DEFAULT_AGENTS_FILENAME), oldGeneratedAgents);
-    mergeWorkspaceSetupState(tempDir, {
+    await mergeWorkspaceSetupState(tempDir, {
       bootstrapSeededAt: "2026-07-15T10:00:00.000Z",
       setupCompletedAt: "2026-07-15T10:01:00.000Z",
     });
-    replaceWorkspaceAttestation({
+    await replaceWorkspaceAttestation({
       workspaceDir: tempDir,
       attestedAtMs: Date.now(),
       generatedHashes: new Map([
@@ -373,7 +373,7 @@ describe("ensureAgentWorkspace", () => {
     await fs.rm(tempDir, { recursive: true, force: true });
     await fs.mkdir(tempDir, { recursive: true });
     await fs.writeFile(path.join(tempDir, DEFAULT_AGENTS_FILENAME), generatedAgents);
-    replaceWorkspaceAttestation({
+    await replaceWorkspaceAttestation({
       workspaceDir: tempDir,
       attestedAtMs: Date.now(),
       generatedHashes: new Map(),
@@ -483,7 +483,7 @@ describe("ensureAgentWorkspace", () => {
   it("allows a brand new workspace when its SQLite attestation is stale", async () => {
     const tempDir = await makeTempWorkspace("openclaw-workspace-");
     const expiredAtMs = Date.now() - 25 * 60 * 60 * 1000;
-    mergeWorkspaceSetupState(
+    await mergeWorkspaceSetupState(
       tempDir,
       {
         bootstrapSeededAt: "2026-07-15T10:00:00.000Z",
@@ -491,7 +491,7 @@ describe("ensureAgentWorkspace", () => {
       },
       expiredAtMs,
     );
-    replaceWorkspaceAttestation({
+    await replaceWorkspaceAttestation({
       workspaceDir: tempDir,
       attestedAtMs: expiredAtMs,
       generatedHashes: new Map(),
@@ -507,7 +507,7 @@ describe("ensureAgentWorkspace", () => {
   it("clears expired setup state when a wiped workspace retains only .git", async () => {
     const tempDir = await makeTempWorkspace("openclaw-workspace-");
     const expiredAtMs = Date.now() - 25 * 60 * 60 * 1000;
-    mergeWorkspaceSetupState(
+    await mergeWorkspaceSetupState(
       tempDir,
       {
         bootstrapSeededAt: "2026-07-15T10:00:00.000Z",
@@ -515,7 +515,7 @@ describe("ensureAgentWorkspace", () => {
       },
       expiredAtMs,
     );
-    replaceWorkspaceAttestation({
+    await replaceWorkspaceAttestation({
       workspaceDir: tempDir,
       attestedAtMs: expiredAtMs,
       generatedHashes: new Map(),
@@ -531,7 +531,7 @@ describe("ensureAgentWorkspace", () => {
 
   it("clears expired setup-only state before reseeding an empty workspace", async () => {
     const tempDir = await makeTempWorkspace("openclaw-workspace-");
-    mergeWorkspaceSetupState(
+    await mergeWorkspaceSetupState(
       tempDir,
       {
         bootstrapSeededAt: "2026-07-15T10:00:00.000Z",
@@ -557,12 +557,12 @@ describe("ensureAgentWorkspace", () => {
     ).rejects.toThrow(/run openclaw doctor --fix/u);
 
     expect(await fs.readFile(attestationPath, "utf-8")).toBe(marker);
-    expect(readWorkspaceStateSnapshot(tempDir).setupExists).toBe(false);
+    expect((await readWorkspaceStateSnapshot(tempDir)).setupExists).toBe(false);
   });
 
   it("requires Doctor when SQLite setup state coexists with a legacy attestation", async () => {
     const tempDir = await makeTempWorkspace("openclaw-workspace-");
-    mergeWorkspaceSetupState(tempDir, {
+    await mergeWorkspaceSetupState(tempDir, {
       bootstrapSeededAt: "2026-07-15T10:00:00.000Z",
     });
     const attestationPath = `${tempDir}.attested`;
@@ -574,7 +574,7 @@ describe("ensureAgentWorkspace", () => {
     ).rejects.toThrow(/run openclaw doctor --fix/u);
 
     expect(await fs.readFile(attestationPath, "utf-8")).toBe(marker);
-    expect(readWorkspaceStateSnapshot(tempDir).setupExists).toBe(true);
+    expect((await readWorkspaceStateSnapshot(tempDir)).setupExists).toBe(true);
   });
 
   it("ignores and preserves a foreign sibling attestation file", async () => {
@@ -922,7 +922,7 @@ describe("ensureAgentWorkspace", () => {
     const tempDir = await makeTempWorkspace("openclaw-workspace-");
     const agentsPath = path.join(tempDir, DEFAULT_AGENTS_FILENAME);
     await fs.writeFile(agentsPath, "custom agents instructions\n", "utf8");
-    mergeWorkspaceSetupState(tempDir, {
+    await mergeWorkspaceSetupState(tempDir, {
       bootstrapSeededAt: "2026-07-15T10:00:00.000Z",
     });
     const realAccess = fs.access.bind(fs);
@@ -930,7 +930,7 @@ describe("ensureAgentWorkspace", () => {
     const accessSpy = vi.spyOn(fs, "access").mockImplementation(async (filePath, mode) => {
       if (!completed && filePath === agentsPath) {
         completed = true;
-        mergeWorkspaceSetupState(tempDir, {
+        await mergeWorkspaceSetupState(tempDir, {
           setupCompletedAt: "2026-07-15T10:01:00.000Z",
         });
       }

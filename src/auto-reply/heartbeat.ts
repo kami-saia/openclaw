@@ -13,33 +13,12 @@ export const HEARTBEAT_PROMPT = `${HEARTBEAT_CONTEXT_PROMPT} If nothing needs at
 export const HEARTBEAT_RESPONSE_TOOL_INSTRUCTIONS =
   "Use heartbeat_respond to report the wake outcome. Set notify=false when nothing needs the user's attention. Set notify=true with notificationText only when the user should be interrupted.";
 export const HEARTBEAT_RESPONSE_TOOL_PROMPT = `${HEARTBEAT_CONTEXT_PROMPT} ${HEARTBEAT_RESPONSE_TOOL_INSTRUCTIONS}`;
-export const HEARTBEAT_TRANSCRIPT_PROMPT = "[OpenClaw heartbeat poll]";
-// Event-driven wakes reuse the heartbeat runner but are session-scoped: they fire
-// because work started by *this* session finished, not because the interval sweep
-// came due. Without a distinct marker both render identically in the transcript and
-// are impossible to tell apart when auditing which session a poll belongs to.
-export const HEARTBEAT_EXEC_EVENT_TRANSCRIPT_PROMPT =
-  "[OpenClaw heartbeat poll: background exec completed]";
-export const HEARTBEAT_CRON_EVENT_TRANSCRIPT_PROMPT =
-  "[OpenClaw heartbeat poll: scheduled automation event]";
-/** All transcript markers that identify an internal heartbeat prompt row. */
-export const HEARTBEAT_TRANSCRIPT_PROMPTS = [
-  HEARTBEAT_TRANSCRIPT_PROMPT,
-  HEARTBEAT_EXEC_EVENT_TRANSCRIPT_PROMPT,
-  HEARTBEAT_CRON_EVENT_TRANSCRIPT_PROMPT,
-] as const;
-
-/** Pick the transcript marker for a heartbeat run based on its wake provider. */
-export function resolveHeartbeatTranscriptPrompt(provider?: string): string {
-  const trimmed = provider?.trim();
-  if (trimmed === "exec-event") {
-    return HEARTBEAT_EXEC_EVENT_TRANSCRIPT_PROMPT;
-  }
-  if (trimmed === "cron-event") {
-    return HEARTBEAT_CRON_EVENT_TRANSCRIPT_PROMPT;
-  }
-  return HEARTBEAT_TRANSCRIPT_PROMPT;
-}
+export const INTERNAL_WAKE_TRANSCRIPT_PROMPTS = {
+  heartbeat: "[OpenClaw heartbeat poll]",
+  exec: "[OpenClaw exec completion]",
+  cron: "[OpenClaw cron wake]",
+  event: "[OpenClaw session event]",
+} as const;
 export const DEFAULT_HEARTBEAT_EVERY = "30m";
 export const DEFAULT_HEARTBEAT_ACK_MAX_CHARS = 300;
 

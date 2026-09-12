@@ -178,21 +178,6 @@ function handleBudgetedGatewayWebSocketUpgrade(params: {
   }
 }
 
-/** True when the request carries both `Upgrade: websocket` and `Connection: upgrade`. */
-export function isWebSocketUpgradeRequest(req: IncomingMessage): boolean {
-  const headerContains = (value: string | readonly string[] | undefined, token: string) =>
-    (typeof value === "string" ? [value] : (value ?? [])).some((entry) =>
-      entry
-        .toLowerCase()
-        .split(",")
-        .some((part) => part.trim() === token),
-    );
-  return (
-    headerContains(req.headers.upgrade, "websocket") &&
-    headerContains(req.headers.connection, "upgrade")
-  );
-}
-
 /** Attaches WebSocket and plugin-upgrade routing to an already-created HTTP server. */
 export function attachGatewayUpgradeHandler(opts: {
   httpServer: HttpServer;

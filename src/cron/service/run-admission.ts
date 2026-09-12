@@ -17,6 +17,7 @@ import { enrollForeignReceipt } from "./foreign-receipt-monitor.js";
 import { recomputeJobNextRunAtMs } from "./jobs-scheduling.js";
 import { locked } from "./locked.js";
 import { runWithCronAdmission } from "./run-admission-capacity.js";
+import { skipCronJobsWithoutOwners } from "./run-owner.js";
 import {
   activateServiceCronRunReceiptInDatabase,
   claimServiceCronRunReceiptInDatabase,
@@ -145,6 +146,7 @@ export async function cleanupQueuedCronRunReservations(params: {
             }
             if (runningMatches) {
               delete job.state.runningAtMs;
+              delete job.state.runningReceiptId;
             }
             if (params.recompute && job.enabled && job.state.nextRunAtMs === undefined) {
               recomputeJobNextRunAtMs({
@@ -227,8 +229,24 @@ export async function persistQueuedCronRunReservations(params: {
   candidates: readonly CronJob[];
   immediateJobIds?: ReadonlySet<string>;
   reservedAtMs: number;
+  scheduleMode?: "advance" | "preserve";
+  manualRun?: {
+    runId?: string;
+    terminalTracker?: { emitted: boolean };
+    scheduleOwnershipAtMs?: number;
+  };
 }): Promise<Array<{ job: CronJob; runReceipt: CronRunReceiptHandle }>> {
-  const pendingJobs = new Map(params.candidates.map((job) => [job.id, structuredClone(job)]));
+  // Manual runs reach reservations without the scheduler's earlier owner filter.
+  const candidates = skipCronJobsWithoutOwners(
+    params.state,
+    [...params.candidates],
+    params.reservedAtMs,
+    {
+      ...(params.scheduleMode ? { scheduleMode: params.scheduleMode } : {}),
+      ...(params.manualRun ? { manualRun: params.manualRun } : {}),
+    },
+  );
+  const pendingJobs = new Map(candidates.map((job) => [job.id, structuredClone(job)]));
   const preparedClaims = new Map(
     [...pendingJobs].map(([jobId, job]) => [
       jobId,
@@ -403,6 +421,7 @@ export async function activateQueuedCronRun(params: {
           ] as const;
           delete current.state.queuedAtMs;
           current.state.runningAtMs = startedAt;
+          current.state.runningReceiptId = runReceipt.receiptId;
           current.state.lastError = undefined;
           return { value, upsertJobIds: [current.id] };
         },
@@ -452,6 +471,7 @@ export async function activateQueuedCronRun(params: {
         }
         current.state.lastError = previousLastError;
         delete current.state.runningAtMs;
+        delete current.state.runningReceiptId;
         return { value: current, upsertJobIds: [current.id] };
       },
     });

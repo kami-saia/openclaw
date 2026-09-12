@@ -1,7 +1,7 @@
 {
   "id": "workboard",
   "categories": [
-    "tools"
+    "productivity"
   ],
   "cliCommands": [
     {
@@ -223,9 +223,9 @@
     "properties": {}
   },
   "controlUi": {
-    "entry": "dist/control-ui/f1138a8b8713a4bdbda0187775eb49b557a9913ee4ed3ed658eda1adaa568584/index.js",
+    "entry": "dist/control-ui/149758a6a632176d55ff36c81cb80bc3b20a7e8e8e95bbe5d53518fc4484c8d8/index.js",
     "styles": [
-      "dist/control-ui/f1138a8b8713a4bdbda0187775eb49b557a9913ee4ed3ed658eda1adaa568584/index.css"
+      "dist/control-ui/149758a6a632176d55ff36c81cb80bc3b20a7e8e8e95bbe5d53518fc4484c8d8/index.css"
     ]
   }
 }

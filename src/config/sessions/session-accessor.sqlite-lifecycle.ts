@@ -27,6 +27,7 @@ import type {
   ResetSessionEntryLifecycleResult,
   SessionLifecycleArtifactCleanupParams,
   SessionLifecycleArtifactCleanupResult,
+  SqliteSessionArtifactPreparationDiagnostics,
   SqliteSessionReclamationDiagnostics,
 } from "./session-accessor.sqlite-contract.js";
 import {
@@ -44,8 +45,8 @@ import {
   writeSessionEntry,
 } from "./session-accessor.sqlite-entry-store.js";
 import { emitArchivedTranscriptUpdates } from "./session-accessor.sqlite-events.js";
+import { planSessionLifecycleArtifactCleanup } from "./session-accessor.sqlite-lifecycle-artifacts.js";
 import {
-  planSessionLifecycleArtifactCleanup,
   planSessionStateDeleteIfUnreferenced,
   readSessionGenerationIdsForKeys,
   planSessionStateAfterEntryRemoval,
@@ -141,22 +142,29 @@ export async function cleanupSessionLifecycleArtifactsCore(
   if (!withOpenClawAgentDatabaseReadOnly(() => true, databaseOptions).found) {
     return { removedEntries: 0, archivedTranscriptArtifacts: 0 };
   }
+  const artifactPreparation: SqliteSessionArtifactPreparationDiagnostics = {};
   const cleanupPlan = await runExclusiveSqliteSessionWrite(
     resolved,
     async () =>
-      withSqliteSessionDatabase(databaseOptions, (database) =>
-        planSessionLifecycleArtifactCleanup(database, {
-          ...(params.agentId !== undefined ? { agentId: resolved.agentId } : {}),
-          archiveRemovedEntryTranscripts: params.archiveRemovedEntryTranscripts !== false,
-          archiveDirectory: resolveSqliteTranscriptArchiveDirectory(resolved),
-          ...(pluginOwnerId ? { pluginOwnerId } : {}),
-          sessionKeySegmentPrefix,
-          transcriptContentMarker,
-          orphanTranscriptMinAgeMs: params.orphanTranscriptMinAgeMs,
-          nowMs: params.nowMs ?? Date.now(),
-        }),
+      withSqliteSessionDatabase(
+        databaseOptions,
+        (database) =>
+          planSessionLifecycleArtifactCleanup(database, {
+            ...(params.agentId !== undefined ? { agentId: resolved.agentId } : {}),
+            archiveRemovedEntryTranscripts: params.archiveRemovedEntryTranscripts !== false,
+            archiveDirectory: resolveSqliteTranscriptArchiveDirectory(resolved),
+            ...(pluginOwnerId ? { pluginOwnerId } : {}),
+            sessionKeySegmentPrefix,
+            transcriptContentMarker,
+            orphanTranscriptMinAgeMs: params.orphanTranscriptMinAgeMs,
+            nowMs: params.nowMs ?? Date.now(),
+            diagnostics: artifactPreparation,
+          }),
+        undefined,
+        artifactPreparation,
       ),
     "session.lifecycle.artifacts-prepare",
+    { artifactPreparation },
   );
   if (cleanupPlan.entries.length === 0 && cleanupPlan.deletePlans.length === 0) {
     // Startup probes need no reclamation Worker, but previously committed archives
@@ -215,6 +223,22 @@ export async function resetSessionEntryLifecycle(
 ): Promise<ResetSessionEntryLifecycleResult> {
   const agentId = params.agentId ?? parseAgentSessionKey(params.target.canonicalKey)?.agentId;
   const resolved = resolveSqliteStoreScope(params.storePath, { agentId });
+  if (params.resetBoundary) {
+    params.commitGuard?.();
+    const source = withOpenClawAgentDatabaseReadOnly(
+      (database) => readLifecycleTargetSnapshot(database, params.target)[0]?.entry.sessionId,
+      toDatabaseOptions(resolved),
+    );
+    if (source.found && source.value) {
+      const { restoreSessionColdTranscript } = await import("./session-cold-storage.js");
+      await restoreSessionColdTranscript({
+        agentId: resolved.agentId,
+        env: resolved.env,
+        storePath: params.storePath,
+        sessionId: source.value,
+      });
+    }
+  }
   return await withCommittedHistoryMaintenance(
     { agentId: resolved.agentId, storePath: params.storePath },
     async (recordCommit) =>
@@ -432,6 +456,13 @@ async function deleteSqliteSessionEntryLifecycleLocked(
         params.commitGuard?.();
         assertCurrent();
       };
+      const matchesPreparedTarget = (database: OpenClawAgentDatabase) => {
+        const targetSnapshot = readLifecycleTargetSnapshot(database, params.target);
+        return (
+          sqliteLifecycleTargetSnapshotsEqual(prepared.targetSnapshot, targetSnapshot) &&
+          shouldDeleteSqliteSessionEntryLifecycle(database, targetSnapshot[0]?.entry, params)
+        );
+      };
       const historicalArchivedTranscripts: SessionLifecycleArchivedTranscript[] = [];
       for (const sessionId of prepared.historicalGenerationIds) {
         const plan = await runExclusiveSqliteSessionWrite(
@@ -440,15 +471,7 @@ async function deleteSqliteSessionEntryLifecycleLocked(
             withSqliteSessionDatabase(
               databaseOptions,
               (database) => {
-                const targetSnapshot = readLifecycleTargetSnapshot(database, params.target);
-                if (
-                  !sqliteLifecycleTargetSnapshotsEqual(prepared.targetSnapshot, targetSnapshot) ||
-                  !shouldDeleteSqliteSessionEntryLifecycle(
-                    database,
-                    targetSnapshot[0]?.entry,
-                    params,
-                  )
-                ) {
+                if (!matchesPreparedTarget(database)) {
                   return DELETE_EXPECTED_ENTRY_MISMATCH;
                 }
                 const referencedAfterDelete = readReferencedSessionIdsAfterTargetMutation(
@@ -495,15 +518,7 @@ async function deleteSqliteSessionEntryLifecycleLocked(
               withSqliteSessionDatabase(
                 databaseOptions,
                 (database) => {
-                  const targetSnapshot = readLifecycleTargetSnapshot(database, params.target);
-                  if (
-                    !sqliteLifecycleTargetSnapshotsEqual(prepared.targetSnapshot, targetSnapshot) ||
-                    !shouldDeleteSqliteSessionEntryLifecycle(
-                      database,
-                      targetSnapshot[0]?.entry,
-                      params,
-                    )
-                  ) {
+                  if (!matchesPreparedTarget(database)) {
                     return DELETE_EXPECTED_ENTRY_MISMATCH;
                   }
                   const protectedSessionIds = collectAdmissionProtectedSessionIds({
@@ -571,12 +586,30 @@ async function deleteSqliteSessionEntryLifecycleLocked(
       const result = await runExclusiveSqliteSessionReclamation(async () => {
         const materializedPlans = await materializeSessionStateDeletePlans(prepared.entryPlans);
         const diagnostics: SqliteSessionReclamationDiagnostics = {};
-        const reclamationPlan = createSessionEntryReclamationPlan({
-          databaseOptions: toDatabaseOptions(resolved),
-          deleteParams: params,
-          materializedPlans,
-          preparedTargetSnapshot: prepared.targetSnapshot,
-        });
+        const reclamationPlan = await runExclusiveSqliteSessionWrite(
+          resolved,
+          async () =>
+            withSqliteSessionDatabase(
+              databaseOptions,
+              (database) => {
+                if (!matchesPreparedTarget(database)) {
+                  return DELETE_EXPECTED_ENTRY_MISMATCH;
+                }
+                return createSessionEntryReclamationPlan({
+                  databaseOptions,
+                  deleteParams: params,
+                  materializedPlans,
+                  preparedTargetSnapshot: prepared.targetSnapshot,
+                });
+              },
+              assertDeletionCurrent,
+            ),
+          "session.lifecycle.reclamation-plan",
+          diagnostics,
+        );
+        if (reclamationPlan === DELETE_EXPECTED_ENTRY_MISMATCH) {
+          return expectedEntryMismatchResult([]);
+        }
         const reclaimed = await runSqliteSessionReclamation({
           diagnostics,
           assertCommitAllowed: assertDeletionCurrent,
