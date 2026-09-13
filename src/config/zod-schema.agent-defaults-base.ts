@@ -189,6 +189,10 @@ export const AgentDefaultsBaseSchema = z
     systemAgent: z
       .object({
         agentId: z.string().trim().min(1).optional(),
+        // FORK: see types.agent-defaults.ts systemAgent.trustDelegatedOperatorApproval.
+        // Keep this validator in sync with that declaration — .strict() rejects the
+        // key at boot if it is missing, and the type alone will still typecheck.
+        trustDelegatedOperatorApproval: z.boolean().optional(),
       })
       .strict()
       .optional(),
