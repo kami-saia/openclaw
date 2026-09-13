@@ -1,4 +1,4 @@
-// Qa Lab tests cover suite.summary json plugin behavior.
+// QA Lab tests cover suite.summary json plugin behavior.
 import { describe, expect, it } from "vitest";
 import { buildQaSuiteEvidenceSummary } from "./evidence-summary.js";
 import { buildQaSuiteSummaryJson } from "./suite.js";
@@ -51,6 +51,7 @@ describe("buildQaSuiteSummaryJson", () => {
   it("records Crabline channel-driver metadata when selected", () => {
     const json = buildQaSuiteSummaryJson({
       ...baseParams,
+      channelDriver: "crabline",
       channelDriverSelection: {
         capabilityMatrixPath: "crabline-channel-driver-capabilities.json",
         channel: "telegram",
@@ -65,14 +66,15 @@ describe("buildQaSuiteSummaryJson", () => {
     expect(json.run.channelDriverSmokePath).toBe("crabline-provider-readiness.json");
   });
 
-  it("records declarative non-Crabline channel-driver metadata", () => {
+  it("records realized non-Crabline channel metadata", () => {
     const json = buildQaSuiteSummaryJson({
       ...baseParams,
+      channel: "telegram",
       channelDriver: "live",
     });
 
     expect(json.run.channelDriver).toBe("live");
-    expect(json.run.channel).toBeNull();
+    expect(json.run.channel).toBe("telegram");
     expect(json.run.channelCapabilityMatrixPath).toBeNull();
     expect(json.run.channelDriverSmokePath).toBeNull();
   });

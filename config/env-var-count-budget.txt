@@ -3,6 +3,4 @@
 # Worker bundle installation no longer injects OPENCLAW_STATE_DIR into a remote npm process.
 # The internal Node-version check no longer contributes a false OPENCLAW_* name.
 # The next-turn runtime-context preface constant no longer exists as an OPENCLAW_* name.
-# Upstream merge 51f57534806 added OPENCLAW_CONFIG_READONLY, OPENCLAW_RESTART_COMPLETE,
-# OPENCLAW_SQLITE_LIBRARY, OPENCLAW_UPDATE_RUN_ID (493 -> 495; fork added none).
-495
+492

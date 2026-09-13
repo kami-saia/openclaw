@@ -18,13 +18,12 @@ import {
   updateSessionEntry,
   upsertSessionEntryCore,
 } from "../../config/sessions/session-accessor.js";
+import { waitForSessionTranscriptIndexReconcilesInStateDir } from "../../config/sessions/session-transcript-reconcile.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { onSessionTranscriptUpdate } from "../../sessions/transcript-events.js";
 import { closeOpenClawAgentDatabasesAsync } from "../../state/openclaw-agent-db.js";
-import {
-  closeOpenClawStateDatabaseByPath,
-  openOpenClawStateDatabase,
-} from "../../state/openclaw-state-db.js";
+import { closeOpenClawStateDatabaseByPath } from "../../state/openclaw-state-db-cache.js";
+import { openOpenClawStateDatabase } from "../../state/openclaw-state-db.js";
 import { prepareAgentRunUserTurn } from "../agent-turn/agent-run-user-turn.js";
 import type { AgentTurnContext } from "../agent-turn/types.js";
 import type { WorkerConnectionIdentity } from "./connection-identity.js";
@@ -212,6 +211,7 @@ describe("worker transcript commit application", () => {
     unsubscribe?.();
     clearRuntimeConfigSnapshot();
     try {
+      await waitForSessionTranscriptIndexReconcilesInStateDir(root);
       await closeOpenClawAgentDatabasesAsync(root);
       closeOpenClawStateDatabaseByPath(stateDatabasePath);
       await fs.rm(root, { recursive: true, force: true });

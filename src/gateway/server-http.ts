@@ -51,6 +51,7 @@ import {
   finishFailedGatewayHttpResponse,
   sendGatewayAuthFailure,
   setDefaultSecurityHeaders,
+  isWebSocketUpgradeRequest,
 } from "./http-common.js";
 import {
   markGatewayIngressTransport,
@@ -60,13 +61,16 @@ import {
 } from "./ingress-attribution.js";
 import { normalizePluginNodeCapabilityScopedUrl } from "./plugin-node-capability.js";
 import {
+  handleProviderOAuthCallback,
+  PROVIDER_OAUTH_CALLBACK_PATH,
+} from "./provider-browser-auth.js";
+import {
   getCachedPluginGatewayAuthBypassPaths,
   shouldEnforceDefaultPluginGatewayAuth,
   type PluginGatewayDispatchContext,
   type ResolvePluginNodeCapabilityRoute,
 } from "./server-http-plugin-auth.js";
 import { handleGatewayProbeRequest } from "./server-http-probes.js";
-import { isWebSocketUpgradeRequest } from "./server-http-upgrades.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
 import type { HooksRequestHandler } from "./server/hooks-request-handler.js";
 import { runWithGatewayHttpWorkAdmission } from "./server/http-work-admission.js";
@@ -77,7 +81,7 @@ import {
 import type { ReadinessChecker, StartupChecker } from "./server/readiness.js";
 import type { GatewayWsClient } from "./server/ws-types.js";
 import { isTerminalConfigEnabled } from "./terminal/enabled.js";
-import { VOICE_STREAM_PATH_PREFIX } from "./voice-stream-http.js";
+import { isVoiceStreamRequestPath, handleVoiceStreamHttpRequest } from "./server-http-voice-stream.js";
 import {
   handleNodeWorkerBundleTransferHttpRequest,
   type NodeWorkerBundleTransferHttpCallback,
@@ -108,8 +112,6 @@ const getControlUiPluginAssetsModule = createLazyRuntimeModule(
 const getCanvasServeModule = createLazyRuntimeModule(() => import("../canvas/serve.runtime.js"));
 const getBoardHttpModule = createLazyRuntimeModule(() => import("./board-http.js"));
 const getEmbeddingsHttpModule = createLazyRuntimeModule(() => import("./embeddings-http.js"));
-// FORK: on-demand streaming TTS route (tts.stream -> node voice.play).
-const getVoiceStreamHttpModule = createLazyRuntimeModule(() => import("./voice-stream-http.js"));
 const getManagedMediaAttachmentsModule = createLazyRuntimeModule(
   () => import("./managed-image-attachments.js"),
 );
@@ -462,6 +464,9 @@ export function createGatewayHttpServer(opts: {
         );
       }
 
+      addAdmittedStage(scopedRequestPath === PROVIDER_OAUTH_CALLBACK_PATH, () =>
+        handleProviderOAuthCallback(req, res),
+      );
       // Before hooks: an operator hooks.path of "/oauth" would otherwise claim
       // this exact GET and 405 every provider redirect. The claim is exact-path
       // and config-gated, so preceding hooks cannot shadow any hook route.
@@ -667,14 +672,8 @@ export function createGatewayHttpServer(opts: {
         );
       }
 
-      // FORK: the one-off path token is itself the capability, so this route authorizes on
-      // possession of the URL rather than a gateway token: the player fetching it is a
-      // media pipeline that cannot carry auth headers. Must stay ahead of the control-UI
-      // SPA fallback, which would otherwise answer voice URLs with index.html.
-      addRequestStage(scopedRequestPath.startsWith(`${VOICE_STREAM_PATH_PREFIX}/`), async () =>
-        (await getVoiceStreamHttpModule()).handleVoiceStreamRequest(req, res, {
-          config: configSnapshot,
-        }),
+      addRequestStage(isVoiceStreamRequestPath(scopedRequestPath), async () =>
+        handleVoiceStreamHttpRequest(req, res, configSnapshot),
       );
 
       addRequestStage(focusDocument, handleStandaloneControlUiRequest);
@@ -756,4 +755,4 @@ export function createGatewayHttpServer(opts: {
   return httpServer;
 }
 
-export { attachGatewayUpgradeHandler, isWebSocketUpgradeRequest } from "./server-http-upgrades.js";
+export { attachGatewayUpgradeHandler } from "./server-http-upgrades.js";

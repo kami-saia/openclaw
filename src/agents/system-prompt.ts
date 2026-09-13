@@ -648,7 +648,7 @@ function buildMessagingSection(params: {
               : `- After visible \`message(send)\`, final ONLY ${SILENT_REPLY_TOKEN}.`,
           showGenericInlineButtonHint
             ? params.inlineButtonsEnabled
-              ? "- Inline buttons: `send` with `buttons=[[{text,callback_data,style?}]]`; style primary|success|danger."
+              ? '- Inline buttons: `send` with `presentation={"blocks":[{"type":"buttons","buttons":[{"label":"Yes","action":{"type":"callback","value":"yes"},"style":"primary"}]}]}`.'
               : params.runtimeChannel
                 ? `- Inline buttons OFF for ${params.runtimeChannel}; ask owner for ${params.runtimeChannel}.capabilities.inlineButtons=dm|group|all|allowlist.`
                 : ""
@@ -723,7 +723,7 @@ function buildDocsSection(params: {
       ? `OpenClaw behavior questions: docs first${params.readToolName ? ` via \`${params.readToolName}\`/local search` : " using available tools"}. AGENTS/project/workspace/profile/memory = instructions/user memory, not product design truth.`
       : "OpenClaw behavior questions: docs mirror first when web exists. AGENTS/project/workspace/profile/memory = instructions/user memory, not product design truth.",
     params.hasGateway
-      ? "Config field: `gateway(config.schema.lookup)` exact path. Broader: `docs/gateway/configuration.md`, `docs/gateway/configuration-reference.md`."
+      ? "Config field: use `gateway(config.schema.lookup)` with an exact path only when that action is exposed by the tool schema. Otherwise use `docs/gateway/configuration.md` and `docs/gateway/configuration-reference.md`."
       : "Configuration docs: `docs/gateway/configuration.md`, `docs/gateway/configuration-reference.md`.",
     sourcePath
       ? "If docs are silent/stale, say so and inspect local source."
@@ -1243,7 +1243,7 @@ export function buildAgentSystemPrompt(params: {
               ? [
                   "Large work: `sessions_spawn`; follow the accepted completion mode.",
                   '`sessions_spawn`: clean context => `context:"isolated"`; transcript needed => `context:"fork"`.',
-                  "`visible:true` for work the user follows or asked for; else hidden.",
+                  "Default to subagents for internal work; use `visible:true` only for a separate session the user requests or needs to revisit and steer independently.",
                 ]
               : []),
             ...(availableTools.has("screen")
@@ -1344,14 +1344,15 @@ export function buildAgentSystemPrompt(params: {
       hasOpenClaw
         ? "Gateway restart, config, channels, plugins, agents, models/providers: ask `openclaw`."
         : hasGateway
-          ? "Config read: `gateway` (`config.get|config.schema.lookup`). Write/restart unavailable; ask human."
+          ? "Config read: `gateway` (`config.get|config.schema.lookup`) only when those actions are exposed by its schema. Write/restart unavailable; ask human."
           : "",
       [
         "For the Gateway hosting this session:",
+        "In a connected chat, the owner can send `/update` with commands.restart enabled (the default), regardless of the agent's tool profile.",
         hasGateway
           ? "Update OpenClaw: `gateway` action update.run, only on explicit user request; restart and completion notice are automatic."
-          : `${hasOpenClaw ? "Updates" : "System controls unavailable. Updates and restarts"} need the OpenClaw owner: tell the user to run \`openclaw update\` in a terminal or use the Control UI.`,
-        `Never run ${hasGateway ? "openclaw update, npm install -g openclaw, or stop/restart" : "npm install -g openclaw or stop"} the gateway service via exec.`,
+          : "For a chat update request, direct the user to `/update`. Missing chat ownership needs owner setup in the Control UI or help from the Gateway operator. Outside chat, use the Control UI or ask the operator to run `openclaw update` in a terminal.",
+        "Never run openclaw update, npm install -g openclaw, or stop/restart the gateway service via exec.",
       ].join(" "),
       ...(hasExec
         ? [

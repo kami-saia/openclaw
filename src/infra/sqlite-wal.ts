@@ -11,7 +11,8 @@ import { createSubsystemLogger } from "../logging/subsystem.js";
 import { hasErrnoCode } from "./errno.js";
 import { normalizeSqliteNonNegativeInteger } from "./sqlite-busy-timeout.js";
 import { createSqliteLifecycleAggregateError } from "./sqlite-coordinator.js";
-import { isSqliteLockError, runSqliteImmediateTransactionSync } from "./sqlite-transaction.js";
+import { isSqliteLockError } from "./sqlite-error-diagnostics.js";
+import { runSqliteImmediateTransactionSync } from "./sqlite-transaction.js";
 
 // WAL maintenance configures SQLite write-ahead logging and schedules bounded
 // checkpoints so state databases do not accumulate unbounded WAL files.
@@ -93,6 +94,11 @@ function configureSqliteBusyTimeout(db: DatabaseSync, busyTimeoutMs: number): nu
   const normalizedTimeoutMs = normalizeSqliteNonNegativeInteger(busyTimeoutMs, "busyTimeoutMs");
   db.exec(`PRAGMA busy_timeout = ${normalizedTimeoutMs};`);
   return normalizedTimeoutMs;
+}
+
+/** Restrict inspection connections without changing journal or persistence policy. */
+export function configureSqliteReadOnlyPragmas(db: DatabaseSync): void {
+  db.exec("PRAGMA query_only = ON; PRAGMA trusted_schema = OFF;");
 }
 
 // auto_vacuum only takes effect when set before the first page is written.

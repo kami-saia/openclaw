@@ -44,6 +44,7 @@ const OPTIONAL_LIVE_SHARD_FILE_ENVS = new Map([
     ["OPENCLAW_LIVE_GPT_LIVE"],
   ],
   ["extensions/openai/realtime-quicksilver.live.test.ts", ["OPENCLAW_LIVE_GPT_LIVE"]],
+  ["extensions/openai/realtime-talk-defaults.live.test.ts", ["OPENCLAW_LIVE_GPT_LIVE"]],
   ["src/skills/workshop/experience-review.live.test.ts", ["OPENCLAW_LIVE_SKILL_EXPERIENCE_REVIEW"]],
   ["src/system-agent/rescue-channel.live.test.ts", ["OPENCLAW_LIVE_SYSTEM_AGENT_RESCUE_CHANNEL"]],
   ["src/gateway/android-node.capabilities.live.test.ts", ["OPENCLAW_LIVE_ANDROID_NODE"]],
@@ -410,6 +411,7 @@ export function resolveLiveShardPreparation(files: string[]): LiveShardPreparati
   if (
     files.some(isSourceGatewayLiveTest) ||
     files.some((file) => file.startsWith("test/e2e/qa-lab/runtime/")) ||
+    files.includes("src/infra/heartbeat-runner.live.test.ts") ||
     files.includes("src/agents/tools/image-tool.providers.live.test.ts") ||
     files.includes("extensions/openai/openai.live.test.ts")
   ) {

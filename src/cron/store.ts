@@ -7,7 +7,7 @@ import { asRecord } from "@openclaw/normalization-core/record-coerce";
 import { expandHomePrefix } from "../infra/home-dir.js";
 import { pruneMapToMaxSize } from "../infra/map-size.js";
 import { openNodeSqliteDatabase } from "../infra/node-sqlite.js";
-import { prepareSqliteReadOnlyLocationSync } from "../infra/sqlite-readonly-location.js";
+import { prepareSqliteReadOnlyLocationSync } from "../infra/sqlite-snapshot-source.js";
 import { isArtifactPreservingStateRead } from "../state/openclaw-state-db-readonly.js";
 import { tableExists } from "../state/openclaw-state-db-schema-helpers.js";
 import {
@@ -322,6 +322,10 @@ function mergeCronRuntimeChanges(
     } else {
       Reflect.deleteProperty(merged, key);
     }
+  }
+  if (previous.runningAtMs !== next.runningAtMs) {
+    merged.runningReceiptId =
+      next.runningAtMs === current.runningAtMs ? current.runningReceiptId : next.runningReceiptId;
   }
   return merged;
 }

@@ -414,16 +414,12 @@ const CORE_GATEWAY_METHOD_SPECS = [
   ["agents.workspace.list", "agents-workspace", "operator.read", "2026.7"],
   ["agents.workspace.get", "agents-workspace", "operator.read", "2026.7"],
   ["tts.speak", "tts", "operator.write", "2026.7"],
-  // FORK: tts.stream mints one-off streaming voice URLs for node voice.play.
-  // The handler lives in server-methods/tts.ts; without this row the registry
-  // skips it and dispatch reports `unknown method: tts.stream`.
-  ["tts.stream", "tts", "operator.write", "2026.7"],
   ["plugins.list", "plugins", "operator.read", "<=2026.7"],
   ["plugins.search", "plugins", "operator.read", "<=2026.7"],
   ["plugins.install", "plugins-mutations", "operator.admin", "<=2026.7", CONTROL_PLANE_WRITE],
   ["plugins.setEnabled", "plugins-mutations", "operator.admin", "<=2026.7", CONTROL_PLANE_WRITE],
   ["plugins.uninstall", "plugins-mutations", "operator.admin", "<=2026.7", CONTROL_PLANE_WRITE],
-  ["plugins.refresh", "plugins", "operator.admin", "<=2026.7", CONTROL_PLANE_WRITE],
+  ["plugins.refresh", "plugins-mutations", "operator.admin", "<=2026.7", CONTROL_PLANE_WRITE],
   // Session PR chips read the session's own checkout metadata, matching the
   // sessions.files.* trusted-operator read domain.
   ["controlUi.sessionPullRequests.subscribe", "control-ui", "operator.read", "2026.7"],
@@ -663,6 +659,27 @@ const CORE_GATEWAY_METHOD_SPECS = [
   ["plugins.catalog.categories", "plugins", "operator.read", "2026.9"],
   ["plugins.catalog.get", "plugins", "operator.read", "2026.9"],
   ["tasks.history", "tasks", "operator.read", "2026.9"],
+  [
+    "environments.prepare",
+    "environments",
+    "operator.admin",
+    "2026.9",
+    { startup: true, controlPlaneWrite: true },
+  ],
+  ["models.authRefresh", "models-auth-status", "operator.admin", "2026.9", CONTROL_PLANE_WRITE],
+  ["models.authLogin", "models-auth-login", "operator.admin", "2026.9", CONTROL_PLANE_WRITE],
+  ["models.authSetApiKey", "models-auth-status", "operator.admin", "2026.9", CONTROL_PLANE_WRITE],
+  ["sessions.storage.status", "sessions-read", "operator.admin", "2026.9"],
+  ["sessions.storage.run", "sessions-read", "operator.admin", "2026.9"],
+  ["plugins.reload", "plugins-mutations", "operator.admin", "2026.9", CONTROL_PLANE_WRITE],
+  ["claws.packages.remove", "claws-packages", "operator.admin", "2026.9", CONTROL_PLANE_WRITE],
+  // FORK: tts.stream mints one-off streaming voice URLs for node voice.play.
+  // The handler lives in server-methods/tts.ts; without this row the registry
+  // skips it and dispatch reports `unknown method: tts.stream`.
+  // MUST stay appended at the end: the advertised method order is a frozen
+  // prefix (see server-methods-list.test-fixtures.ts), so inserting it mid-array
+  // shifts every later index for clients that key off the advertised list.
+  ["tts.stream", "tts", "operator.write", "2026.9"],
 ] as const satisfies readonly CoreGatewayMethodSpecRow[];
 
 export type CoreGatewayHandlerFamily = Exclude<(typeof CORE_GATEWAY_METHOD_SPECS)[number][1], null>;

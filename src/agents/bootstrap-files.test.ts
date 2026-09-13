@@ -191,7 +191,7 @@ async function createHeartbeatAgentsWorkspace() {
 }
 
 async function writeCompletedWorkspaceState(workspaceDir: string): Promise<void> {
-  mergeWorkspaceSetupState(workspaceDir, {
+  await mergeWorkspaceSetupState(workspaceDir, {
     bootstrapSeededAt: "2026-05-16T00:00:00.000Z",
     setupCompletedAt: "2026-05-16T00:00:01.000Z",
   });
@@ -607,7 +607,11 @@ describe("resolveBootstrapFilesForRun", () => {
       mode: "subagent",
       sessionKey: "agent:main:subagent:worker",
       relabeledName: "AGENTS.md",
-      expectedNames: ["AGENTS.md"],
+      // FORK: subagents also get SOUL.md + IDENTITY.md (see
+      // SUBAGENT_BOOTSTRAP_ALLOWLIST in workspace.ts). MEMORY.md stays excluded
+      // by the separate non-private filter, so the alias rejection this case
+      // guards is unchanged.
+      expectedNames: ["AGENTS.md", "SOUL.md", "IDENTITY.md"],
     },
     {
       mode: "cron",
