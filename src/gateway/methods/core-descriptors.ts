@@ -414,10 +414,6 @@ const CORE_GATEWAY_METHOD_SPECS = [
   ["agents.workspace.list", "agents-workspace", "operator.read", "2026.7"],
   ["agents.workspace.get", "agents-workspace", "operator.read", "2026.7"],
   ["tts.speak", "tts", "operator.write", "2026.7"],
-  // FORK: tts.stream mints one-off streaming voice URLs for node voice.play.
-  // The handler lives in server-methods/tts.ts; without this row the registry
-  // skips it and dispatch reports `unknown method: tts.stream`.
-  ["tts.stream", "tts", "operator.write", "2026.7"],
   ["plugins.list", "plugins", "operator.read", "<=2026.7"],
   ["plugins.search", "plugins", "operator.read", "<=2026.7"],
   ["plugins.install", "plugins-mutations", "operator.admin", "<=2026.7", CONTROL_PLANE_WRITE],
@@ -677,6 +673,13 @@ const CORE_GATEWAY_METHOD_SPECS = [
   ["sessions.storage.run", "sessions-read", "operator.admin", "2026.9"],
   ["plugins.reload", "plugins-mutations", "operator.admin", "2026.9", CONTROL_PLANE_WRITE],
   ["claws.packages.remove", "claws-packages", "operator.admin", "2026.9", CONTROL_PLANE_WRITE],
+  // FORK: tts.stream mints one-off streaming voice URLs for node voice.play.
+  // The handler lives in server-methods/tts.ts; without this row the registry
+  // skips it and dispatch reports `unknown method: tts.stream`.
+  // MUST stay appended at the end: the advertised method order is a frozen
+  // prefix (see server-methods-list.test-fixtures.ts), so inserting it mid-array
+  // shifts every later index for clients that key off the advertised list.
+  ["tts.stream", "tts", "operator.write", "2026.9"],
 ] as const satisfies readonly CoreGatewayMethodSpecRow[];
 
 export type CoreGatewayHandlerFamily = Exclude<(typeof CORE_GATEWAY_METHOD_SPECS)[number][1], null>;

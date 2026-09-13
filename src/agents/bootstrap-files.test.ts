@@ -607,7 +607,11 @@ describe("resolveBootstrapFilesForRun", () => {
       mode: "subagent",
       sessionKey: "agent:main:subagent:worker",
       relabeledName: "AGENTS.md",
-      expectedNames: ["AGENTS.md"],
+      // FORK: subagents also get SOUL.md + IDENTITY.md (see
+      // SUBAGENT_BOOTSTRAP_ALLOWLIST in workspace.ts). MEMORY.md stays excluded
+      // by the separate non-private filter, so the alias rejection this case
+      // guards is unchanged.
+      expectedNames: ["AGENTS.md", "SOUL.md", "IDENTITY.md"],
     },
     {
       mode: "cron",

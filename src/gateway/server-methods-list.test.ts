@@ -205,6 +205,8 @@ describe("listGatewayMethods", () => {
       "sessions.storage.run",
       "plugins.reload",
       "claws.packages.remove",
+      // FORK: tts.stream appends last so the frozen prefix keeps its indices.
+      "tts.stream",
     ];
     expect(listGatewayMethods().slice(-expectedSuffix.length)).toEqual(expectedSuffix);
     const methods = listGatewayMethods();
@@ -237,6 +239,8 @@ describe("listGatewayMethods", () => {
       "sessions.storage.run",
       "plugins.reload",
       "claws.packages.remove",
+      // FORK: tts.stream appends last so the frozen prefix keeps its indices.
+      "tts.stream",
     ]);
   });
 
@@ -396,6 +400,8 @@ describe("listGatewayMethods", () => {
       "sessions.storage.run",
       "plugins.reload",
       "claws.packages.remove",
+      // FORK: tts.stream appends last so the frozen prefix keeps its indices.
+      "tts.stream",
     ];
     expect(coreMethods.slice(-expectedCoreSuffix.length)).toEqual(expectedCoreSuffix);
     expect(methods.indexOf("approval.get")).toBeGreaterThan(methods.indexOf("tts.speak"));
