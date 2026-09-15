@@ -7,6 +7,12 @@ import type { BrowserFormField } from "./client-actions.types.js";
 import { normalizeBrowserEvaluateFunctionSource } from "./evaluate-source.js";
 import { DEFAULT_FILL_FIELD_TYPE } from "./form-fields.js";
 import {
+  humanClickSettleMs,
+  humanKeyDelaysMs,
+  humanSubmitPauseMs,
+  typeWithHumanPacing,
+} from "./human-pacing.js";
+import {
   ensurePageState,
   forceDisconnectPlaywrightForTarget,
   getPageForTargetId,
@@ -234,14 +240,31 @@ export async function typeViaPlaywright(
     page,
     opts,
     async (signal) => {
-      if (opts.slowly) {
-        await locator.click({ timeout, signal });
-        throwIfInteractionAborted(opts.signal);
-        await locator.type(text, { timeout, signal, delay: 75 });
-      } else {
-        await locator.fill(text, { timeout, signal });
-      }
+      // Always dispatch real keystrokes. `fill()` sets the value in one shot
+      // without any key events, which is trivially detectable; uniform
+      // `delay: 75` typing is equally unlike a human. Pace both paths with
+      // jittered per-character delays instead.
+      await locator.click({ timeout, signal });
+      throwIfInteractionAborted(opts.signal);
+      await sleepWithAbort(humanClickSettleMs(), opts.signal);
+      throwIfInteractionAborted(opts.signal);
+      // Preserve `fill()` semantics (replace, not append) without using fill's
+      // one-shot value set: clear via a real select-all + delete keystroke.
+      await locator.press("ControlOrMeta+a", { timeout, signal });
+      await locator.press("Delete", { timeout, signal });
+      throwIfInteractionAborted(opts.signal);
+      await typeWithHumanPacing({
+        text,
+        delays: humanKeyDelaysMs(text, opts.slowly ? undefined : 46),
+        pressKey: async (char, delayMs) => {
+          await locator.type(char, { timeout, signal, delay: 0 });
+          await sleepWithAbort(delayMs, opts.signal);
+        },
+        throwIfAborted: () => throwIfInteractionAborted(opts.signal),
+      });
       if (opts.submit) {
+        throwIfInteractionAborted(opts.signal);
+        await sleepWithAbort(humanSubmitPauseMs(), opts.signal);
         throwIfInteractionAborted(opts.signal);
         await locator.press("Enter", { timeout, signal });
       }
