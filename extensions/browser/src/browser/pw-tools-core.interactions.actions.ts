@@ -7,7 +7,10 @@ import type { BrowserFormField } from "./client-actions.types.js";
 import { normalizeBrowserEvaluateFunctionSource } from "./evaluate-source.js";
 import { DEFAULT_FILL_FIELD_TYPE } from "./form-fields.js";
 import {
+  type CursorPoint,
   humanClickSettleMs,
+  humanCursorPath,
+  humanCursorStepDelayMs,
   humanKeyDelaysMs,
   humanSubmitPauseMs,
   typeWithHumanPacing,
@@ -72,16 +75,66 @@ export async function clickViaPlaywright(
     opts,
     async (signal) => {
       const delayMs = resolveBoundedDelayMs(opts.delayMs, "click delayMs", ACT_MAX_CLICK_DELAY_MS);
-      if (delayMs > 0) {
-        await locator.hover({ timeout, signal });
-        throwIfInteractionAborted(opts.signal);
-        await sleepWithAbort(delayMs, opts.signal);
-        throwIfInteractionAborted(opts.signal);
-      }
+      // Approach the element along a human cursor path, then settle briefly
+      // before pressing, instead of teleporting straight onto the target.
+      await moveCursorToLocator(page, locator, opts.signal);
+      throwIfInteractionAborted(opts.signal);
+      await sleepWithAbort(delayMs > 0 ? delayMs : humanClickSettleMs(), opts.signal);
+      throwIfInteractionAborted(opts.signal);
       const clickOptions = { timeout, signal, button: opts.button, modifiers: opts.modifiers };
       await (opts.doubleClick ? locator.dblclick(clickOptions) : locator.click(clickOptions));
     },
     label,
+  );
+}
+
+/**
+ * Last known synthetic cursor position per page. Playwright's mouse starts at
+ * (0,0) and jumps straight to each target, which produces a pointer trace no
+ * human hand makes. Tracking the previous point lets us interpolate from it.
+ */
+const lastCursorPositionByPage = new WeakMap<Page, CursorPoint>();
+
+/**
+ * Glide the virtual cursor to (x, y) along a curved, variable-speed path,
+ * dispatching real mousemove events along the way.
+ */
+async function moveCursorLikeHuman(
+  page: Page,
+  to: CursorPoint,
+  signal?: AbortSignal,
+): Promise<void> {
+  const from = lastCursorPositionByPage.get(page) ?? {
+    x: Math.max(0, to.x - 320),
+    y: Math.max(0, to.y - 210),
+  };
+  for (const point of humanCursorPath(from, to)) {
+    throwIfInteractionAborted(signal);
+    await page.mouse.move(point.x, point.y);
+    await sleepWithAbort(humanCursorStepDelayMs(), signal);
+  }
+  lastCursorPositionByPage.set(page, to);
+}
+
+/** Move the cursor onto an element's box before it is clicked. */
+async function moveCursorToLocator(
+  page: Page,
+  locator: ReturnType<typeof resolveInteractionElement>["locator"],
+  signal?: AbortSignal,
+): Promise<void> {
+  const box = await locator.boundingBox();
+  if (!box) {
+    return;
+  }
+  // Aim for a random point inside the element rather than its exact centre;
+  // always hitting dead centre is itself a tell.
+  await moveCursorLikeHuman(
+    page,
+    {
+      x: Math.round(box.x + box.width * (0.3 + Math.random() * 0.4)),
+      y: Math.round(box.y + box.height * (0.3 + Math.random() * 0.4)),
+    },
+    signal,
   );
 }
 
@@ -96,6 +149,7 @@ export async function clickCoordsViaPlaywright(
 ): Promise<void> {
   const page = await getRestoredPageForTarget(opts);
   await runGuardedPageInteraction(page, opts, async () => {
+    await moveCursorLikeHuman(page, { x: opts.x, y: opts.y }, opts.signal);
     await page.mouse.click(opts.x, opts.y, {
       button: opts.button,
       clickCount: opts.doubleClick ? 2 : 1,

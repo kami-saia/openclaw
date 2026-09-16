@@ -72,3 +72,71 @@ export async function typeWithHumanPacing(params: {
     await params.pressKey(char, delayMs);
   }
 }
+
+/** A single point on a synthetic cursor path. */
+export type CursorPoint = { x: number; y: number };
+
+const MOUSE_MIN_STEPS = 12;
+const MOUSE_MAX_STEPS = 34;
+const MOUSE_STEP_DELAY_MIN_MS = 6;
+const MOUSE_STEP_DELAY_MAX_MS = 18;
+const MOUSE_OVERSHOOT_PROBABILITY = 0.35;
+
+/**
+ * Cubic Bezier through two randomised control points, so the cursor arcs
+ * instead of teleporting or travelling in a perfectly straight line.
+ * Real pointer traces are curved, variable-speed and frequently overshoot the
+ * target before settling back onto it.
+ */
+export function humanCursorPath(from: CursorPoint, to: CursorPoint): CursorPoint[] {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const distance = Math.hypot(dx, dy);
+  if (distance < 1) {
+    return [to];
+  }
+  // Perpendicular offset scaled to travel distance gives a natural-looking arc.
+  const bow = Math.min(120, distance * randomInRange(0.08, 0.22));
+  const sign = Math.random() < 0.5 ? -1 : 1;
+  const nx = (-dy / distance) * bow * sign;
+  const ny = (dx / distance) * bow * sign;
+  const c1 = { x: from.x + dx * 0.3 + nx, y: from.y + dy * 0.3 + ny };
+  const c2 = { x: from.x + dx * 0.7 + nx * 0.6, y: from.y + dy * 0.7 + ny * 0.6 };
+
+  const steps = Math.max(
+    MOUSE_MIN_STEPS,
+    Math.min(MOUSE_MAX_STEPS, Math.round(distance / randomInRange(18, 42))),
+  );
+  const points: CursorPoint[] = [];
+  for (let step = 1; step <= steps; step += 1) {
+    const linear = step / steps;
+    // Ease-in-out: humans accelerate away from rest and decelerate onto a target.
+    const t = linear < 0.5 ? 2 * linear * linear : 1 - ((-2 * linear + 2) * (-2 * linear + 2)) / 2;
+    const inv = 1 - t;
+    const x =
+      inv * inv * inv * from.x +
+      3 * inv * inv * t * c1.x +
+      3 * inv * t * t * c2.x +
+      t * t * t * to.x;
+    const y =
+      inv * inv * inv * from.y +
+      3 * inv * inv * t * c1.y +
+      3 * inv * t * t * c2.y +
+      t * t * t * to.y;
+    points.push({ x: Math.round(x), y: Math.round(y) });
+  }
+  if (Math.random() < MOUSE_OVERSHOOT_PROBABILITY && distance > 60) {
+    // Shoot slightly past the target, then correct back onto it.
+    points.push({
+      x: Math.round(to.x + (dx / distance) * randomInRange(3, 11)),
+      y: Math.round(to.y + (dy / distance) * randomInRange(3, 11)),
+    });
+  }
+  points.push({ x: Math.round(to.x), y: Math.round(to.y) });
+  return points;
+}
+
+/** Per-step delay while traversing a cursor path. */
+export function humanCursorStepDelayMs(): number {
+  return Math.round(randomInRange(MOUSE_STEP_DELAY_MIN_MS, MOUSE_STEP_DELAY_MAX_MS));
+}
