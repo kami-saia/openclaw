@@ -3,6 +3,7 @@
  * browser tools.
  */
 import { parseFiniteNumber, resolveIntegerOption } from "openclaw/plugin-sdk/number-runtime";
+import { sleepWithAbort } from "openclaw/plugin-sdk/runtime-env";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
@@ -16,6 +17,11 @@ import type { BrowserDownloadResult } from "./download-types.js";
 import { BrowserTabNotFoundError } from "./errors.js";
 import type { RelayOperationReference } from "./extension-relay/owner-client.js";
 import { closeRelayOperationConnection } from "./extension-relay/owner-playwright.js";
+import {
+  applySessionPacingBeforeNavigation,
+  type PacingPage,
+  recordNavigationForPacing,
+} from "./human-session-pacing.js";
 import {
   assertBrowserNavigationAllowed,
   assertBrowserNavigationResultAllowed,
@@ -529,6 +535,11 @@ export async function navigateViaPlaywright(opts: {
   let currentTargetId = opts.targetId;
   let page = await getPageForTargetId(opts);
   let pageState = ensurePageState(page);
+  // Session rhythm: dwell on the page we are leaving before loading the next one.
+  await applySessionPacingBeforeNavigation({
+    page: page as unknown as PacingPage,
+    sleep: sleepWithAbort,
+  });
   const navigate = async () =>
     await gotoPageWithNavigationGuard({
       cdpUrl: opts.cdpUrl,
@@ -652,6 +663,7 @@ export async function navigateViaPlaywright(opts: {
     throw err;
   }
   const finalUrl = navigationResult.download?.url || page.url();
+  await recordNavigationForPacing(page as unknown as PacingPage);
   const targetId = (await pageTargetInfo(page).catch(() => null))?.targetId;
   return {
     url: finalUrl,
