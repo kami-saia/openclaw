@@ -15,9 +15,21 @@
  *     session is running faster than a human would.
  */
 
-const DWELL_MS_PER_CHAR = 3.6;
+/**
+ * Dwell scales *sublinearly* with content length. A linear ms-per-char model
+ * saturates instantly: at 3.6ms/char an ordinary 18k-char listing page wants
+ * 65s, so every real page clamped to the ceiling and the "content-scaled"
+ * dwell became a constant. Humans skim rather than read linearly, so a square
+ * root over length is the better shape: longer pages hold attention longer,
+ * but with diminishing returns instead of proportionally.
+ *
+ * Calibration (median, before jitter): 500 chars -> ~1.5s, 5k -> ~4.7s,
+ * 18k -> ~9.0s, 100k -> ~21s.
+ */
+const DWELL_SCALE_MS = 67;
+const DWELL_LENGTH_EXPONENT = 0.5;
 const DWELL_MIN_MS = 700;
-const DWELL_MAX_MS = 22_000;
+const DWELL_MAX_MS = 38_000;
 const BASE_GAP_LOG_MEAN = Math.log(1500);
 const BASE_GAP_LOG_SIGMA = 0.62;
 const BASE_GAP_MIN_MS = 350;
@@ -70,7 +82,7 @@ export function humanNavigationGapMs(): number {
  */
 export function humanDwellMs(contentLength: number): number {
   const safeLength = Number.isFinite(contentLength) && contentLength > 0 ? contentLength : 0;
-  const base = safeLength * DWELL_MS_PER_CHAR * randomInRange(0.55, 1.45);
+  const base = safeLength ** DWELL_LENGTH_EXPONENT * DWELL_SCALE_MS * randomInRange(0.55, 1.45);
   return Math.round(Math.min(DWELL_MAX_MS, Math.max(DWELL_MIN_MS, base)));
 }
 
