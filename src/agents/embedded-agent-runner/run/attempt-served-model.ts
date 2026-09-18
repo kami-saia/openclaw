@@ -8,11 +8,21 @@
  */
 import type { AgentMessage } from "../../runtime/index.js";
 
-// FORK: Resolve the provider-reported *served* model by scanning the restored
-// in-memory transcript backwards for the most recent assistant message that
-// carries a non-empty `responseModel`. A one-turn lag is expected because the
-// current turn's served model is unknowable before the model call. Pure,
-// synchronous, and reads only the array already in memory (no disk IO/async).
+// FORK: Resolve the provider-reported *served* model from the most recent
+// assistant message in the restored in-memory transcript. A one-turn lag is
+// expected because the current turn's served model is unknowable before the
+// model call. Pure, synchronous, and reads only the array already in memory (no
+// disk IO/async).
+//
+// `responseModel` is an *override* field: a transport records it only when the
+// provider-reported model differs from the requested one (see
+// openai-completions-stream.ts, anthropic-stream-reducer.ts). Absence therefore
+// means "served as requested", not "unknown", so fall back to the message's own
+// `model`. Scanning for the newest message that *carries* the field instead is
+// wrong: a provider that echoes the requested slug (openai-completions, e.g.
+// OpenRouter) leaves every one of its messages without it, so the scan skips
+// the entire recent run and reports a far older provider's model as a
+// divergence, indefinitely.
 export function resolveLastServedModel(messages: AgentMessage[] | undefined): string | undefined {
   if (!messages?.length) {
     return undefined;
@@ -23,9 +33,14 @@ export function resolveLastServedModel(messages: AgentMessage[] | undefined): st
       continue;
     }
     // SAFETY: responseModel is a fork-added optional field read as unknown and type-checked below.
-    const served = (message as unknown as { responseModel?: unknown }).responseModel;
-    if (typeof served === "string" && served.trim().length > 0) {
-      return served;
+    const record = message as unknown as { responseModel?: unknown; model?: unknown };
+    const override = record.responseModel;
+    if (typeof override === "string" && override.trim().length > 0) {
+      return override;
+    }
+    const own = record.model;
+    if (typeof own === "string" && own.trim().length > 0) {
+      return own;
     }
   }
   return undefined;
