@@ -26,8 +26,6 @@ import { buildUpdateDoctorEnv } from "./update-runner-doctor.js";
 import type { UpdateSnapshotCapacity } from "./update-snapshot-capacity.js";
 
 export type UpdateCandidateRehearsal = {
-  sourceConfig: OpenClawConfig;
-  sourceConfigHash: string | null | undefined;
   stateDir: string;
   configPath: string;
   workspaceDir: string;
@@ -102,7 +100,13 @@ function isolatedConfig(
     mode: "local",
     bind: "loopback",
     port,
-    auth: { mode: "token", token: randomUUID() },
+    auth: {
+      ...copied.gateway?.auth,
+      mode: "token",
+      token: randomUUID(),
+      password: undefined,
+      allowTailscale: false,
+    },
     tls: { enabled: false },
     tailscale: { mode: "off" },
     controlUi: { enabled: false },
@@ -117,10 +121,9 @@ function isolatedConfig(
   return copied;
 }
 
-/** One disposable generation, shared by candidate diagnostics and every turn of a repair run. */
+/** Prepare one disposable generation for candidate diagnostics. */
 export async function prepareUpdateCandidateRehearsal(params: {
   config: OpenClawConfig;
-  sourceConfigHash?: string | null;
   candidateRoot: string;
   stateDir: string;
   env?: NodeJS.ProcessEnv;
@@ -220,8 +223,6 @@ export async function prepareUpdateCandidateRehearsal(params: {
     await fs.writeFile(configPath, serialized, { mode: 0o600 });
     await fs.mkdir(workspaceDir, { recursive: true, mode: 0o700 });
     return {
-      sourceConfig: params.config,
-      sourceConfigHash: params.sourceConfigHash,
       stateDir: tempDir,
       configPath,
       workspaceDir,

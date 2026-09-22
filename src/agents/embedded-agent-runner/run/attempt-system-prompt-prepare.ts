@@ -91,7 +91,7 @@ export async function prepareEmbeddedAttemptSystemPrompt(params: {
     runtimeHandle: params.setup.getProviderRuntimeHandle(),
   });
   const resolveToolSchemaDirectoryPrompt = () =>
-    params.toolSearchDirectoryEnabled
+    params.toolSearchDirectoryEnabled && params.toolSearchCatalogRef?.current?.entries.length
       ? buildToolSchemaDirectoryPrompt(
           {
             config: attempt.config,
@@ -229,6 +229,7 @@ export async function prepareEmbeddedAttemptSystemPrompt(params: {
       }),
     embeddedSystemPrompt: {
       config: attempt.config,
+      preparedModelRuntime: attempt.preparedModelRuntime,
       agentId: params.setup.sessionAgentId,
       workspaceDir: params.setup.effectiveWorkspace,
       runtimeCwd: params.setup.effectiveCwd,
@@ -334,14 +335,21 @@ export async function prepareEmbeddedAttemptSystemPrompt(params: {
   const systemPromptReport = buildSystemPromptReport(reportInputs);
   params.setup.prepStages.mark("system-prompt");
 
-  let permissionPromptPreparation:
-    | {
-        mode: EmbeddedRunAttemptParams["permissionMode"];
-        tools: PromptTools;
-        capabilities: string[];
-        promise: Promise<(currentSystemPrompt: string) => string>;
-      }
-    | undefined;
+  let toolPromptPreparation: {
+    mode: EmbeddedRunAttemptParams["permissionMode"];
+    tools: PromptTools;
+    capabilities: string[];
+    catalogEntries: NonNullable<ToolSearchCatalogRef["current"]>["entries"] | undefined;
+    permissionChanged: boolean;
+    promise: Promise<(currentSystemPrompt: string) => string>;
+  } = {
+    mode: attempt.permissionMode,
+    tools: [...params.effectiveTools],
+    capabilities: [...params.capabilityToolNames].toSorted(),
+    catalogEntries: params.toolSearchCatalogRef?.current?.entries,
+    permissionChanged: false,
+    promise: Promise.resolve((currentSystemPrompt) => currentSystemPrompt),
+  };
 
   return {
     runtimeChannel,
@@ -350,19 +358,23 @@ export async function prepareEmbeddedAttemptSystemPrompt(params: {
     systemPromptText: attemptSystemPrompt.systemPrompt,
     // FORK: served_model= divergence re-render.
     renderAttemptSystemPrompt,
-    preparePermissionPrompt: (effectiveTools: PromptTools = params.effectiveTools) => {
+    prepareToolPrompt: (
+      effectiveTools: PromptTools = params.effectiveTools,
+      { permissionChanged = false }: { permissionChanged?: boolean } = {},
+    ) => {
       const mode = attempt.permissionMode;
       const capabilities = [...params.capabilityToolNames].toSorted();
+      const catalogEntries = params.toolSearchCatalogRef?.current?.entries;
       if (
-        permissionPromptPreparation &&
-        permissionPromptPreparation.mode === mode &&
-        permissionPromptPreparation.tools === effectiveTools &&
-        permissionPromptPreparation.capabilities.length === capabilities.length &&
-        permissionPromptPreparation.capabilities.every(
-          (name, index) => name === capabilities[index],
-        )
+        toolPromptPreparation.mode === mode &&
+        toolPromptPreparation.permissionChanged === permissionChanged &&
+        toolPromptPreparation.catalogEntries === catalogEntries &&
+        toolPromptPreparation.tools.length === effectiveTools.length &&
+        toolPromptPreparation.tools.every((tool, index) => tool === effectiveTools[index]) &&
+        toolPromptPreparation.capabilities.length === capabilities.length &&
+        toolPromptPreparation.capabilities.every((name, index) => name === capabilities[index])
       ) {
-        return permissionPromptPreparation.promise;
+        return toolPromptPreparation.promise;
       }
       // Prepare once per tool/policy generation. Memory supplements may await;
       // keep their immutable context separate until the model boundary accepts it.
@@ -388,7 +400,9 @@ export async function prepareEmbeddedAttemptSystemPrompt(params: {
           ...promptInputs,
           embeddedSystemPrompt,
         });
-        const permissionNotice = `## Permission change\nThe operator changed workspace permissions to ${mode ?? "configured defaults"}. Continue the current task with the updated tools and permissions. Inspect interrupted actions before retrying; do not repeat completed actions.`;
+        const permissionNotice = permissionChanged
+          ? `## Permission change\nThe operator changed workspace permissions to ${mode ?? "configured defaults"}. Continue the current task with the updated tools and permissions. Inspect interrupted actions before retrying; do not repeat completed actions.`
+          : undefined;
         return (currentSystemPrompt: string) => {
           if (params.isRawModelRun) {
             return currentSystemPrompt;
@@ -409,7 +423,14 @@ export async function prepareEmbeddedAttemptSystemPrompt(params: {
           return systemPrompt;
         };
       })();
-      permissionPromptPreparation = { mode, tools: effectiveTools, capabilities, promise };
+      toolPromptPreparation = {
+        mode,
+        tools,
+        capabilities,
+        catalogEntries,
+        permissionChanged,
+        promise,
+      };
       return promise;
     },
   };

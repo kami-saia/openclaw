@@ -13,6 +13,9 @@ import {
   runReleasePrepareStep,
   runReleasePrepareSteps,
 } from "../../scripts/release-prepare.ts";
+import { resolveTestNodeExecPath } from "../../src/test-utils/node-process.js";
+
+const testNodeExecPath = resolveTestNodeExecPath();
 
 function worktreeState(
   overrides: Partial<{
@@ -150,6 +153,18 @@ describe("release preparation plan", () => {
         process.cwd(),
         { json: true },
       );
+      process.exitCode = status;
+    `;
+    const result = spawnSync(
+      testNodeExecPath,
+      ["--import", "tsx", "--input-type=module", "-e", harness],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        maxBuffer: 4 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
 
       expect(status).toBe(0);
       expect(stdout.join("")).toBe("");
