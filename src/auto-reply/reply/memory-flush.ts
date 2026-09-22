@@ -25,6 +25,19 @@ function resolvePositiveTokenCount(value: number | undefined): number | undefine
     : undefined;
 }
 
+export function resolveEffectivePromptTokens(
+  basePromptTokens?: number,
+  lastOutputTokens?: number,
+  promptTokenEstimate?: number,
+): number {
+  const base = Math.max(0, basePromptTokens ?? 0);
+  const output = Math.max(0, lastOutputTokens ?? 0);
+  const estimate = Math.max(0, promptTokenEstimate ?? 0);
+  // Flush gating projects the next input context by adding the previous
+  // completion and the current user prompt estimate.
+  return base + output + estimate;
+}
+
 /** Resolves the blocking threshold using the selected reserve and server floor. */
 export function resolveCompactionThreshold(params: {
   contextWindowTokens: number;
@@ -92,27 +105,6 @@ export function resolveResponsesServerCompactionThreshold(params: {
   ).threshold;
 }
 
-function resolveMaintenanceGateState<
-  TEntry extends Pick<SessionEntry, "totalTokens" | "totalTokensFresh" | "totalTokensVersion">,
->(params: {
-  entry?: TEntry;
-  tokenCount?: number;
-  threshold: number;
-}): { entry: TEntry; totalTokens: number; threshold: number } | null {
-  if (!params.entry) {
-    return null;
-  }
-
-  const totalTokens =
-    resolvePositiveTokenCount(params.tokenCount) ?? resolveFreshSessionTotalTokens(params.entry);
-  if (!totalTokens || totalTokens <= 0) {
-    return null;
-  }
-
-  const threshold = params.threshold;
-  return threshold > 0 ? { entry: params.entry, totalTokens, threshold } : null;
-}
-
 export function shouldRunMemoryFlush(params: {
   entry?: Pick<
     SessionEntry,
@@ -133,22 +125,28 @@ export function shouldRunMemoryFlush(params: {
    */
   rearmMarginTokens?: number;
 }): boolean {
-  const state = resolveMaintenanceGateState(params);
-  if (!state || state.totalTokens < state.threshold) {
+  if (!shouldRunPreflightCompaction(params) || !params.entry) {
     return false;
   }
 
-  if (hasAlreadyFlushedForCurrentCompaction(state.entry)) {
+  if (hasAlreadyFlushedForCurrentCompaction(params.entry)) {
     // FORK: re-arm once the session has grown a further margin past the point
-    // where the last flush was signalled. Without a margin, keep upstream's
-    // one-signal-per-cycle behavior.
+    // where the last flush was signalled. `compactionCount` only advances on a
+    // compaction that actually landed, so without a margin a flush turn that
+    // produced no compaction suppresses the signal forever. Without a margin,
+    // keep upstream's one-signal-per-cycle behavior.
     if (params.rearmMarginTokens === undefined) {
       return false;
     }
+    const totalTokens =
+      resolvePositiveTokenCount(params.tokenCount) ?? resolveFreshSessionTotalTokens(params.entry);
+    if (typeof totalTokens !== "number") {
+      return false;
+    }
     const rearmMargin = Math.max(1, Math.floor(params.rearmMarginTokens));
-    const lastFlushTokens = resolvePositiveTokenCount(state.entry.memoryFlush?.totalTokens);
-    const rearmAt = (lastFlushTokens ?? state.threshold) + rearmMargin;
-    if (state.totalTokens < rearmAt) {
+    const lastFlushTokens = resolvePositiveTokenCount(params.entry.memoryFlush?.totalTokens);
+    const rearmAt = (lastFlushTokens ?? params.threshold) + rearmMargin;
+    if (totalTokens < rearmAt) {
       return false;
     }
   }
@@ -166,8 +164,17 @@ export function shouldRunPreflightCompaction(params: {
   tokenCount?: number;
   threshold: number;
 }): boolean {
-  const state = resolveMaintenanceGateState(params);
-  return Boolean(state && state.totalTokens >= state.threshold);
+  if (!params.entry) {
+    return false;
+  }
+  const totalTokens =
+    resolvePositiveTokenCount(params.tokenCount) ?? resolveFreshSessionTotalTokens(params.entry);
+  return (
+    typeof totalTokens === "number" &&
+    totalTokens > 0 &&
+    params.threshold > 0 &&
+    totalTokens >= params.threshold
+  );
 }
 
 /**

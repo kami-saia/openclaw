@@ -24,6 +24,7 @@ import {
   restoreRoleRefsForTarget,
 } from "./pw-session.js";
 import {
+  assertInteractionCurrent,
   awaitNavigationGuardedInteraction,
   createAbortPromiseWithListener,
   type ElementInteractionOptions,
@@ -80,6 +81,9 @@ export async function clickViaPlaywright(
       await moveCursorToLocator(page, locator, opts.signal);
       throwIfInteractionAborted(opts.signal);
       await sleepWithAbort(delayMs > 0 ? delayMs : humanClickSettleMs(), opts.signal);
+      if (opts.assertCurrent) {
+        await assertInteractionCurrent(opts);
+      }
       throwIfInteractionAborted(opts.signal);
       const clickOptions = { timeout, signal, button: opts.button, modifiers: opts.modifiers };
       await (opts.doubleClick ? locator.dblclick(clickOptions) : locator.click(clickOptions));
@@ -174,6 +178,7 @@ async function runGuardedPageInteraction<T>(
         page,
         ...interactionNavigationPolicy(opts),
         targetId: opts.targetId,
+        assertCurrent: opts.assertCurrent,
       },
       abortPromise,
       opts.signal,
@@ -278,6 +283,24 @@ export async function pressKeyViaPlaywright(
   });
 }
 
+export async function insertTextViaPlaywright(
+  opts: GuardedInteractionOptions & { text: string },
+): Promise<void> {
+  const page = await getPageForTargetId(opts);
+  ensurePageState(page);
+  await runGuardedPageInteraction(page, opts, async () => {
+    try {
+      // Native insertion preserves the focused frame and selection without reading the clipboard.
+      await page.keyboard.insertText(opts.text);
+    } catch {
+      // Playwright errors can contain the inserted text, including pasted passwords.
+      throw new Error(
+        "Unable to paste text into the browser. Focus an editable field and try again.",
+      );
+    }
+  });
+}
+
 export async function typeViaPlaywright(
   opts: ElementInteractionOptions & {
     text: string;
@@ -299,6 +322,9 @@ export async function typeViaPlaywright(
       // `delay: 75` typing is equally unlike a human. Pace both paths with
       // jittered per-character delays instead.
       await locator.click({ timeout, signal });
+      if (opts.assertCurrent) {
+        await assertInteractionCurrent(opts);
+      }
       throwIfInteractionAborted(opts.signal);
       await sleepWithAbort(humanClickSettleMs(), opts.signal);
       throwIfInteractionAborted(opts.signal);
@@ -317,6 +343,9 @@ export async function typeViaPlaywright(
         throwIfAborted: () => throwIfInteractionAborted(opts.signal),
       });
       if (opts.submit) {
+        if (opts.assertCurrent) {
+          await assertInteractionCurrent(opts);
+        }
         throwIfInteractionAborted(opts.signal);
         await sleepWithAbort(humanSubmitPauseMs(), opts.signal);
         throwIfInteractionAborted(opts.signal);
@@ -402,9 +431,9 @@ export async function evaluateViaPlaywright(
     }
     void forceDisconnectPlaywrightForTarget({
       cdpUrl: opts.cdpUrl,
+      page,
       targetId: opts.targetId,
       ssrfPolicy: opts.ssrfPolicy,
-      reason: "evaluate aborted",
     }).catch(() => {});
   });
   if (signal?.aborted) {
@@ -414,91 +443,54 @@ export async function evaluateViaPlaywright(
   try {
     const navigationPolicy = interactionNavigationPolicy(opts);
     const reconcileRemoteDialog = () => reconcileRemoteDialogAfterActionSettled(page, signal);
-
+    const evaluatorBody = `
+        "use strict";
+        var fnSource = args.fnSource, timeoutMs = args.timeoutMs;
+        try {
+          var candidate = eval("(" + fnSource + ")");
+          if (typeof candidate !== "function") {
+            throw new Error("evaluate source did not produce a function");
+          }
+          var result = candidate(${opts.ref ? "el" : ""});
+          if (result && typeof result.then === "function") {
+            return Promise.race([
+              result,
+              new Promise(function(_, reject) {
+                setTimeout(function() { reject(new Error("evaluate timed out after " + timeoutMs + "ms")); }, timeoutMs);
+              })
+            ]);
+          }
+          return result;
+        } catch (err) {
+          throw new Error("Invalid evaluate function: " + (err && err.message ? err.message : String(err)));
+        }
+      `;
+    const args = { fnSource, timeoutMs: evaluateTimeout };
+    let action: () => Promise<unknown>;
     if (opts.ref) {
       const locator = refLocator(page, opts.ref);
       // eslint-disable-next-line @typescript-eslint/no-implied-eval -- required for browser-context eval
-      const elementEvaluator = new Function(
-        "el",
-        "args",
-        `
-        "use strict";
-        var fnSource = args.fnSource, timeoutMs = args.timeoutMs;
-        try {
-          var candidate = eval("(" + fnSource + ")");
-          if (typeof candidate !== "function") {
-            throw new Error("evaluate source did not produce a function");
-          }
-          var result = candidate(el);
-          if (result && typeof result.then === "function") {
-            return Promise.race([
-              result,
-              new Promise(function(_, reject) {
-                setTimeout(function() { reject(new Error("evaluate timed out after " + timeoutMs + "ms")); }, timeoutMs);
-              })
-            ]);
-          }
-          return result;
-        } catch (err) {
-          throw new Error("Invalid evaluate function: " + (err && err.message ? err.message : String(err)));
-        }
-        `,
-      ) as (el: Element, args: { fnSource: string; timeoutMs: number }) => unknown;
-      return await awaitNavigationGuardedInteraction(
-        {
-          action: async () =>
-            await locator.evaluate(elementEvaluator, {
-              fnSource,
-              timeoutMs: evaluateTimeout,
-            }),
-          cdpUrl: opts.cdpUrl,
-          page,
-          ...navigationPolicy,
-          targetId: opts.targetId,
-        },
-        abortPromise,
-        signal,
-        reconcileRemoteDialog,
-      );
+      const evaluate = new Function("el", "args", evaluatorBody) as (
+        el: Element,
+        args: { fnSource: string; timeoutMs: number },
+      ) => unknown;
+      action = async () => await locator.evaluate(evaluate, args);
+    } else {
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval -- required for browser-context eval
+      const evaluate = new Function("args", evaluatorBody) as (args: {
+        fnSource: string;
+        timeoutMs: number;
+      }) => unknown;
+      action = async () => await page.evaluate(evaluate, args);
     }
-
-    // eslint-disable-next-line @typescript-eslint/no-implied-eval -- required for browser-context eval
-    const browserEvaluator = new Function(
-      "args",
-      `
-        "use strict";
-        var fnSource = args.fnSource, timeoutMs = args.timeoutMs;
-        try {
-          var candidate = eval("(" + fnSource + ")");
-          if (typeof candidate !== "function") {
-            throw new Error("evaluate source did not produce a function");
-          }
-          var result = candidate();
-          if (result && typeof result.then === "function") {
-            return Promise.race([
-              result,
-              new Promise(function(_, reject) {
-                setTimeout(function() { reject(new Error("evaluate timed out after " + timeoutMs + "ms")); }, timeoutMs);
-              })
-            ]);
-          }
-          return result;
-        } catch (err) {
-          throw new Error("Invalid evaluate function: " + (err && err.message ? err.message : String(err)));
-        }
-      `,
-    ) as (args: { fnSource: string; timeoutMs: number }) => unknown;
     return await awaitNavigationGuardedInteraction(
       {
-        action: async () =>
-          await page.evaluate(browserEvaluator, {
-            fnSource,
-            timeoutMs: evaluateTimeout,
-          }),
+        action,
         cdpUrl: opts.cdpUrl,
         page,
         ...navigationPolicy,
         targetId: opts.targetId,
+        assertCurrent: opts.assertCurrent,
       },
       abortPromise,
       signal,

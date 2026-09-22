@@ -14,6 +14,7 @@ import {
   createReleaseWorkflowMatrixPlan,
 } from "../../scripts/plan-release-workflow-matrix.mjs";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
+import { resolveWorkflowBash } from "../helpers/workflow-bash.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
@@ -324,8 +325,15 @@ describe("scripts/plan-release-workflow-matrix.mjs", () => {
     [
       "stable",
       "live-codex-harness-gpt56-docker",
-      ["live-codex-harness-gpt56-terra-docker", "live-codex-harness-gpt56-luna-docker"],
+      [
+        "live-codex-harness-gpt56-sol-docker",
+        "live-codex-harness-gpt56-terra-docker",
+        "live-codex-harness-gpt56-luna-docker",
+      ],
     ],
+    ["full", "live-codex-harness-gpt56-sol-docker", ["live-codex-harness-gpt56-sol-docker"]],
+    ["stable", "live-codex-harness-gpt56-sol-docker", ["live-codex-harness-gpt56-sol-docker"]],
+    ["beta", "live-codex-harness-gpt56-sol-docker", []],
     ["beta", "live-cache", []],
   ])(
     "binds focused Docker consumer rows for %s / %s",
@@ -457,6 +465,7 @@ describe("scripts/plan-release-workflow-matrix.mjs", () => {
 
   it("builds provider owners used by every direct and Gateway Docker live lane", () => {
     const definition = workflow();
+    const bash = process.platform === "darwin" ? resolveWorkflowBash() : "bash";
     const outputDir = tempDirs.make("openclaw-live-image-selection-");
     const outputPath = path.join(outputDir, "outputs");
     symlinkSync(path.resolve("scripts"), path.join(outputDir, "scripts"), "dir");
@@ -488,7 +497,7 @@ describe("scripts/plan-release-workflow-matrix.mjs", () => {
       "live image planner step",
     );
     expect(steps.indexOf(setup)).toBeLessThan(steps.indexOf(planner));
-    const planned = spawnSync("bash", ["-c", expectDefined(planner.run, "planner command")], {
+    const planned = spawnSync(bash, ["-c", expectDefined(planner.run, "planner command")], {
       cwd: outputDir,
       encoding: "utf8",
       env,
@@ -501,7 +510,7 @@ describe("scripts/plan-release-workflow-matrix.mjs", () => {
       ),
       "live image selection step",
     );
-    const result = spawnSync("bash", ["-c", expectDefined(step.run, "selection command")], {
+    const result = spawnSync(bash, ["-c", expectDefined(step.run, "selection command")], {
       encoding: "utf8",
       env: {
         ...env,

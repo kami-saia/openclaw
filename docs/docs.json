@@ -1803,6 +1803,8 @@
                     "group": "Meetings and calls",
                     "pages": [
                       "plugins/meeting-plugins",
+                      "plugins/facetime",
+                      "plugins/facetime-recovery",
                       "plugins/google-meet",
                       {
                         "group": "Google Meet",
@@ -1832,9 +1834,12 @@
                   {
                     "group": "Models and memory",
                     "pages": [
+                      "plugins/apple-fm",
                       "plugins/llama-cpp",
                       "plugins/memory-lancedb",
-                      "plugins/memory-wiki"
+                      "plugins/memory-wiki",
+                      "plugins/onnx",
+                      "plugins/typesafe"
                     ]
                   },
                   {
@@ -1852,6 +1857,7 @@
                       "plugins/geolocation",
                       "plugins/logbook",
                       "plugins/oc-path",
+                      "plugins/session-share",
                       "plugins/webhooks",
                       "plugins/workboard",
                       "plugins/zalouser"
@@ -2014,6 +2020,7 @@
                         "group": "Code Mode",
                         "pages": [
                           "tools/code-mode/quickstart",
+                          "tools/code-mode/executors",
                           "tools/code-mode/configuration",
                           "tools/code-mode/tool-surface",
                           "tools/code-mode/guest-api",
@@ -2046,7 +2053,8 @@
                       "tools/progress-card",
                       "tools/reactions",
                       "tools/screen",
-                      "tools/show-widget"
+                      "tools/show-widget",
+                      "tools/theme"
                     ]
                   },
                   {
@@ -2183,6 +2191,7 @@
                 "group": "Concepts and configuration",
                 "pages": [
                   "concepts/models",
+                  "concepts/decision-models",
                   "concepts/model-providers",
                   {
                     "group": "Model providers",
@@ -3193,6 +3202,7 @@
                 "group": "Release notes",
                 "pages": [
                   "releases/index",
+                  "releases/2026.9.5",
                   "releases/2026.9.4",
                   "releases/2026.9.3",
                   "releases/2026.9.2",

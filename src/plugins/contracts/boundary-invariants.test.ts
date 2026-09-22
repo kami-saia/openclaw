@@ -15,10 +15,12 @@ const tsFilesCache = new Map<string, string[]>();
 const BUNDLED_TYPED_HOOK_REGISTRATION_FILES = [
   "extensions/acpx/index.ts",
   "extensions/active-memory/index.ts",
+  "extensions/browser/plugin-registration.ts",
   "extensions/clickclack/src/discussions/register.ts",
   "extensions/codex/index.ts",
   "extensions/diffs/src/plugin.ts",
   "extensions/discord/subagent-hooks-api.ts",
+  "extensions/facetime/index.ts",
   "extensions/feishu/subagent-hooks-api.ts",
   // FORK: fork-guard is a fork-only bundled plugin; declare its typed hook here.
   "extensions/fork-guard/index.ts",
@@ -33,10 +35,12 @@ const BUNDLED_TYPED_HOOK_REGISTRATION_FILES = [
 const BUNDLED_TYPED_HOOK_REGISTRATION_GUARDS = {
   "extensions/acpx/index.ts": ["reply_dispatch"],
   "extensions/active-memory/index.ts": ["agent_end", "before_prompt_build"],
+  "extensions/browser/plugin-registration.ts": ["session_end"],
   "extensions/clickclack/src/discussions/register.ts": ["before_tool_call"],
   "extensions/codex/index.ts": ["inbound_claim", "session_end"],
   "extensions/diffs/src/plugin.ts": ["before_prompt_build"],
   "extensions/discord/subagent-hooks-api.ts": ["subagent_delivery_target", "subagent_ended"],
+  "extensions/facetime/index.ts": ["before_tool_call"],
   "extensions/feishu/subagent-hooks-api.ts": ["subagent_delivery_target", "subagent_ended"],
   // FORK: fork-guard scopes before_tool_call to the exec tool.
   "extensions/fork-guard/index.ts": ["before_tool_call"],
