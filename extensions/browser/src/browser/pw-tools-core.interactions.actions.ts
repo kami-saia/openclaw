@@ -275,7 +275,6 @@ export async function pressKeyViaPlaywright(
     throw new Error("key is required");
   }
   const page = await getPageForTargetId(opts);
-  ensurePageState(page);
   await runGuardedPageInteraction(page, opts, async () => {
     await page.keyboard.press(key, {
       delay: resolveNonNegativeIntegerOption(opts.delayMs, 0),
@@ -287,7 +286,6 @@ export async function insertTextViaPlaywright(
   opts: GuardedInteractionOptions & { text: string },
 ): Promise<void> {
   const page = await getPageForTargetId(opts);
-  ensurePageState(page);
   await runGuardedPageInteraction(page, opts, async () => {
     try {
       // Native insertion preserves the focused frame and selection without reading the clipboard.
@@ -344,7 +342,10 @@ export async function typeViaPlaywright(
       });
       if (opts.submit) {
         if (opts.assertCurrent) {
-          await assertInteractionCurrent(opts);
+          const assertion = assertInteractionCurrent(opts);
+          if (assertion) {
+            await assertion;
+          }
         }
         throwIfInteractionAborted(opts.signal);
         await sleepWithAbort(humanSubmitPauseMs(), opts.signal);

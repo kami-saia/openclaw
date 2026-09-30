@@ -30,7 +30,6 @@ import {
   resolveTurnModelOverride,
   resolveVisibleRepliesPolicy,
 } from "./dispatch-from-config.harness-defaults.js";
-import { extendPreparedDispatchState } from "./dispatch-from-config.phase-state.js";
 import type { PrepareDispatchDeliveryReadyState } from "./dispatch-from-config.prepare-delivery.js";
 import type { DispatchFromConfigResult } from "./dispatch-from-config.types.js";
 import { claimInboundDedupe } from "./inbound-dedupe.js";
@@ -54,6 +53,10 @@ import {
   setChannelSourceTurnId,
   shouldMintChannelSourceTurnId,
 } from "./source-turn-id.js";
+import {
+  isReplyOperationStalledBeforeOutput,
+  STALLED_TURN_NOTICE_TEXT,
+} from "./stalled-turn-recovery.js";
 
 export async function prepareDispatchOperationContext(state: PrepareDispatchDeliveryReadyState) {
   const {
@@ -152,13 +155,11 @@ export async function prepareDispatchOperationContext(state: PrepareDispatchDeli
         return lastOwner;
       }
     }
-    if (!lastOwner) {
-      recorder.markBlocked();
-      return blockedOwner();
-    }
     recorder.markBlocked();
-    logVerbose(`plugin-bound user-turn persistence skipped after the target session changed`);
-    return blockedOwner(lastOwner.expectedSessionId);
+    if (lastOwner) {
+      logVerbose(`plugin-bound user-turn persistence skipped after the target session changed`);
+    }
+    return blockedOwner(lastOwner?.expectedSessionId);
   };
 
   // Resolve automatic source-delivery suppression early so every outbound path
@@ -324,16 +325,6 @@ export async function prepareDispatchOperationContext(state: PrepareDispatchDeli
     },
   };
   Object.assign(sourceReplyPolicy, sourceReplyDeliveryRuntimeOptions);
-  const {
-    sourceReplyDeliveryMode,
-    sessionStableSourceReplyDeliveryMode,
-    suppressAutomaticSourceDelivery,
-    suppressDelivery,
-    sendPolicyDenied,
-    deliverySuppressionReason,
-    suppressHookUserDelivery,
-    suppressHookReplyLifecycle,
-  } = sourceReplyPolicy;
   const reasoningPayloadsEnabled = params.replyOptions?.reasoningPayloadsEnabled === true;
   const commentaryPayloadsEnabled = params.replyOptions?.commentaryPayloadsEnabled === true;
   const attachSourceReplyDeliveryMode = (
@@ -360,7 +351,7 @@ export async function prepareDispatchOperationContext(state: PrepareDispatchDeli
   const unauthorizedTextSlashSourceReplyCtx =
     (chatType === "group" || chatType === "channel") && isUnauthorizedTextSlashCommand(ctx);
   const shouldDeliverPluginBindingReply =
-    !suppressAutomaticSourceDelivery ||
+    !sourceReplyPolicy.suppressAutomaticSourceDelivery ||
     explicitCommandTurnCtx ||
     (ctx.InboundEventKind !== "room_event" && !unauthorizedTextSlashSourceReplyCtx);
 
@@ -466,17 +457,12 @@ export async function prepareDispatchOperationContext(state: PrepareDispatchDeli
     recordReplyOperationAgentTurn([state.replyOperationRunState], operation);
     // Feedback only for pre-run drops: the user never saw output. Finalization or
     // terminal-settle stalls already produced/settled output, so a notice is noise.
-    const droppedBeforeOutput =
-      operation?.result?.kind === "failed" &&
-      operation.result.code === "run_stalled" &&
-      (operation.staleExpiryReason === "no_activity" ||
-        operation.staleExpiryReason === "stuck_recovery");
-    const queuedFinal = droppedBeforeOutput
-      ? dispatcher.sendFinalReply({
-          text: "⚠️ This turn was interrupted because it stopped making progress. Please try again.",
-          isError: true,
-        })
-      : false;
+    // Last resort: an armed run owner first hands the request to the follow-up lane.
+    const queuedFinal =
+      isReplyOperationStalledBeforeOutput(operation) &&
+      state.replyOperationRunState.continueStalledTurn?.() !== true
+        ? dispatcher.sendFinalReply({ text: STALLED_TURN_NOTICE_TEXT, isError: true })
+        : false;
     if (
       state.turnAdoptionState &&
       !state.turnAdoptionState.adopted &&
@@ -528,7 +514,7 @@ export async function prepareDispatchOperationContext(state: PrepareDispatchDeli
       }),
     };
   }
-  const nextState = extendPreparedDispatchState(state, {
+  const nextState = Object.assign(state, {
     sendBindingNotice,
     pluginOwnedBinding,
     pluginBindingSessionKey,
@@ -538,14 +524,7 @@ export async function prepareDispatchOperationContext(state: PrepareDispatchDeli
     chatType,
     sourceReplyPolicy,
     sourceReplyDeliveryRuntimeOptions,
-    sourceReplyDeliveryMode,
-    sessionStableSourceReplyDeliveryMode,
-    suppressAutomaticSourceDelivery,
-    suppressDelivery,
-    sendPolicyDenied,
-    deliverySuppressionReason,
-    suppressHookUserDelivery,
-    suppressHookReplyLifecycle,
+    ...sourceReplyPolicy,
     reasoningPayloadsEnabled,
     commentaryPayloadsEnabled,
     attachSourceReplyDeliveryMode,

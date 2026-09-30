@@ -1,4 +1,4 @@
-/** Prepares the session-owned runtime used by one embedded attempt. */
+import type { ContextEngine } from "../../../context-engine/types.js";
 import { createAnthropicPayloadLogger } from "../../anthropic-payload-log.js";
 import { createCacheTrace } from "../../cache-trace.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../defaults.js";
@@ -9,7 +9,6 @@ import { restoreCacheTtlToolResultProjections } from "../tool-result-truncation.
 // FORK: overflow fallback session-manager registry.
 import { registerAgentOverflowSessionManager } from "./agent-overflow-fallback.js";
 import type { prepareEmbeddedAttemptBundleTools } from "./attempt-bundle-tools.js";
-import type { AttemptContextEngine } from "./attempt-context-engine-helpers.js";
 // FORK: served_model= divergence token.
 import { resolveDivergentServedModel } from "./attempt-served-model.js";
 import {
@@ -45,13 +44,13 @@ type EmbeddedAttemptSessionRuntimeState = {
 
 export async function prepareEmbeddedAttemptSessionRuntime(input: {
   attempt: EmbeddedRunAttemptParams;
-  activeContextEngine?: AttemptContextEngine;
+  activeContextEngine?: ContextEngine;
   agentDir: string;
   isRawModelRun: boolean;
   resolveActiveContextEnginePluginId: () => string | undefined;
   setup: EmbeddedAttemptSetup;
   toolBase: Awaited<ReturnType<typeof prepareEmbeddedAttemptToolBase>>;
-  toolCatalog: ReturnType<typeof prepareEmbeddedAttemptToolCatalog>;
+  toolCatalog: Awaited<ReturnType<typeof prepareEmbeddedAttemptToolCatalog>>;
   bundleTools: Awaited<ReturnType<typeof prepareEmbeddedAttemptBundleTools>>;
   systemPrompt: Awaited<ReturnType<typeof prepareEmbeddedAttemptSystemPrompt>>;
   sessionLock: Awaited<ReturnType<typeof prepareEmbeddedAttemptTranscriptLifecycle>>;
@@ -116,7 +115,6 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
     replayAllowedToolNames: toolSearchRunPlan.replayAllowedToolNames,
     resolveActiveContextEnginePluginId: input.resolveActiveContextEnginePluginId,
     sessionAgentId,
-    transcriptLifecycle: sessionLock.transcriptLifecycle,
     withOwnedTranscriptWrite: sessionLock.withOwnedTranscriptWrite,
   });
   const { isOpenAIResponsesApi, preparedUserTurnMessage, sessionManager, transcriptPolicy } =
@@ -144,7 +142,6 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
       deferredDirectoryToolsCallable,
       effectiveTools,
       replaySafetyOptions,
-      sandboxEnabled: Boolean(sandbox?.enabled),
       sandboxSessionKey,
       sessionAgentId,
       toolSearchCatalogRef,
@@ -284,6 +281,7 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
 
   const transport = await prepareEmbeddedAttemptTransport({
     attempt,
+    assertCronRootCurrent: sessionLock.assertCronRootCurrent,
     session: activeSession,
     settingsManager,
     providerThinkingLevel,

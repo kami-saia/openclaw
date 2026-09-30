@@ -1,5 +1,5 @@
 /** Playwright-backed HTML capture for scoped Browser extraction. */
-import type { SsrFPolicy } from "../infra/net/ssrf.js";
+import type { SsrFPolicy } from "openclaw/plugin-sdk/security-runtime";
 import { getPageForTargetId } from "./pw-session.js";
 
 type BrowserPageContentCapture =
