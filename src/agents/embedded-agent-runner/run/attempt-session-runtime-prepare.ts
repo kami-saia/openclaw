@@ -246,8 +246,7 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
   });
   resources.removeToolResultContextGuard = contextGuards.remove;
 
-  const cacheTrace = createCacheTrace({
-    cfg: attempt.config,
+  const traceContext = {
     env: process.env,
     runId: attempt.runId,
     sessionId: activeSession.sessionId,
@@ -256,17 +255,9 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
     modelId: attempt.modelId,
     modelApi: attempt.model.api,
     workspaceDir: attempt.workspaceDir,
-  });
-  const anthropicPayloadLogger = createAnthropicPayloadLogger({
-    env: process.env,
-    runId: attempt.runId,
-    sessionId: activeSession.sessionId,
-    sessionKey: attempt.sessionKey,
-    provider: attempt.provider,
-    modelId: attempt.modelId,
-    modelApi: attempt.model.api,
-    workspaceDir: attempt.workspaceDir,
-  });
+  };
+  const cacheTrace = createCacheTrace({ cfg: attempt.config, ...traceContext });
+  const anthropicPayloadLogger = createAnthropicPayloadLogger(traceContext);
   const trajectoryRecorder = await prepareEmbeddedAttemptTrajectory({
     activeSession,
     attempt,

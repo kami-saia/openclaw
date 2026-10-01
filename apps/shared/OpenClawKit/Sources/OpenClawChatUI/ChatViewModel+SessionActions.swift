@@ -74,6 +74,25 @@ extension OpenClawChatViewModel {
         let generation: UInt64
     }
 
+    func beginSessionBranchSwitchActivity(for session: SessionSnapshot) -> SessionBranchSwitchActivity {
+        self.nextSessionBranchSwitchGeneration &+= 1
+        let activity = SessionBranchSwitchActivity(
+            session: session,
+            generation: self.nextSessionBranchSwitchGeneration)
+        self.sessionBranchSwitchActivity = activity
+        return activity
+    }
+
+    func isCurrentSessionBranchSwitchActivity(_ activity: SessionBranchSwitchActivity) -> Bool {
+        self.sessionBranchSwitchActivity == activity && self.isCurrentSession(activity.session)
+    }
+
+    func endSessionBranchSwitchActivity(_ activity: SessionBranchSwitchActivity) {
+        guard self.isCurrentSessionBranchSwitchActivity(activity) else { return }
+        self.sessionBranchSwitchActivity = nil
+        self.flushOutboxIfNeeded()
+    }
+
     var isSwitchingSessionBranch: Bool {
         self.sessionBranchSwitchActivity != nil
     }
@@ -299,11 +318,7 @@ extension OpenClawChatViewModel {
         receipt = try await routeLease.patchSession(
             key: key,
             agentID: target.agentID,
-            label: nil,
-            category: .some(nextGroup),
-            pinned: nil,
-            archived: nil,
-            unread: nil)
+            category: .some(nextGroup))
         if owner == nil,
            let index = self.sessions.firstIndex(where: { self.sessionMatchesTarget($0, target: target) })
         {
@@ -364,11 +379,7 @@ extension OpenClawChatViewModel {
                 receipt = try await routeLease.patchSession(
                     key: key,
                     agentID: targets[key]?.agentID,
-                    label: nil,
-                    category: nil,
-                    pinned: action == .pin,
-                    archived: nil,
-                    unread: nil)
+                    pinned: action == .pin)
             case .archive:
                 guard let expectedSessionID = entries[key]?.sessionId?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -380,11 +391,7 @@ extension OpenClawChatViewModel {
                     key: key,
                     agentID: targets[key]?.agentID,
                     expectedSessionID: expectedSessionID,
-                    label: nil,
-                    category: nil,
-                    pinned: nil,
-                    archived: true,
-                    unread: nil)
+                    archived: true)
             case .delete:
                 try await routeLease.deleteSession(key: key, agentID: targets[key]?.agentID)
                 if owner?.scopeRevision == epoch, let row = entries[key] { owner?.remove(row) }
@@ -471,11 +478,7 @@ extension OpenClawChatViewModel {
                     key: key,
                     agentID: target.agentID,
                     expectedSessionID: row?.sessionId,
-                    label: .some(nextLabel),
-                    category: nil,
-                    pinned: nil,
-                    archived: nil,
-                    unread: nil)
+                    label: .some(nextLabel))
             })
     }
 
@@ -916,12 +919,7 @@ extension OpenClawChatViewModel {
             receipt = try await routeLease.patchSession(
                 key: key,
                 agentID: target.agentID,
-                label: nil,
-                category: nil,
-                color: .some(color),
-                pinned: nil,
-                archived: nil,
-                unread: nil)
+                color: .some(color))
             self.refreshSessions(limit: Self.sessionListFetchLimit)
         } catch {
             self.errorText = error.localizedDescription
@@ -943,11 +941,7 @@ extension OpenClawChatViewModel {
                     key: key,
                     agentID: target.agentID,
                     expectedSessionID: row?.sessionId,
-                    label: nil,
-                    category: nil,
-                    pinned: pinned,
-                    archived: nil,
-                    unread: nil)
+                    pinned: pinned)
             })
     }
 
@@ -972,11 +966,7 @@ extension OpenClawChatViewModel {
                     key: key,
                     agentID: target.agentID,
                     expectedSessionID: expectedSessionID,
-                    label: nil,
-                    category: nil,
-                    pinned: nil,
-                    archived: true,
-                    unread: nil)
+                    archived: true)
                 if self.matchesCurrentSessionKey(incoming: key, agentId: target.agentID, current: self.sessionKey) {
                     // The archived session rejects new sends; return to the main session.
                     self.switchSession(to: self.resolvedMainSessionKey)
@@ -1011,12 +1001,7 @@ extension OpenClawChatViewModel {
                 key: session.key,
                 agentID: target.agentID,
                 expectedSessionID: expectedSessionID,
-                label: nil,
-                category: nil,
-                color: nil,
-                pinned: nil,
-                archived: false,
-                unread: nil)
+                archived: false)
             self.refreshSessions()
             return true
         } catch {

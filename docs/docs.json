@@ -1642,6 +1642,7 @@
                 "pages": [
                   "concepts/agent-workspace",
                   "concepts/managed-worktrees",
+                  "concepts/storage-locations",
                   "concepts/oauth",
                   "start/bootstrapping",
                   "concepts/experimental-features"
@@ -1735,6 +1736,7 @@
               {
                 "group": "Plugin guides",
                 "pages": [
+                  "plugins/agentsapi",
                   {
                     "group": "Codex",
                     "pages": [
@@ -1816,6 +1818,7 @@
                     "pages": [
                       "plugins/admin-http-rpc",
                       "plugins/beam",
+                      "plugins/cloudflare",
                       "plugins/geolocation",
                       "plugins/logbook",
                       "plugins/oc-path",
@@ -2751,6 +2754,7 @@
                       "cli/openclaw",
                       "cli/reset",
                       "cli/setup",
+                      "cli/storage",
                       "cli/uninstall",
                       "cli/update",
                       {
@@ -3166,6 +3170,7 @@
                 "group": "Release notes",
                 "pages": [
                   "releases/index",
+                  "releases/2026.9.7",
                   "releases/2026.9.6",
                   "releases/2026.9.5",
                   "releases/2026.9.4",

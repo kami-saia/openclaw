@@ -215,6 +215,7 @@ async function runEmbeddedAttemptOwned(
     restoreSkillEnv = preparedSkills.restoreSkillEnv;
     const {
       codeModeSkills,
+      installedSkills,
       skillReadResources,
       skillUsagePaths,
       skillsPrompt,
@@ -306,10 +307,11 @@ async function runEmbeddedAttemptOwned(
         },
         setup,
         markCoreToolStage: (name) => corePluginToolStages.mark(name),
-        onYield: (message, acknowledgment) => {
+        onYield: (message, acknowledgment, messageWaitRegistered) => {
           yieldDetected = true;
           yieldMessage = message;
           yieldAcknowledgment = acknowledgment;
+          yieldMessageWaitRegistered = messageWaitRegistered;
           queueYieldInterruptForSession?.();
           runAbortController.abort(SESSIONS_YIELD_ABORT_REASON);
           abortSessionForYield?.();
@@ -320,6 +322,7 @@ async function runEmbeddedAttemptOwned(
         skillReadResources,
         skillsSnapshot: skillsSnapshotForRun,
         codeModeSkills,
+        installedSkills,
         reviewTranscript: () => {
           if (!resources.session || runAbortController.signal.aborted) {
             return undefined;
@@ -368,6 +371,7 @@ async function runEmbeddedAttemptOwned(
     let yieldDetected = false;
     let yieldMessage: string | null = null;
     let yieldAcknowledgment: string | undefined;
+    let yieldMessageWaitRegistered: boolean | undefined;
     // Late-binding reference so onYield can abort the session (declared after tool creation)
     let abortSessionForYield: (() => void) | null = null;
     let queueYieldInterruptForSession: (() => void) | null = null;
@@ -531,6 +535,7 @@ async function runEmbeddedAttemptOwned(
             yieldDetected,
             yieldMessage,
             yieldAcknowledgment,
+            yieldMessageWaitRegistered,
           }),
           setToolSearchCatalogExecutor: (executor) => {
             toolSearchCatalogExecutor = executor;

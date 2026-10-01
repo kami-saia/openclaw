@@ -250,6 +250,10 @@ describe("listGatewayMethods", () => {
       "users.merge",
       "gateway.stop.request",
       "diagnostics.heapSnapshot",
+      "sessions.catalog.import",
+      "backup.status",
+      "storage.locations.list",
+      "storage.locations.probe",
       // FORK: tts.stream appends last so the frozen prefix keeps its indices.
       "tts.stream",
     ];
@@ -323,6 +327,10 @@ describe("listGatewayMethods", () => {
       "users.merge",
       "gateway.stop.request",
       "diagnostics.heapSnapshot",
+      "sessions.catalog.import",
+      "backup.status",
+      "storage.locations.list",
+      "storage.locations.probe",
       // FORK: tts.stream appends last so the frozen prefix keeps its indices.
       "tts.stream",
     ]);
@@ -524,6 +532,10 @@ describe("listGatewayMethods", () => {
       "users.merge",
       "gateway.stop.request",
       "diagnostics.heapSnapshot",
+      "sessions.catalog.import",
+      "backup.status",
+      "storage.locations.list",
+      "storage.locations.probe",
       // FORK: tts.stream appends last so the frozen prefix keeps its indices.
       "tts.stream",
     ];

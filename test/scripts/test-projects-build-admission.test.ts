@@ -654,6 +654,8 @@ describe("automatic exact-target admission", () => {
 
   it.each([
     { name: "CI=1", expected: 2 },
+    { name: "changed targets", changed: true, expected: 2 },
+    { name: "changed targets with serial override", changed: true, serial: "1", expected: 1 },
     { name: "CI=true", ci: "true", expected: 2 },
     { name: "unresolved config outputs", args: [], expected: 1 },
     { name: "console reporter without coverage override", args: ["--reporter=dot"], expected: 1 },
@@ -682,7 +684,7 @@ describe("automatic exact-target admission", () => {
     { name: "caller cache leaf", callerLeaf: true, expected: 1 },
   ])(
     "preserves resolved specs and policy for $name",
-    async ({ ci, cpus, gib, parallel, serial, portable, callerLeaf, args, expected }) => {
+    async ({ ci, cpus, gib, parallel, serial, portable, callerLeaf, args, changed, expected }) => {
       vi.stubEnv("CI", ci ?? "1");
       vi.stubEnv("OPENCLAW_TEST_PROJECTS_PARALLEL", parallel ?? "");
       vi.stubEnv("OPENCLAW_TEST_PROJECTS_SERIAL", serial ?? "");
@@ -697,6 +699,10 @@ describe("automatic exact-target admission", () => {
       vi.mocked(os.availableParallelism).mockReturnValue(cpus ?? 8);
       vi.mocked(os.totalmem).mockReturnValue((gib ?? 24) * 1024 ** 3);
       const planner = await import("../../scripts/test-projects.test-support.mts");
+      if (changed) {
+        const lanes = await import("../../scripts/changed-lanes.mts");
+        vi.spyOn(lanes, "listChangedPathsFromGit").mockReturnValue(files);
+      }
       const produced = vi.spyOn(planner, "createVitestRunSpecs");
       const { runTestProjects } = await import("../../scripts/test-projects-run.mts");
       const selections: Array<{ config: string; include: string[] | null; workers: string }> = [];
@@ -720,11 +726,17 @@ describe("automatic exact-target admission", () => {
           getForwardedSignal: () => undefined,
         };
       });
-      await runTestProjects(async () => {}, [...files, ...(args ?? outputArgs)]);
+      await runTestProjects(async () => {}, [
+        ...(changed ? ["--changed", "origin/main"] : files),
+        ...(args ?? outputArgs),
+      ]);
       const specs = produced.mock.results[0]!.value as ReturnType<
         typeof planner.createVitestRunSpecs
       >;
       expect(specs.length).toBeGreaterThanOrEqual(3);
+      if (changed) {
+        expect(specs.some((spec) => spec.pnpmArgs.includes("--passWithNoTests=false"))).toBe(false);
+      }
       expect(peak).toBe(expected);
       const actual = selections.map(({ config, include }) => ({ config, include }));
       const planned = specs.map((spec) => ({ config: spec.config, include: spec.includePatterns }));
@@ -737,9 +749,15 @@ describe("automatic exact-target admission", () => {
     },
   );
 
-  it.each(["success", "failure", "SIGTERM"])(
-    "joins the real Gateway plan barrier before later admission and disposal (%s)",
-    async (outcome) => {
+  it.each([
+    { outcome: "success", mode: "automatic" },
+    { outcome: "failure", mode: "automatic" },
+    { outcome: "SIGTERM", mode: "automatic" },
+    { outcome: "success", mode: "explicit parallel" },
+    { outcome: "success", mode: "full suite" },
+  ])(
+    "joins the real Gateway plan barrier before later admission and disposal ($mode, $outcome)",
+    async ({ outcome, mode }) => {
       const workerOwner = await import("../../scripts/lib/vitest-worker-run.mts");
       const original = workerOwner.createVitestWorkerRun;
       const events: string[] = [];
@@ -754,10 +772,16 @@ describe("automatic exact-target admission", () => {
         return worker;
       });
       const { runTestProjects } = await import("../../scripts/test-projects-run.mts");
-      const barrierFiles = ["src/utils.test.ts", "src/gateway/call.test.ts", modelTarget];
+      const gatewayFile =
+        mode === "automatic"
+          ? "src/gateway/call.test.ts"
+          : "src/gateway/server.sessions.fixture-lifecycle.test.ts";
+      const barrierFiles = ["src/utils.test.ts", gatewayFile, modelTarget];
       const configs = [
         "test/vitest/vitest.unit-fast-fake-timers.config.ts",
-        "test/vitest/vitest.gateway.config.ts",
+        mode === "automatic"
+          ? "test/vitest/vitest.gateway.config.ts"
+          : "test/vitest/vitest.gateway-server.config.ts",
         "test/vitest/vitest.agents-embedded-agent.config.ts",
       ];
       const planner = await import("../../scripts/test-projects.test-support.mts");
@@ -765,6 +789,22 @@ describe("automatic exact-target admission", () => {
       expect(
         planner.buildVitestRunPlans([...barrierFiles, ...outputArgs]).map(({ config }) => config),
       ).toEqual(configs);
+      if (mode !== "automatic") {
+        vi.stubEnv("OPENCLAW_TEST_PROJECTS_PARALLEL", "3");
+        // Hold the ordinary/Gateway/ordinary order; timing weights have separate coverage.
+        vi.spyOn(planner, "orderFullSuiteSpecsForParallelRun").mockImplementation((specs) => specs);
+      }
+      if (mode === "full suite") {
+        vi.spyOn(planner, "buildFullSuiteVitestRunPlans").mockReturnValue(
+          configs.map((config, index) => ({
+            config,
+            forwardedArgs: [...outputArgs, barrierFiles[index]!],
+            timingTargets: [barrierFiles[index]!],
+            includePatterns: null,
+            watchMode: false,
+          })),
+        );
+      }
       const releases = configs.map(() => createDeferred());
       const admissions = configs.map(() => createDeferred());
       const selected: string[] = [];
@@ -788,7 +828,10 @@ describe("automatic exact-target admission", () => {
         };
       });
       const exit = vi.fn(async () => {});
-      const running = runTestProjects(exit, [...barrierFiles, ...outputArgs]);
+      const running = runTestProjects(
+        exit,
+        mode === "full suite" ? outputArgs : [...barrierFiles, ...outputArgs],
+      );
       try {
         for (let index = 0; index < 2; index++) {
           await withTestTimeout(

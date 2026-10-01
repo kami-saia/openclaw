@@ -4,18 +4,16 @@ import { parseByteSize } from "../cli/parse-bytes.js";
 import { parseDurationMs } from "../cli/parse-duration.js";
 import { createAllowDenyChannelRulesSchema } from "./zod-schema.allowdeny.js";
 
-const SessionResetConfigSchema = z
-  .object({
-    // FORK: keep "never" alongside upstream's "none" - live configs persist "never"
-    // (~/.openclaw/openclaw.json session.reset.mode). Normalized to "none" in
-    // sessions/reset-policy.ts; this union only keeps the strict parse from rejecting it.
-    mode: z
-      .union([z.literal("none"), z.literal("daily"), z.literal("idle"), z.literal("never")])
-      .optional(),
-    atHour: z.number().int().min(0).max(23).optional(),
-    idleMinutes: z.number().int().positive().optional(),
-  })
-  .strict();
+const SessionResetConfigSchema = z.strictObject({
+  // FORK: keep "never" alongside upstream's "none" - live configs persist "never"
+  // (~/.openclaw/openclaw.json session.reset.mode). Normalized to "none" in
+  // sessions/reset-policy.ts; this union only keeps the strict parse from rejecting it.
+  mode: z
+    .union([z.literal("none"), z.literal("daily"), z.literal("idle"), z.literal("never")])
+    .optional(),
+  atHour: z.number().int().min(0).max(23).optional(),
+  idleMinutes: z.number().int().positive().optional(),
+});
 
 const PositiveDurationSchema = z.union([z.string(), z.number()]).superRefine((value, ctx) => {
   try {
@@ -39,7 +37,7 @@ const PositiveDurationSchema = z.union([z.string(), z.number()]).superRefine((va
 const SessionSendPolicySchema = createAllowDenyChannelRulesSchema();
 
 export const SessionSchema = z
-  .object({
+  .strictObject({
     scope: z.union([z.literal("per-sender"), z.literal("global")]).optional(),
     dmScope: z
       .enum(["main", "per-peer", "per-channel-peer", "per-account-channel-peer"])
@@ -50,44 +48,40 @@ export const SessionSchema = z
     resetTriggers: z.array(z.string()).optional(),
     reset: SessionResetConfigSchema.optional(),
     resetByType: z
-      .object({
+      .strictObject({
         direct: SessionResetConfigSchema.optional(),
         group: SessionResetConfigSchema.optional(),
         thread: SessionResetConfigSchema.optional(),
       })
-      .strict()
       .optional(),
     resetByChannel: z.record(z.string(), SessionResetConfigSchema).optional(),
     store: z.string().optional(),
     mainKey: z.string().optional(),
     sendPolicy: SessionSendPolicySchema.optional(),
     threadBindings: z
-      .object({
+      .strictObject({
         enabled: z.boolean().optional(),
         idleHours: z.number().nonnegative().optional(),
         maxAgeHours: z.number().nonnegative().optional(),
         spawnSessions: z.boolean().optional(),
         defaultSpawnContext: z.enum(["isolated", "fork"]).optional(),
       })
-      .strict()
       .optional(),
     sharing: z
-      .object({
+      .strictObject({
         readOnly: z.boolean().optional(),
         suggest: z.boolean().optional(),
         drafts: z.boolean().optional(),
       })
-      .strict()
       .optional(),
     maintenance: z
-      .object({
+      .strictObject({
         mode: z.enum(["enforce", "warn"]).optional(),
         coldStorage: z
-          .object({
+          .strictObject({
             enabled: z.boolean().optional(),
             afterDays: z.number().int().positive().optional(),
           })
-          .strict()
           .optional(),
         pruneAfter: PositiveDurationSchema.optional(),
         archiveDashboardAfter: z
@@ -99,7 +93,6 @@ export const SessionSchema = z
         maxDiskBytes: z.union([z.string(), z.number(), z.literal(false)]).optional(),
         highWaterBytes: z.union([z.string(), z.number()]).optional(),
       })
-      .strict()
       .superRefine((val, ctx) => {
         for (const key of ["maxDiskBytes", "highWaterBytes"] as const) {
           const value = val[key];
@@ -121,5 +114,4 @@ export const SessionSchema = z
       })
       .optional(),
   })
-  .strict()
   .optional();

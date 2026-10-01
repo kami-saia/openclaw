@@ -18,6 +18,7 @@ public final class OpenClawChatViewModel {
     }
 
     let sourcePreviewState = ChatSourcePreviewState()
+    let reactionState = ChatMessageReactionState()
 
     public var input: String = "" {
         didSet {
@@ -617,6 +618,7 @@ public final class OpenClawChatViewModel {
         guard !self.isTransportDetached else { return }
         self.cancelHistoryInvalidationRefresh()
         self.retireQuestionAuthority()
+        self.resetSessionReactions()
         self.isTransportDetached = true
         self.sidebarData?.invalidate(clear: true)
         let transport = self.transport
@@ -815,25 +817,6 @@ extension OpenClawChatViewModel {
             (!contractSensitive || self.sessionRoutingContract == snapshot.sessionRoutingContract)
     }
 
-    func beginSessionBranchSwitchActivity(for session: SessionSnapshot) -> SessionBranchSwitchActivity {
-        self.nextSessionBranchSwitchGeneration &+= 1
-        let activity = SessionBranchSwitchActivity(
-            session: session,
-            generation: self.nextSessionBranchSwitchGeneration)
-        self.sessionBranchSwitchActivity = activity
-        return activity
-    }
-
-    func isCurrentSessionBranchSwitchActivity(_ activity: SessionBranchSwitchActivity) -> Bool {
-        self.sessionBranchSwitchActivity == activity && self.isCurrentSession(activity.session)
-    }
-
-    func endSessionBranchSwitchActivity(_ activity: SessionBranchSwitchActivity) {
-        guard self.isCurrentSessionBranchSwitchActivity(activity) else { return }
-        self.sessionBranchSwitchActivity = nil
-        self.flushOutboxIfNeeded()
-    }
-
     func reconcileSessionBranchChange(
         _ activity: SessionBranchSwitchActivity,
         confirmedLeafEntryID: String? = nil,
@@ -900,6 +883,7 @@ extension OpenClawChatViewModel {
         self.isLoading = true
         self.errorText = nil
         self.invalidateSessionMetadataReadiness()
+        self.resetSessionReactions()
         self.invalidateProgressCardTarget()
         self.invalidateOutboxBranchReconciliation()
         self.healthOK = false
@@ -1126,6 +1110,7 @@ extension OpenClawChatViewModel {
             syncThinkingLevelOptions()
             persistSessionsToCache(organized, agentID: session.deliveryAgentID)
             self.readySessionMetadataGeneration = metadataGeneration
+            self.syncSessionReactions()
             if self.healthOK {
                 reconcilePendingOutboxBranchScopes()
             }
@@ -1265,6 +1250,7 @@ extension OpenClawChatViewModel {
 
     /// Clears state owned by the current session/agent before a new identity can consume events.
     func clearSessionOwnedState() {
+        self.resetSessionReactions()
         self.invalidateComposerCapabilities()
         self.modelSelectionID = Self.defaultModelSelectionID
         self.modelAvailabilityIsSessionScoped = false
