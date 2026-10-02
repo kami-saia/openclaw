@@ -14,7 +14,8 @@ import {
 
 function expectSubagentAllowedBootstrapNames(files: WorkspaceBootstrapFile[]) {
   const names = files.map((file) => file.name);
-  expect(names).toStrictEqual(["AGENTS.md"]);
+  // FORK(b1be083f250): subagents also get SOUL.md + IDENTITY.md; MEMORY/USER stay out.
+  expect(names).toStrictEqual(["AGENTS.md", "SOUL.md", "IDENTITY.md"]);
 }
 
 function expectCronAllowedBootstrapNames(files: WorkspaceBootstrapFile[]) {

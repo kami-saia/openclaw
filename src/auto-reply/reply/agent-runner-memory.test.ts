@@ -914,6 +914,8 @@ describe("runMemoryFlushIfNeeded", () => {
       expect(loadMainSessionEntry(storePath).memoryFlush).toEqual({
         kind: "succeeded",
         compactionCount: 1,
+        // FORK(memory-flush re-arm): the signal-time context size is persisted.
+        totalTokens: expect.any(Number),
       });
     } finally {
       if (cleanup) {
@@ -1740,7 +1742,9 @@ describe("runMemoryFlushIfNeeded", () => {
       totalTokensFresh: false,
       compactionCount: 0,
       // A prior flush prevents a new model usage report from hiding the stale anchor.
-      memoryFlush: { kind: "succeeded", compactionCount: 0 },
+      // FORK(memory-flush re-arm): record that flush at a size above this transcript,
+      // otherwise the fork re-arm gate (threshold + soft margin) fires a new flush here.
+      memoryFlush: { kind: "succeeded", compactionCount: 0, totalTokens: 1_000_000 },
     });
     await writeTestSessionStore(storePath, "main", sessionEntry);
 

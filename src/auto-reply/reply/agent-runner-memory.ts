@@ -1447,6 +1447,15 @@ export async function runMemoryFlushIfNeeded(params: {
     abortSignal,
   });
   const flushedCompactionCount = activeSessionEntry?.compactionCount ?? 0;
+  // FORK(memory-flush re-arm, 302d5e072d2): persist the context size at signal
+  // time so shouldRunMemoryFlush can re-arm once the session grows another
+  // soft-threshold past it without a compaction landing. Lost in the
+  // 2026-09-10 merge; without it the gate always falls back to threshold+margin.
+  const flushSignalTokens = tokenCountForFlush ?? activeSessionEntry?.totalTokens;
+  const flushSignalTokensField =
+    typeof flushSignalTokens === "number" && Number.isFinite(flushSignalTokens)
+      ? { totalTokens: Math.floor(flushSignalTokens) }
+      : {};
   let visibleErrorPayloads: ReplyPayload[] = [];
   // Only the bounded phase belongs to the parent turn; maintenance content stays private.
   const parentRunId = params.opts?.runId;
@@ -1600,7 +1609,11 @@ export async function runMemoryFlushIfNeeded(params: {
         const updatedEntry = await updateSessionEntry(
           { storePath: params.storePath, sessionKey: params.sessionKey },
           async () => ({
-            memoryFlush: { kind: "succeeded", compactionCount: flushedCompactionCount },
+            memoryFlush: {
+              kind: "succeeded",
+              compactionCount: flushedCompactionCount,
+              ...flushSignalTokensField,
+            },
           }),
           { skipMaintenance: true, takeCacheOwnership: true },
         );

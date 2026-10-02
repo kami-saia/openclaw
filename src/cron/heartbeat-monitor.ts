@@ -74,8 +74,6 @@ export function resolveHeartbeatMonitorPlan(
   existingJobs: readonly CronJob[],
   options: { schedulerSeed?: string } = {},
 ): HeartbeatMonitorPlan {
-  // FORK(retired): our duplicate-monitor collection landed upstream as
-  // partitionSystemMonitors, which retains the same losers list. Using it.
   const { retained: existingByAgentId, duplicates } = partitionSystemMonitors(
     existingJobs,
     heartbeatMonitorAgentId,

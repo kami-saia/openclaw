@@ -116,6 +116,7 @@ vi.mock("../../sessions/session-participant-recording.js", () => ({
 
 let createSessionsListTool: typeof import("./sessions-list-tool.js").createSessionsListTool;
 let createSessionsSendTool: typeof import("./sessions-send-tool.js").createSessionsSendTool;
+let forkFireAndForgetTesting: typeof import("./sessions-send-tool.js").forkFireAndForgetTesting;
 let resolveAnnounceTarget: (typeof import("./sessions-announce-target.js"))["resolveAnnounceTarget"];
 let setActivePluginRegistry: (typeof import("../../plugins/runtime.js"))["setActivePluginRegistry"];
 const MAIN_AGENT_SESSION_KEY = "agent:main:main";
@@ -176,7 +177,7 @@ function requireGatewayRequest(index = 0) {
 
 beforeAll(async () => {
   ({ createSessionsListTool } = await import("./sessions-list-tool.js"));
-  ({ createSessionsSendTool } = await import("./sessions-send-tool.js"));
+  ({ createSessionsSendTool, forkFireAndForgetTesting } = await import("./sessions-send-tool.js"));
   ({ resolveAnnounceTarget } = await import("./sessions-announce-target.js"));
   ({ setActivePluginRegistry } = await import("../../plugins/runtime.js"));
 });
@@ -814,6 +815,11 @@ describe("sessions_list channel derivation", () => {
 describe("sessions_send gating", () => {
   beforeEach(() => {
     callGatewayMock.mockReset();
+    // FORK(fire-and-forget): these cases cover upstream's synchronous/A2A contract.
+    forkFireAndForgetTesting.setForTest(false);
+  });
+  afterEach(() => {
+    forkFireAndForgetTesting.reset();
   });
 
   it("returns an error when neither sessionKey nor label is provided", async () => {

@@ -40,8 +40,6 @@ const TRAIN_2026_7_METHODS = [
   "audit.run.inspect",
   "board.widget.appView",
   "tts.speak",
-  // FORK: tts.stream ships alongside tts.speak on the 2026.7 train.
-  "tts.stream",
   "environments.list",
   "environments.status",
   "environments.create",
@@ -218,5 +216,7 @@ describe("core gateway method release trains", () => {
     expect(methods.find((method) => method.name === "gateway.suspend.handoff")?.since).toBe(
       "2026.9",
     );
+    // FORK: tts.stream (node voice.play streaming) is registered on the 2026.9 train.
+    expect(methods.find((method) => method.name === "tts.stream")?.since).toBe("2026.9");
   });
 });

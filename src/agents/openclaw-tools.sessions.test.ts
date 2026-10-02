@@ -236,9 +236,15 @@ describe("sessions tools", () => {
     ),
   );
 
-  registerSessionsSendResumeTests({
-    getSessionTool,
-    callGatewayMock,
+  // FORK(fire-and-forget): upstream A2A coverage runs with our override off.
+  describe("resume (upstream A2A mode)", () => {
+    beforeEach(() => {
+      forkFireAndForgetTesting.setForTest(false);
+    });
+    registerSessionsSendResumeTests({
+      getSessionTool,
+      callGatewayMock,
+    });
   });
 
   it("sessions_send notify queues next-turn context without starting or steering work", async () => {
@@ -520,6 +526,8 @@ describe("sessions tools", () => {
   });
 
   it("sessions_send does not redeliver a source reply when history lacks its message-tool result", async () => {
+    // FORK(fire-and-forget): exercises upstream's announce/wait flow.
+    forkFireAndForgetTesting.setForTest(false);
     const sessionKey = "agent:main:discord:group:source";
     const marker = "source reply delivered once";
     let waitObserved = false;
@@ -708,6 +716,8 @@ describe("sessions tools", () => {
       to,
       hydrated,
     }) => {
+      // FORK(fire-and-forget): exercises upstream's ping-pong/announce flow.
+      forkFireAndForgetTesting.setForTest(false);
       const calls: GatewayCall[] = [];
       const replies = new Map<string, string>();
       callGatewayMock.mockImplementation(async (request: GatewayCall) => {
@@ -838,11 +848,17 @@ describe("sessions tools", () => {
     },
   );
 
-  registerSessionsSendLateReplyTests({
-    getSessionTool: (name, options) =>
-      getSessionTool(name, { ...options, config: cloneTestConfig() }),
-    callGatewayMock,
-    settleContinuations: () => continuations.settle(),
+  // FORK(fire-and-forget): upstream A2A coverage runs with our override off.
+  describe("late reply (upstream A2A mode)", () => {
+    beforeEach(() => {
+      forkFireAndForgetTesting.setForTest(false);
+    });
+    registerSessionsSendLateReplyTests({
+      getSessionTool: (name, options) =>
+        getSessionTool(name, { ...options, config: cloneTestConfig() }),
+      callGatewayMock,
+      settleContinuations: () => continuations.settle(),
+    });
   });
 
   it.each([
@@ -939,6 +955,8 @@ describe("sessions tools", () => {
     { name: "starts a waited turn", timeoutSeconds: 1 },
     { name: "starts an idle child", idle: true },
   ])("sessions_send $name", async (testCase) => {
+    // FORK(fire-and-forget): exercises upstream's announce/wait flow.
+    forkFireAndForgetTesting.setForTest(false);
     const { steered, busyPastDeadline, rejection, mode, timeoutSeconds = 0, idle } = testCase;
     const requesterKey = "agent:main:main";
     const targetKey = "agent:main:subagent:steering-child";
@@ -1031,6 +1049,33 @@ describe("sessions tools", () => {
       queue.mockRestore();
       prepare.mockRestore();
     }
+  });
+
+  it("FORK(fire-and-forget): sessions_send defaults to accepted with no announce-back", async () => {
+    const requesterKey = "agent:main:main";
+    const targetKey = "agent:main:subagent:ff-child";
+    await upsertSessionEntryCore(
+      { agentId: "main", sessionKey: targetKey },
+      { sessionId: "ff-child-session", updatedAt: 1, spawnedBy: requesterKey, spawnDepth: 1 },
+    );
+    mockGatewayResponses({
+      agent: { runId: "ff-run", status: "accepted" },
+      "agent.wait": { status: "ok", terminalReply: { disposition: "empty" } },
+    });
+    const result = await getSessionTool("sessions_send", {
+      agentSessionKey: requesterKey,
+    }).execute("ff-send", { sessionKey: targetKey, message: "one-way" });
+    // No timeoutSeconds: the fork default is 0, so the tool must not wait.
+    expect(result.details).toMatchObject({
+      status: "accepted",
+      sessionKey: targetKey,
+      targetDisposition: "queued",
+      delivery: { status: "skipped", mode: "announce" },
+    });
+    await continuations.settle();
+    const methods = callGatewayMock.mock.calls.map(([request]) => request.method);
+    expect(methods.filter((method) => method === "agent")).toHaveLength(1);
+    expect(methods).not.toContain("agent.wait");
   });
 
   it("sessions_send keeps ordinary active session targets on the gateway agent path", async () => {

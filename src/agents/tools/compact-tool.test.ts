@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_COMPACTION_SETTINGS } from "../../../packages/agent-core/src/harness/compaction/compaction.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import {
   clearAgentOverflowStash,
@@ -182,6 +183,7 @@ describe("compact-tool", () => {
       const prepareCalls: unknown[] = [];
       const tool = createCompactTool({
         sessionKey: KEY,
+        // reserveTokens is a dead config key upstream; the tool always uses agent-core's default.
         config: agentConfig({ keepRecentTokens: 1024, reserveTokens: 77 }),
         getSessionManager: () => managed.manager,
         prepareCompactionOverride: (_e: unknown, settings: unknown) => {
@@ -190,7 +192,10 @@ describe("compact-tool", () => {
         },
       });
       await run(tool!, { summary: "s" });
-      expect(prepareCalls[0]).toMatchObject({ keepRecentTokens: 1024, reserveTokens: 77 });
+      expect(prepareCalls[0]).toMatchObject({
+        keepRecentTokens: 1024,
+        reserveTokens: DEFAULT_COMPACTION_SETTINGS.reserveTokens,
+      });
     });
 
     it("keeps nothing when keepRecent is false (overflow fallback path)", async () => {

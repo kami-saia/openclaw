@@ -195,9 +195,6 @@ const SESSION_ENTRY_RESERVED_SLOT_KEY_LIST = [
   "quotaSuspension",
   "pendingTranscriptRepair",
   "visibility",
-  // FORK: Skill Workshop autocapture state on SessionEntry.
-  "pendingSkillSuggestion",
-  "skillCaptureSignalHashes",
   "publicShare",
   "profileInvolvement",
 ] as const satisfies ReadonlyArray<

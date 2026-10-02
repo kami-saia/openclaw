@@ -53,7 +53,12 @@ export function makeRespond() {
 }
 
 export function makeContext(sessions: Map<string, SystemAgentChatSession>): GatewayRequestContext {
-  return { systemAgentSessions: sessions } as unknown as GatewayRequestContext;
+  // FORK(trustDelegatedOperatorApproval): openclaw.chat reads the runtime config
+  // to decide delegated approval trust; the live gateway context always has it.
+  return {
+    systemAgentSessions: sessions,
+    getRuntimeConfig: () => ({}),
+  } as unknown as GatewayRequestContext;
 }
 
 let pluginMetadataSnapshot: SystemAgentPluginMetadataTestSnapshot | undefined;
