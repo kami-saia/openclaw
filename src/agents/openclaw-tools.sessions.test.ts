@@ -959,7 +959,8 @@ describe("sessions tools", () => {
       status: "accepted",
       sessionKey: targetKey,
       targetDisposition: "queued",
-      delivery: { status: "skipped", mode: "announce" },
+      // Upstream #162227 dropped delivery.mode ("announce") with the A2A ping-pong.
+      delivery: { status: "skipped" },
     });
     await continuations.settle();
     const methods = callGatewayMock.mock.calls.map(([request]) => request.method);
