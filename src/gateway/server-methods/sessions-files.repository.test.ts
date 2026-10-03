@@ -50,7 +50,7 @@ import { serializeWorkerWorkspaceManifest } from "../worker-environments/workspa
 import { createWorkerWorkspaceOperationCoordinator } from "../worker-environments/workspace-operation-coordinator.js";
 import { WORKSPACE_PREVIEW_MAX_BYTES } from "../workspace-file-limits.js";
 import { loadSessionDiff } from "./sessions-diff.js";
-import { resolveLocalSessionWorkspaceRoot, sessionsFilesHandlers } from "./sessions-files.js";
+import { sessionsFilesHandlers } from "./sessions-files.js";
 import {
   createSessionFilesHandlerInvoker,
   createWorkspaceFixture,
@@ -409,7 +409,7 @@ it("accepts editor bytes and Git-normalized publication before acknowledging the
       ).toBe("saved\n");
     },
   );
-  expect(accepted.placements.listPendingWorkspaceResults()).toEqual([]);
+  expect(await accepted.placements.listPendingWorkspaceResultsAsync()).toEqual([]);
   expect(accepted.placements.get(identity.sessionId)?.turnClaim).toBeNull();
 });
 
@@ -432,7 +432,7 @@ it("reports failed editor checkpoint capture and retains the durable recovery ow
     checkpointRef: source.checkpointRef,
     manifestHash: source.manifestHash,
   });
-  expect(accepted.placements.listPendingWorkspaceResults()).toEqual([
+  expect(await accepted.placements.listPendingWorkspaceResultsAsync()).toEqual([
     expect.objectContaining({
       sessionId: identity.sessionId,
       workspaceAcceptedAtMs: null,
@@ -448,7 +448,6 @@ it("browses, previews, edits and diffs only the live repository without a Gatewa
     "package.json",
   );
   expect(list.root).toBeUndefined();
-  expect(resolveLocalSessionWorkspaceRoot({ sessionKey })).toBeUndefined();
   const before = expectOkPayload(
     await invoke("sessions.files.get", { sessionKey, path: "changed.txt" }, context),
   );
@@ -754,7 +753,7 @@ it("keeps a timed-out remote save owned until its physical write drains before S
   await draining.promise;
   let stopEntered = false;
   let contentAtStop: string | undefined;
-  const stopping = runExclusiveSessionLifecycleMutation({
+  const stopping = runExclusiveSessionLifecycleMutation("drain", {
     scope: path.join(gatewayRoot, "sessions.sqlite"),
     identities: [sessionKey, identity.sessionId],
     run: async () => {

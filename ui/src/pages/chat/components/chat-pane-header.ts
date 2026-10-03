@@ -69,7 +69,12 @@ type ChatPaneHeaderProps = {
   workspaceRoot: string | null;
   workspaceLabel: string | null;
   /** Gateway-resolved project icon for the chip; absent keeps the folder glyph. */
-  workspaceIcon: { routeUrl: string; authTokens: readonly string[]; authReady: boolean } | null;
+  workspaceIcon: {
+    routeUrl: string;
+    authTokens: readonly string[];
+    authReady: boolean;
+    connectionId?: string;
+  } | null;
   parentSession: ChatPaneParentSession | null;
   branch: string | null;
   branches: SessionBranch[];
@@ -108,10 +113,6 @@ function revealLabel(platform: string | null): string {
     return t("chat.sessionHeader.revealFileExplorer");
   }
   return t("chat.sessionHeader.revealFileManager");
-}
-function branchRelativeTime(updatedAt: string | undefined): string {
-  const timestamp = updatedAt ? Date.parse(updatedAt) : Number.NaN;
-  return Number.isFinite(timestamp) ? formatRelativeTimestamp(timestamp, { fallback: "" }) : "";
 }
 
 export function resolveChatPaneParentSession(
@@ -200,12 +201,13 @@ function renderSessionCrumb(props: ChatPaneHeaderProps) {
       }}
     />`;
   }
+  const title = html`${renderSessionColorDot(props.catalog ? props.catalogColor : props.session?.color)}<span
+      class="chat-pane__session-title-text"
+      >${props.title}</span
+    >`;
   return props.catalog || !props.session || props.renameDisabledReason
     ? html`<span class="chat-pane__session-title" title=${props.renameDisabledReason ?? props.title}
-        >${renderSessionColorDot(props.catalog ? props.catalogColor : props.session?.color)}<span
-          class="chat-pane__session-title-text"
-          >${props.title}</span
-        ></span
+        >${title}</span
       >`
     : html`<button
         class="chat-pane__session-title chat-pane__session-title-button"
@@ -214,10 +216,7 @@ function renderSessionCrumb(props: ChatPaneHeaderProps) {
         aria-label=${t("chat.sessionHeader.renameAria", { title: props.title })}
         @click=${props.onBeginRename}
       >
-        ${renderSessionColorDot(props.catalog ? props.catalogColor : props.session?.color)}<span
-          class="chat-pane__session-title-text"
-          >${props.title}</span
-        >
+        ${title}
       </button>`;
 }
 
@@ -281,6 +280,7 @@ function renderWorkspaceChipIcon(icon: ChatPaneHeaderProps["workspaceIcon"]) {
         .routeUrl=${icon.routeUrl}
         .authTokens=${icon.authTokens}
         .authReady=${icon.authReady}
+        .connectionId=${icon.connectionId}
       ></openclaw-workspace-icon>`
     : icons.folder;
 }
@@ -425,7 +425,8 @@ export function renderChatPaneHeader(props: ChatPaneHeaderProps) {
                     ${icons.gitBranch}
                   </button>
                   ${props.branches.map((branch) => {
-                    const relativeTime = branchRelativeTime(branch.updatedAt);
+                    const updatedAt = Date.parse(branch.updatedAt ?? "");
+                    const relativeTime = formatRelativeTimestamp(updatedAt, { fallback: "" });
                     return html`
                       <wa-dropdown-item
                         class="chat-pane__branch-item"
@@ -644,5 +645,6 @@ export function resolveChatPaneWorkspaceIcon(
     routeUrl: buildControlUiResourcePath("workspaceIcon", context.resourceBasePath, sessionKey),
     authTokens,
     authReady: Boolean(gateway.snapshot.hello || authTokens.length),
+    connectionId: gateway.snapshot.hello?.server?.connId,
   };
 }

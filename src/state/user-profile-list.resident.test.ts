@@ -21,6 +21,7 @@ import {
   prepareUserProfileIdentity,
   readUserProfileAliases,
   readUserProfileIdentity,
+  captureResidentUserProfileAccess,
   resolveUserProfileReference,
   retainUserProfileCatalog,
 } from "./user-profile-list.js";
@@ -61,6 +62,7 @@ describe("resident profile display and reference catalog", () => {
     const target = ensureProfileForEmail("target@example.test", options);
     const catalog = await prepareUserProfileCatalog(options);
     releases.push(catalog.release);
+    const access = captureResidentUserProfileAccess(alias.id, options);
     expect(catalog.readCurrentIdentity(alias.id)?.profileId).toBe(alias.id);
     linkEmail("alias@example.test", target.id, options);
     setUserProfileRole(target.id, "reader", options);
@@ -70,6 +72,7 @@ describe("resident profile display and reference catalog", () => {
       expect(catalog.readCurrentIdentity(id)).toEqual({
         profileId: target.id,
         role: "reader",
+        githubLogin: null,
         aliases: new Set([alias.id, target.id]),
       });
       const mutation = fenceUserProfileMutationAuthority(admission, {
@@ -78,7 +81,10 @@ describe("resident profile display and reference catalog", () => {
         channels: [],
       });
       expect(() => catalog.readCurrentIdentity(alias.id)).toThrow("has not settled");
+      expect(() => access.assertCurrent()).toThrow("has not settled");
+      expect(() => captureResidentUserProfileAccess(alias.id, options)).toThrow("has not settled");
       mutation.settle(true);
+      expect(() => access.assertCurrent()).not.toThrow();
     }
     expect(catalog.readCurrentIdentity("missing")).toBeUndefined();
     catalog.release();
@@ -135,10 +141,19 @@ describe("resident profile display and reference catalog", () => {
       expect(current.profile).toEqual({
         profileId: first.id,
         emails: [email, "retained@example.test"].toSorted(),
+        ...(producer === "github" ? { githubAccountIds: [40] } : {}),
         assignedRole: null,
+        githubLogin: producer === "github" ? "first-account" : null,
       });
+      expect(captureResidentUserProfileAccess(first.id, options).readCurrentFacts()).toEqual(
+        current.profile,
+      );
       expect(current.aliases).toEqual(new Set([first.id]));
-      expect(prepared.readCurrentProfile()).toEqual({ profileId: first.id, assignedRole: null });
+      expect(prepared.readCurrentProfile()).toEqual({
+        profileId: first.id,
+        assignedRole: null,
+        githubLogin: producer === "github" ? "first-account" : null,
+      });
       expect(native).not.toHaveBeenCalled();
       native.mockRestore();
       setDisplayName(first.id, "Cosmetic update", options);
@@ -151,6 +166,7 @@ describe("resident profile display and reference catalog", () => {
       expect(prepared.readCurrentProfile()).toEqual({
         profileId: first.id,
         assignedRole: "reader",
+        githubLogin: producer === "github" ? "first-account" : null,
       });
       prepared.readCurrentFacts(bindings);
       if (producer === "email") {
@@ -175,7 +191,9 @@ describe("resident profile display and reference catalog", () => {
           ? ["retained@example.test"]
           : [email, "retained@example.test"]
         ).toSorted(),
+        ...(producer === "github" ? { githubAccountIds: [40] } : {}),
         assignedRole: "reader",
+        githubLogin: producer === "github" ? "first-account" : null,
       });
       expect(() => prepared.readCurrentFacts(bindings)).toThrow("user profile not found");
       expect(() => selected.readCurrentFacts(selectedBindings)).toThrow("user profile not found");
@@ -204,6 +222,7 @@ describe("resident profile display and reference catalog", () => {
       profileId: current.id,
       emails: ["current@example.test"],
       assignedRole: null,
+      githubLogin: null,
     });
     expect(() => next.readCurrentFacts(next.emailBindingIds)).not.toThrow();
     const missing = await prepareUserProfileIdentity(prior.id, options);
@@ -458,26 +477,31 @@ describe("resident profile display and reference catalog", () => {
     expect(native).not.toHaveBeenCalled();
   });
 
-  it("does not create missing storage and admits a replacement without retaining old profiles", () => {
+  it("does not create missing storage and admits a replacement without retaining old profiles", async () => {
     const options = fixture();
     releases.push(retainUserProfileCatalog(options));
+    (await prepareUserProfileCatalog(options)).release();
     expect(resolveUserProfileReference("deadbeef", options)).toEqual({
       ok: true,
       value: undefined,
     });
     expect(fs.existsSync(options.path)).toBe(false);
     const prior = ensureProfileForEmail("prior@example.test", options);
+    (await prepareUserProfileCatalog(options)).release();
+    const access = captureResidentUserProfileAccess(prior.id, options);
+    expect(access.readCurrentFacts().profileId).toBe(prior.id);
     expect(getUserProfileDisplay(prior.id, options).displayName).toBe("prior");
-    closeOpenClawStateDatabaseByPath(options.path);
+    await closeOpenClawStateDatabaseByPathAsync(options.path);
     fs.renameSync(options.path, `${options.path}.old`);
     const replacement = fixture();
     const current = ensureProfileForEmail("current@example.test", replacement);
-    closeOpenClawStateDatabaseByPath(replacement.path);
+    await closeOpenClawStateDatabaseByPathAsync(replacement.path);
     fs.renameSync(replacement.path, options.path);
     const seen = vi.fn(() => getUserProfileDisplay(current.id, options).displayName);
     releases.push(onUserProfilesChanged(seen));
     openOpenClawStateDatabase(options);
     expect(seen.mock.results.map((result) => result.value)).toEqual(["current"]);
+    expect(() => access.assertCurrent()).toThrow();
     const native = vi.spyOn(openOpenClawStateDatabase(options).db, "prepare");
     expect(resolveUserProfileReference(prior.id, options)).toEqual({ ok: true, value: undefined });
     expect(getUserProfileDisplay(current.id, options).displayName).toBe("current");

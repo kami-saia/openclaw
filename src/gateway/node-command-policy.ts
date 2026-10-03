@@ -307,15 +307,12 @@ function hasTalkSurface(node?: NodeCommandPolicyNode): boolean {
 function resolveNodeCommandAllowlistInternal(
   cfg: OpenClawConfig,
   node?: NodeCommandPolicyNode,
-  options?: { includeDesktopHostCommands?: boolean; includeDangerousDefaults?: boolean },
+  pairing = false,
 ): Set<string> {
   const platformId = normalizePlatformId(node?.platform, node?.deviceFamily);
   const desktop = platformId === "macos" || platformId === "windows" || platformId === "linux";
   const base = PLATFORM_DEFAULTS[platformId].filter(
-    (command) =>
-      options?.includeDesktopHostCommands === true ||
-      !desktop ||
-      !DESKTOP_HOST_COMMANDS.has(command),
+    (command) => pairing || !desktop || !DESKTOP_HOST_COMMANDS.has(command),
   );
   const watchRelayCommands =
     platformId === "ios" && normalizeDeviceMetadataForPolicy(node?.deviceFamily) === "iphone"
@@ -349,10 +346,10 @@ function resolveNodeCommandAllowlistInternal(
   );
   // Dangerous built-ins that also appear in PLATFORM_DEFAULTS stay declarable
   // at pairing but do not enter the runtime allowlist by default.
-  const dangerousBuiltinCommands =
-    options?.includeDangerousDefaults === true || allowAll
-      ? new Set<string>()
-      : new Set(DEFAULT_DANGEROUS_NODE_COMMANDS);
+  // FORK: allowAll admits dangerous built-ins at runtime too (deny still wins below).
+  const dangerousBuiltinCommands = allowAll
+    ? new Set<string>()
+    : new Set(DEFAULT_DANGEROUS_NODE_COMMANDS);
   // Dangerous plugin commands are excluded from plugin defaults. Explicit
   // gateway.nodes.commands.allow below can still opt them in for operators.
   const allow = new Set(
@@ -369,8 +366,9 @@ function resolveNodeCommandAllowlistInternal(
       .filter(
         (cmd) =>
           cmd &&
+          // FORK: allowAll also admits dangerous plugin commands.
           (allowAll || !dangerousPluginCommands.has(cmd)) &&
-          !dangerousBuiltinCommands.has(cmd),
+          (pairing || !dangerousBuiltinCommands.has(cmd)),
       ),
   );
   for (const cmd of extra) {
@@ -385,13 +383,9 @@ function resolveNodeCommandAllowlistInternal(
   // In pairing mode, denylisted dangerous defaults stay declarable so an
   // explicit persistent allow can authorize them without another pairing.
   // Invoke-time policy still honors deny in full.
-  const denyExemptDeclarable =
-    options?.includeDangerousDefaults === true && !allowAll
-      ? new Set(DEFAULT_DANGEROUS_NODE_COMMANDS)
-      : new Set<string>();
   for (const blocked of deny) {
     const trimmed = blocked.trim();
-    if (trimmed && !denyExemptDeclarable.has(trimmed)) {
+    if (trimmed && (!pairing || !dangerousBuiltinCommands.has(trimmed))) {
       allow.delete(trimmed);
     }
   }
@@ -412,10 +406,7 @@ export function resolveNodePairingCommandAllowlist(
   cfg: OpenClawConfig,
   node?: NodeCommandPolicyNode,
 ): Set<string> {
-  return resolveNodeCommandAllowlistInternal(cfg, node, {
-    includeDesktopHostCommands: true,
-    includeDangerousDefaults: true,
-  });
+  return resolveNodeCommandAllowlistInternal(cfg, node, true);
 }
 
 export function normalizeDeclaredNodeCommands(params: {

@@ -1,7 +1,10 @@
 import { fileURLToPath } from "node:url";
 import { expectDefined } from "@openclaw/normalization-core";
-import type { OpenClawPluginService, WorkerProvider } from "openclaw/plugin-sdk/plugin-entry";
-import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
+import type { OpenClawPluginApi, WorkerProvider } from "openclaw/plugin-sdk/plugin-entry";
+import {
+  createTestPluginApi,
+  createTestPluginServiceScheduler,
+} from "openclaw/plugin-sdk/plugin-test-api";
 import * as processRuntime from "openclaw/plugin-sdk/process-runtime";
 import type { SpawnResult } from "openclaw/plugin-sdk/process-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -36,7 +39,8 @@ function commandResult(overrides: Partial<SpawnResult> = {}): SpawnResult {
 
 describe("Crabbox runtime preflight cleanup", () => {
   support.setupWorkerEnvironmentServiceSuite({ reuseReadWorkers: true });
-  const pluginServices: OpenClawPluginService[] = [];
+  const pluginServices: Parameters<OpenClawPluginApi["registerService"]>[0][] = [];
+  let scheduler: ReturnType<typeof createTestPluginServiceScheduler>;
   async function registerProvider(): Promise<WorkerProvider> {
     let registered: WorkerProvider | undefined;
     const { register } = resolvePluginModuleExport(
@@ -65,16 +69,23 @@ describe("Crabbox runtime preflight cleanup", () => {
     return expectDefined(registered, "registered Crabbox provider");
   }
   beforeEach(() => {
+    scheduler = createTestPluginServiceScheduler();
     vi.stubEnv("OPENCLAW_STATE_DIR", support.testState.root);
     vi.stubEnv(SETUP_ENV, "fixture");
   });
   afterEach(async () => {
-    for (const service of pluginServices.splice(0)) {
-      await service.stop?.({
-        config: support.testState.config,
-        stateDir: support.testState.root,
-        logger: { info() {}, warn() {}, error() {}, debug() {} },
-      });
+    scheduler.beginClose();
+    try {
+      for (const service of pluginServices.splice(0)) {
+        await service.stop?.({
+          scheduler,
+          config: support.testState.config,
+          stateDir: support.testState.root,
+          logger: { info() {}, warn() {}, error() {}, debug() {} },
+        });
+      }
+    } finally {
+      await scheduler.stop();
     }
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
@@ -126,7 +137,6 @@ describe("Crabbox runtime preflight cleanup", () => {
       await restarted.reconcileOnce();
       expect(support.testState.store.get(failed.environmentId)).toEqual(failed);
       expect(runCommand.mock.calls.map(([argv]) => argv.slice(1))).toEqual([
-        ["--version"],
         ["--version"],
         ["providers", "--json"],
         ...(failure === "setup-env" ? [] : [["config", "show", "--json"]]),
@@ -204,7 +214,6 @@ describe("Crabbox runtime preflight cleanup", () => {
       expect(restartedProvision).not.toHaveBeenCalled();
       expect(runCommand).not.toHaveBeenCalled();
       expect(prepareNodeEnrollment).not.toHaveBeenCalled();
-      expect(support.testState.prepareInstallation).not.toHaveBeenCalled();
       expect(support.testState.bootstrapWorker).not.toHaveBeenCalled();
       expect(support.testState.store.getCredential(original.environmentId)).toBeUndefined();
     },
@@ -360,7 +369,6 @@ describe("Crabbox runtime preflight cleanup", () => {
     expect(stops).toBe(2);
     expect(live).toBe(false);
     expect(prepareNodeEnrollment).not.toHaveBeenCalled();
-    expect(support.testState.prepareInstallation).not.toHaveBeenCalled();
     expect(support.testState.bootstrapWorker).not.toHaveBeenCalled();
   });
 
@@ -375,7 +383,7 @@ describe("Crabbox runtime preflight cleanup", () => {
       name: "warm image without effective class",
       settings: { ...CLASSLESS_PROFILE, warmImage: true },
       message: "warmImage requires a configured class or a placement machine class",
-      commands: [["--version"], ["--version"], ["providers", "--json"]],
+      commands: [["--version"], ["providers", "--json"]],
     },
   ])(
     "keeps $name permanent even with missing runtime input",

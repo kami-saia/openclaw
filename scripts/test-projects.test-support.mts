@@ -3375,7 +3375,7 @@ const SEMANTIC_TOOLING_TARGET_PATTERNS: Array<[RegExp, string[]]> = [
     ),
     ["auth-monitor"],
   ],
-  [/^scripts\/native-app-i18n\.ts$/u, ["native-app-i18n", workflowGuards]],
+  [/^scripts\/native-(?:app-i18n|i18n-inventory)\.ts$/u, ["native-app-i18n", workflowGuards]],
   [
     /^scripts\/github\/(?:dependency-guard|guard-shared)\.mjs$/u,
     ["dependency-guard-script", "security-review-workflow"],
@@ -4122,7 +4122,7 @@ function shouldUseBroadChangedTargets(env = process.env) {
   return parsePermissiveBooleanToken(env[BROAD_CHANGED_ENV_KEY]) === true;
 }
 
-function isRoutableChangedTarget(changedPath: string) {
+export function isRoutableChangedTarget(changedPath: string) {
   if (GENERATED_CHANGED_TEST_TARGET_PATTERNS.some((pattern) => pattern.test(changedPath))) {
     return false;
   }
@@ -4648,7 +4648,7 @@ function classifyTarget(arg: string, cwd: string, beforeDatabaseWorkerOwnership 
   if (isPathAtOrUnder(relative, "ui") || isPluginControlUiPath(relative)) {
     return "ui";
   }
-  if (relative.startsWith("src/tui/tui-pty-") || tuiPtyTestFiles.includes(relative)) {
+  if (tuiPtyTestFiles.includes(relative)) {
     return "tuiPty";
   }
   if (relative.endsWith(".e2e.test.ts")) {

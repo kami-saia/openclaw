@@ -22,6 +22,7 @@ import {
   type DiagnosticEventPayload,
 } from "openclaw/plugin-sdk/diagnostic-runtime";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
+import type { RemoteWorkspaceFileReader } from "openclaw/plugin-sdk/file-access-runtime";
 import {
   initializeGlobalHookRunner,
   resetGlobalHookRunner,
@@ -54,7 +55,6 @@ import {
   type CodexDynamicToolSpec,
   type JsonValue,
 } from "./protocol.js";
-import type { CodexRemoteWorkspaceFileReader } from "./remote-workspace-media.js";
 import { codexDynamicToolsFingerprint } from "./thread-fingerprints.js";
 
 const CODEX_OPENCLAW_DYNAMIC_TOOL_NAMESPACE = "openclaw";
@@ -2615,9 +2615,9 @@ describe("Codex dynamic tool media delivery", () => {
           ]),
         );
       }
-      const readRemoteWorkspaceFile = vi.fn<CodexRemoteWorkspaceFileReader>(async () => ({
-        dataBase64: Buffer.from(remoteContent).toString("base64"),
-      }));
+      const readRemoteWorkspaceFile = vi.fn<RemoteWorkspaceFileReader>(async () =>
+        Buffer.from(remoteContent),
+      );
       const { bridge, execute } = createMediaMessageBridge(
         textToolResult("Uploaded.", deliveredMessageDetails("message-1")),
         {

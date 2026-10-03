@@ -2,9 +2,16 @@ import type { ContextEngine } from "../../../context-engine/types.js";
 import { createAnthropicPayloadLogger } from "../../anthropic-payload-log.js";
 import { createCacheTrace } from "../../cache-trace.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../defaults.js";
+import { getOpenClawSystemUpdateKind } from "../../internal-runtime-context.js";
 import type { AgentSession } from "../../sessions/index.js";
+import { withSessionManagerWrite } from "../../sessions/session-manager-write-admission.js";
 import { getProviderPromptState } from "../provider-prompt-state.js";
-import { getEmbeddedSessionPromptState } from "../session-prompt-state.js";
+import {
+  getEmbeddedSessionPromptState,
+  beginSessionSystemPrompt,
+  prepareSessionSystemPrompt,
+  retireSessionSystemPrompt,
+} from "../session-prompt-state.js";
 import { restoreCacheTtlToolResultProjections } from "../tool-result-truncation.js";
 // FORK: overflow fallback session-manager registry.
 import { registerAgentOverflowSessionManager } from "./agent-overflow-fallback.js";
@@ -61,7 +68,7 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
   // transcript reveals a provider model swap. Optional so non-attempt callers
   // (tests, raw-model probes) can omit it.
   servedModelRerender?: {
-    renderAttemptSystemPrompt: () => { systemPrompt: string };
+    renderAttemptSystemPrompt: () => Promise<{ systemPrompt: string }>;
     runtimeInfo: { model?: string; servedModel?: string };
   };
   onSessionYieldReady: (input: {
@@ -119,6 +126,63 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
   });
   const { isOpenAIResponsesApi, preparedUserTurnMessage, sessionManager, transcriptPolicy } =
     preparedSessionManager;
+  const sessionPromptState = getEmbeddedSessionPromptState(attempt.sessionId);
+  const usesSystemPromptSeries =
+    !input.isRawModelRun && attempt.operation !== "settled-tool-finalization";
+  const promptRouteKey = JSON.stringify([
+    attempt.provider,
+    attempt.modelId,
+    attempt.model.api,
+    attempt.model.baseUrl,
+    transcriptPolicy.inHistorySystemUpdates === true,
+  ]);
+  // Retire old overrides before new carriers without checkpointing unadmitted notices.
+  const retireSystemPromptUpdates = () =>
+    sessionLock.withOwnedTranscriptWrite(() =>
+      withSessionManagerWrite(sessionManager, async () => {
+        runAbortSignal.throwIfAborted();
+        await retireSessionSystemPrompt(sessionPromptState, promptRouteKey, (customType, data) =>
+          sessionManager.appendCustomEntryAsync(customType, data),
+        );
+      }),
+    );
+  if (
+    usesSystemPromptSeries &&
+    beginSessionSystemPrompt({
+      state: sessionPromptState,
+      routeKey: promptRouteKey,
+      enabled: transcriptPolicy.inHistorySystemUpdates === true,
+      entries: sessionManager.getBranch(),
+    })
+  ) {
+    await retireSystemPromptUpdates();
+  }
+  let freshSystemPrompt = systemPromptText;
+  let projectedSystemPrompt: string | undefined;
+  const prepareSystemPromptUpdate =
+    usesSystemPromptSeries && transcriptPolicy.inHistorySystemUpdates
+      ? async (systemPrompt: string, freshlyRendered = false) => {
+          if (freshlyRendered || systemPrompt !== projectedSystemPrompt) {
+            freshSystemPrompt = systemPrompt;
+          }
+          const prepared = prepareSessionSystemPrompt({
+            state: sessionPromptState,
+            routeKey: promptRouteKey,
+            systemPrompt: freshSystemPrompt,
+            entries: sessionManager.getBranch(),
+          });
+          let restartRecorded = false;
+          if (prepared.restart && resources.session) {
+            await retireSystemPromptUpdates();
+            restartRecorded = true;
+            resources.session.agent.state.messages = resources.session.messages.filter(
+              (message) => getOpenClawSystemUpdateKind(message) !== "prompt-update",
+            );
+          }
+          projectedSystemPrompt = prepared.systemPrompt;
+          return { ...prepared, commit: () => prepared.commit(restartRecorded) };
+        }
+      : undefined;
   resources.getUserTranscriptContexts =
     preparedSessionManager.userMessageBoundary.getUserTranscriptContexts;
 
@@ -152,6 +216,7 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
     effectiveCwd,
     getCurrentAttemptPluginMetadataSnapshot,
     initialSystemPrompt: state.systemPromptText,
+    prepareSystemPromptUpdate,
     markStage: (stage) => prepStages.mark(stage),
     onSessionCreated: (session) => {
       resources.session = session;
@@ -182,7 +247,7 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
     });
     if (servedModel && runtimeInfo.servedModel !== servedModel) {
       runtimeInfo.servedModel = servedModel;
-      setActiveSessionSystemPrompt(renderAttemptSystemPrompt().systemPrompt);
+      setActiveSessionSystemPrompt((await renderAttemptSystemPrompt()).systemPrompt);
     }
   }
   await attempt.userTurnTranscriptRecorder?.waitForRuntimePersistence();
@@ -191,6 +256,7 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
       abortSignal: runAbortSignal,
       activeSession,
       appendOnlyRuntimeContext: transcriptPolicy.appendOnlyRuntimeContext,
+      inHistorySystemUpdates: transcriptPolicy.inHistorySystemUpdates,
       attempt,
       ...preparedSessionManager.userMessageBoundary,
       isRawModelRun: input.isRawModelRun,
@@ -202,7 +268,6 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
 
   // Session-owned projections survive attempt teardown so already-sent tool results
   // cannot rewrite the provider prompt-cache tail between turns (#99495).
-  const sessionPromptState = getEmbeddedSessionPromptState(attempt.sessionId);
   const toolResultPromptProjectionState = sessionPromptState.toolResults;
   if (!input.isRawModelRun) {
     restoreCacheTtlToolResultProjections(
@@ -306,6 +371,7 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
     contextGuards,
     isOpenAIResponsesApi,
     preparedUserTurnMessage,
+    prepareSystemPromptUpdate,
     sessionManager,
     sessionPromptState,
     settleTracker,

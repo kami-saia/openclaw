@@ -15,6 +15,7 @@ import type { ModelCatalogSnapshot } from "../../agents/model-catalog.types.js";
 import { splitTrailingAuthProfile } from "../../agents/model-ref-profile.js";
 import { resolveModelRefFromString } from "../../agents/model-selection.js";
 import { publishedModelCatalogOwnerMatchesAgent } from "../../agents/prepared-model-catalog-owner.js";
+import { resolveReplyCompletion } from "../../agents/reply-completion.js";
 import { resolveSandboxRuntimeStatus } from "../../agents/sandbox.js";
 import { resolveIngressWorkspaceOverrideForSessionRun } from "../../agents/spawned-context.js";
 import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
@@ -49,6 +50,7 @@ import {
   sessionDeliveryChannel,
   sessionDeliveryOrigin,
 } from "../../utils/delivery-context.read.js";
+import { resolveCommandAuthorization } from "../command-auth.js";
 import type { GetReplyOptions } from "../get-reply-options.types.js";
 import { DEFAULT_HEARTBEAT_ACK_MAX_CHARS } from "../heartbeat.js";
 import {
@@ -196,12 +198,36 @@ function canSelfServeLocalPaths(params: {
   );
 }
 
+/**
+ * A sender who may not run commands is owed no reply when command handling ends without one;
+ * the refusal is the answer. Authorized commands keep their requirement: a failure throws or
+ * returns an error, and an empty result (such as unsent streamed blocks) still gets the notice.
+ */
+function finishCommandTurn(params: {
+  opts: GetReplyOptions | undefined;
+  ctx: MsgContext;
+  cfg: OpenClawConfig;
+  reply: ReplyPayload | ReplyPayload[] | undefined;
+}): ReplyPayload | ReplyPayload[] | undefined {
+  const { opts, ctx, cfg, reply } = params;
+  const runState = resolveReplyOperationRunState(opts);
+  if (
+    runState &&
+    runState.replyCompletion?.outcome !== "blocked" &&
+    (Array.isArray(reply) ? reply.length === 0 : !reply) &&
+    !resolveCommandAuthorization({ ctx, cfg, commandAuthorized: ctx.CommandAuthorized === true })
+      .isAuthorizedSender
+  ) {
+    runState.replyCompletion = resolveReplyCompletion("optional", "empty");
+  }
+  return reply;
+}
+
 function collectStagedAttachmentPaths(ctx: MsgContext): ReadonlyMap<number, string> {
   return new Map(
-    normalizeMediaFacts(ctx.media).flatMap((fact, index) => {
-      const mediaPath = normalizeOptionalString(fact.path);
-      return mediaPath ? [[index, mediaPath] as const] : [];
-    }),
+    normalizeMediaFacts(ctx.media).flatMap((fact, index) =>
+      fact.path ? [[index, fact.path] as const] : [],
+    ),
   );
 }
 
@@ -408,7 +434,12 @@ export async function getReplyFromConfig(
   );
   if (nativeSlashCommandFastReply.handled) {
     logResolverTiming("completed", "native_slash_command_fast_path");
-    return nativeSlashCommandFastReply.reply;
+    return finishCommandTurn({
+      opts,
+      ctx: finalized,
+      cfg,
+      reply: nativeSlashCommandFastReply.reply,
+    });
   }
   const optsWithCommandQueueOverride = nativeSlashCommandFastReply.queueModeOverride
     ? { ...optsWithSkillFilter, queueModeOverride: nativeSlashCommandFastReply.queueModeOverride }
@@ -888,7 +919,7 @@ export async function getReplyFromConfig(
   );
   if (directiveResult.kind === "reply") {
     logResolverTiming("completed", "directive_reply");
-    return directiveResult.reply;
+    return finishCommandTurn({ opts, ctx: finalized, cfg, reply: directiveResult.reply });
   }
   const {
     command,
@@ -1007,7 +1038,7 @@ export async function getReplyFromConfig(
   await maybeEmitMissingResetHooks();
   if (inlineActionResult.kind === "reply") {
     logResolverTiming("completed", "inline_action_reply");
-    return inlineActionResult.reply;
+    return finishCommandTurn({ opts, ctx: finalized, cfg, reply: inlineActionResult.reply });
   }
   directives = inlineActionResult.directives;
   cleanedBody = inlineActionResult.cleanedBody;

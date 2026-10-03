@@ -11,6 +11,21 @@ import { GATEWAY_EVENTS, listGatewayMethods } from "./server-methods-list.js";
 import { LEGACY_ADVERTISED_GATEWAY_METHODS } from "./server-methods-list.test-fixtures.js";
 import { coreGatewayHandlers } from "./server-methods.js";
 
+const mcpAppExtensionMethods = [
+  "mcp.app.onboard",
+  "mcp.app.discover",
+  "mcp.app.launch",
+  "mcp.app.settings",
+  "mcp.app.mention",
+  "mcp.app.formResource",
+  "mcp.app.modelContext",
+  "mcp.app.removeModelContext",
+  "mcp.app.writeResource",
+  "mcp.app.subscribeResource",
+  "mcp.app.unsubscribeResource",
+  "mcp.app.openFile",
+];
+
 describe("GATEWAY_EVENTS", () => {
   it("advertises Talk event streams in hello features", () => {
     expect(GATEWAY_EVENTS).toContain("talk.event");
@@ -254,6 +269,12 @@ describe("listGatewayMethods", () => {
       "backup.status",
       "storage.locations.list",
       "storage.locations.probe",
+      ...mcpAppExtensionMethods,
+      "memory.get",
+      "memory.status",
+      "sessions.files.assets",
+      "worktrees.recoverRemoval",
+      "worktrees.retireSnapshot",
       // FORK: tts.stream appends last so the frozen prefix keeps its indices.
       "tts.stream",
     ];
@@ -331,6 +352,12 @@ describe("listGatewayMethods", () => {
       "backup.status",
       "storage.locations.list",
       "storage.locations.probe",
+      ...mcpAppExtensionMethods,
+      "memory.get",
+      "memory.status",
+      "sessions.files.assets",
+      "worktrees.recoverRemoval",
+      "worktrees.retireSnapshot",
       // FORK: tts.stream appends last so the frozen prefix keeps its indices.
       "tts.stream",
     ]);
@@ -536,6 +563,12 @@ describe("listGatewayMethods", () => {
       "backup.status",
       "storage.locations.list",
       "storage.locations.probe",
+      ...mcpAppExtensionMethods,
+      "memory.get",
+      "memory.status",
+      "sessions.files.assets",
+      "worktrees.recoverRemoval",
+      "worktrees.retireSnapshot",
       // FORK: tts.stream appends last so the frozen prefix keeps its indices.
       "tts.stream",
     ];

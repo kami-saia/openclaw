@@ -50,9 +50,9 @@ import { createWorkerPlacementIdleSweep } from "./worker-environments/placement-
 import { createWorkerPlacementRunnerAvailabilityReader } from "./worker-environments/placement-projector.js";
 import { createPlacementSessionRetirement } from "./worker-environments/placement-session-retirement.js";
 import type { WorkerSessionPlacementStore } from "./worker-environments/placement-store.js";
+import { isFailedWorkerPlacementEnvironmentGone } from "./worker-environments/placement-target.js";
 import { createRepositoryWorkspaceMutationService } from "./worker-environments/repository-workspace-mutation.js";
 import type { WorkerEnvironmentService } from "./worker-environments/service.js";
-import { isFailedWorkerPlacementEnvironmentGone } from "./worker-environments/session-placement-lifecycle.js";
 import type { WorkerSessionWorkspace } from "./worker-environments/session-workspace.js";
 import { createWorkerPlacementRedispatch } from "./worker-environments/worker-placement-redispatch.js";
 import { createWorkerSessionTurnPlacementProvider } from "./worker-environments/worker-turn-launcher.js";
@@ -116,11 +116,6 @@ export function createGatewayWorkerPlacementRuntime(
     publishAcceptedWorkspace,
     reconcilePublications,
   } = params.githubPublicationRuntime ?? createGatewayGitHubPublicationRuntime(params);
-  const diskSpace = createWorkerPlacementDiskSpaceMonitor({
-    placements: params.placements,
-    environments: params.environments,
-    warn: params.warn,
-  });
   const withPreparedRecovery = createWorkerWorkspaceRecoveryPreparer({
     loadSessionRuntime: loadWorkerPlacementSessionRuntimeModule,
     getConfig: getRuntimeConfig,
@@ -137,6 +132,12 @@ export function createGatewayWorkerPlacementRuntime(
     environments: params.environments,
     hasCurrentDeviceRunner: (deviceId) =>
       nodeWorkerSupervisorTransport?.hasCurrentRunner(deviceId) === true,
+  });
+  const diskSpace = createWorkerPlacementDiskSpaceMonitor({
+    placements: params.placements,
+    environments: params.environments,
+    runnerAvailability,
+    warn: params.warn,
   });
   const reclaimBarriers = createGatewayWorkerPlacementReclaimBarriers({
     placements: params.placements,

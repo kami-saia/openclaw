@@ -14,7 +14,7 @@ import {
 } from "openclaw/plugin-sdk/model-session-runtime";
 import { isValidAgentHarnessSessionStoreEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import {
-  isRecord,
+  asOptionalRecord,
   filterStringEntries,
   normalizeLowercaseStringOrEmpty,
   normalizeStringEntries,
@@ -39,7 +39,7 @@ type VoiceResponseParams = {
   /** Caller ownership prepared by the call boundary. */
   senderIsOwner: boolean | undefined;
   /** Agent frozen on the call record. */
-  agentId?: string;
+  agentId: string;
   /** Audible call transcript, used only for bounded first-turn opening context. */
   transcript: Array<{ speaker: "user" | "bot"; text: string }>;
   userMessage: string;
@@ -59,26 +59,6 @@ type VoiceResponsePayload = {
   isError?: boolean;
   isReasoning?: boolean;
 };
-
-function readExplicitToolsAllow(value: unknown): string[] | undefined {
-  if (!isRecord(value)) {
-    return undefined;
-  }
-
-  const allow = value.allow;
-  if (!Array.isArray(allow)) {
-    return undefined;
-  }
-
-  return filterStringEntries(allow);
-}
-
-function resolveVoiceAgentToolsAllow(
-  config: OpenClawConfig,
-  agentId: string,
-): string[] | undefined {
-  return readExplicitToolsAllow(resolveAgentConfig(config, agentId)?.tools);
-}
 
 const VOICE_SPOKEN_OUTPUT_CONTRACT = [
   "Output format requirements:",
@@ -324,7 +304,7 @@ export async function generateVoiceResponse(
     };
   }
   const cfg = coreConfig;
-  const agentId = resolveCallAgentId({ agentId: params.agentId }, voiceConfig);
+  const agentId = resolveCallAgentId(params);
 
   const resolvedSessionKey = resolveVoiceCallSessionKey({
     config: { ...voiceConfig, agentId },
@@ -333,7 +313,8 @@ export async function generateVoiceResponse(
     explicitSessionKey: sessionKey,
     coreSession: coreConfig.session,
   });
-  const toolsAllow = resolveVoiceAgentToolsAllow(cfg, agentId);
+  const allow = asOptionalRecord(resolveAgentConfig(cfg, agentId)?.tools)?.allow;
+  const toolsAllow = Array.isArray(allow) ? filterStringEntries(allow) : undefined;
 
   const storePath = agentRuntime.session.resolveStorePath(cfg.session?.store, { agentId });
   try {

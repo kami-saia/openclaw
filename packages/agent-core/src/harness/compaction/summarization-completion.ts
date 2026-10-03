@@ -23,29 +23,6 @@ import {
 import { SUMMARIZATION_SYSTEM_PROMPT } from "./summarization-prompts.js";
 import { extractSummaryText, serializeConversation } from "./utils.js";
 
-function createSummarizationOptions(
-  model: Model,
-  maxTokens: number,
-  apiKey: string | undefined,
-  headers: Record<string, string> | undefined,
-  signal: AbortSignal | undefined,
-  thinkingLevel: ThinkingLevel | undefined,
-): SimpleStreamOptions {
-  // FORK: compaction is a single-shot call with no higher-level retry budget
-  // (compaction-diag shows attempt=1 maxAttempts=1). The Anthropic/OpenAI SDK
-  // clients default to maxRetries: 0 in this codebase, so a transient provider
-  // 403/5xx kills compaction outright even when the transport marks the
-  // response x-should-retry=true. Give summarization its own retry budget.
-  const options: SimpleStreamOptions = { maxTokens, signal, apiKey, headers, maxRetries: 4 };
-  const fableReasoning =
-    (model.api === "anthropic-messages" || model.api === "bedrock-converse-stream") &&
-    resolveClaudeFable5ModelIdentity(model) !== undefined;
-  if ((model.reasoning || fableReasoning) && thinkingLevel) {
-    options.reasoning = resolveAgentReasoningOption(model, thinkingLevel);
-  }
-  return options;
-}
-
 export interface SummarizationCompletionParams {
   messages: AgentMessage[];
   prompt: string;
@@ -86,14 +63,17 @@ export async function runSummarizationCompletion(
       },
     ],
   };
-  const options = createSummarizationOptions(
-    params.model,
-    params.maxTokens,
-    params.apiKey,
-    params.headers,
-    params.signal,
-    params.thinkingLevel,
-  );
+  const { model, thinkingLevel, maxTokens, signal, apiKey, headers } = params;
+  // FORK: compaction is a single-shot call with no higher-level retry budget.
+  // SDK clients default to maxRetries: 0 here, so a transient provider 403/5xx
+  // kills compaction even when the response says x-should-retry=true.
+  const options: SimpleStreamOptions = { maxTokens, signal, apiKey, headers, maxRetries: 4 };
+  const fableReasoning =
+    (model.api === "anthropic-messages" || model.api === "bedrock-converse-stream") &&
+    resolveClaudeFable5ModelIdentity(model) !== undefined;
+  if ((model.reasoning || fableReasoning) && thinkingLevel) {
+    options.reasoning = resolveAgentReasoningOption(model, thinkingLevel);
+  }
   const response = params.streamFn
     ? await consumeAgentCoreStream(params.streamFn(params.model, context, options), params.runtime)
     : await resolveAgentCoreCompleteFn(params.runtime)(params.model, context, options);
