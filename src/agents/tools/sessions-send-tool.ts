@@ -146,8 +146,7 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
       const timeoutSeconds =
         mode === "steer" || mode === "resume"
           ? 0
-          : (readNonNegativeIntegerParam(params, "timeoutSeconds") ??
-            (forkFireAndForget ? 0 : 30));
+          : (readNonNegativeIntegerParam(params, "timeoutSeconds") ?? (forkFireAndForget ? 0 : 30));
       const {
         cfg,
         mainKey,
