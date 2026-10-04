@@ -275,6 +275,8 @@ describe("listGatewayMethods", () => {
       "sessions.files.assets",
       "worktrees.recoverRemoval",
       "worktrees.retireSnapshot",
+      "sessions.processes.list",
+      "sessions.processes.stop",
       // FORK: tts.stream appends last so the frozen prefix keeps its indices.
       "tts.stream",
     ];
@@ -358,6 +360,8 @@ describe("listGatewayMethods", () => {
       "sessions.files.assets",
       "worktrees.recoverRemoval",
       "worktrees.retireSnapshot",
+      "sessions.processes.list",
+      "sessions.processes.stop",
       // FORK: tts.stream appends last so the frozen prefix keeps its indices.
       "tts.stream",
     ]);
@@ -569,6 +573,8 @@ describe("listGatewayMethods", () => {
       "sessions.files.assets",
       "worktrees.recoverRemoval",
       "worktrees.retireSnapshot",
+      "sessions.processes.list",
+      "sessions.processes.stop",
       // FORK: tts.stream appends last so the frozen prefix keeps its indices.
       "tts.stream",
     ];

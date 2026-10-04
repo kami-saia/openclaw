@@ -3,6 +3,7 @@ import { z } from "zod";
 import { parseByteSize } from "../cli/parse-bytes.js";
 import { parseDurationMs } from "../cli/parse-duration.js";
 import { createAllowDenyChannelRulesSchema } from "./zod-schema.allowdeny.js";
+import { ChannelThreadBindingsSchema } from "./zod-schema.channel-messaging-common.js";
 
 const SessionResetConfigSchema = z.strictObject({
   // FORK: keep "never" alongside upstream's "none" - live configs persist "never"
@@ -58,15 +59,7 @@ export const SessionSchema = z
     store: z.string().optional(),
     mainKey: z.string().optional(),
     sendPolicy: SessionSendPolicySchema.optional(),
-    threadBindings: z
-      .strictObject({
-        enabled: z.boolean().optional(),
-        idleHours: z.number().nonnegative().optional(),
-        maxAgeHours: z.number().nonnegative().optional(),
-        spawnSessions: z.boolean().optional(),
-        defaultSpawnContext: z.enum(["isolated", "fork"]).optional(),
-      })
-      .optional(),
+    threadBindings: ChannelThreadBindingsSchema.optional(),
     sharing: z
       .strictObject({
         readOnly: z.boolean().optional(),

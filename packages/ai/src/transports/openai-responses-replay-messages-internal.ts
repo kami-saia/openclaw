@@ -1,4 +1,12 @@
-import type { Api, AssistantMessage, Context, Model } from "@openclaw/llm-core";
+import {
+  hasRuntimeContextMarker,
+  isRuntimeContextMessage,
+  runtimeContextContentToText,
+  type Api,
+  type AssistantMessage,
+  type Context,
+  type Model,
+} from "@openclaw/llm-core";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type {
   ResponseFunctionCallOutputItemList,
@@ -44,26 +52,29 @@ import {
   sanitizeTransportPayloadText,
 } from "./transport-stream-shared.js";
 
-export function stripEncryptedReasoningContentFields(value: unknown): {
-  value: unknown;
-  changed: boolean;
-} {
+function resolveResponsesInstructionRole(model: Model): "developer" | "system" {
+  const supportsDeveloperRole =
+    !isRecord(model.compat) || model.compat.supportsDeveloperRole !== false;
+  return model.reasoning && supportsDeveloperRole ? "developer" : "system";
+}
+
+export function stripEncryptedReasoningContentFields(value: unknown): unknown {
   if (!value || typeof value !== "object") {
-    return { value, changed: false };
+    return value;
   }
   if (Array.isArray(value)) {
     let changed = false;
     const next = value.map((item) => {
       const stripped = stripEncryptedReasoningContentFields(item);
-      changed ||= stripped.changed;
-      return stripped.value;
+      changed ||= !Object.is(stripped, item);
+      return stripped;
     });
-    return changed ? { value: next, changed: true } : { value, changed: false };
+    return changed ? next : value;
   }
 
   const source = value as Record<string, unknown>;
   if (source.type === "compaction") {
-    return { value, changed: false };
+    return value;
   }
   let changed = false;
   const next: Record<string, unknown> = {};
@@ -73,20 +84,16 @@ export function stripEncryptedReasoningContentFields(value: unknown): {
       continue;
     }
     const stripped = stripEncryptedReasoningContentFields(child);
-    changed ||= stripped.changed;
-    next[key] = stripped.value;
+    changed ||= !Object.is(stripped, child);
+    next[key] = stripped;
   }
-  return changed ? { value: next, changed: true } : { value, changed: false };
+  return changed ? next : value;
 }
 
 function isOpenAIResponsesReasoningReplayMetadata(
   value: unknown,
 ): value is OpenAIResponsesReasoningReplayMetadata {
-  if (!isProviderReplayContext(value)) {
-    return false;
-  }
-  const record = value as Record<string, unknown>;
-  return record.v === 1 && record.source === "openai-responses";
+  return isProviderReplayContext(value) && value.v === 1 && value.source === "openai-responses";
 }
 
 function readOpenAIResponsesReasoningReplayBlockMetadata(
@@ -102,11 +109,7 @@ function readOpenAIResponsesReasoningReplayBlockMetadata(
 function normalizeOpenAIResponsesReasoningReplayItem(
   item: ReplayableResponseReasoningItem,
 ): ReplayableResponseReasoningItem {
-  const record = item as ReplayableResponseReasoningItem & Record<string, unknown>;
-  if (record.type !== "reasoning" || Array.isArray(record.summary)) {
-    return item;
-  }
-  return { ...record, summary: [] } as ReplayableResponseReasoningItem;
+  return Array.isArray(item.summary) ? item : { ...item, summary: [] };
 }
 
 function prepareOpenAIResponsesReasoningItemForReplay(
@@ -115,11 +118,10 @@ function prepareOpenAIResponsesReasoningItemForReplay(
   blockMetadata?: OpenAIResponsesReasoningReplayMetadata | null,
   options?: { preserveUnattributedEncryptedContent?: boolean },
 ): ReplayableResponseReasoningItem {
-  const record = item as ReplayableResponseReasoningItem & Record<string, unknown>;
-  const hasRawMetadata = Object.hasOwn(record, OPENAI_RESPONSES_REASONING_REPLAY_META_KEY);
-  const { [OPENAI_RESPONSES_REASONING_REPLAY_META_KEY]: rawMetadata, ...rest } = record;
+  const hasRawMetadata = Object.hasOwn(item, OPENAI_RESPONSES_REASONING_REPLAY_META_KEY);
+  const { [OPENAI_RESPONSES_REASONING_REPLAY_META_KEY]: rawMetadata, ...rest } = item;
   if (!("encrypted_content" in rest)) {
-    return normalizeOpenAIResponsesReasoningReplayItem(rest as ReplayableResponseReasoningItem);
+    return normalizeOpenAIResponsesReasoningReplayItem(rest);
   }
   const metadata =
     blockMetadata !== undefined
@@ -132,25 +134,21 @@ function prepareOpenAIResponsesReasoningItemForReplay(
     !hasRawMetadata &&
     options?.preserveUnattributedEncryptedContent === true;
   if (preserveUnattributed || (metadata && providerReplayContextMatches(metadata, context))) {
-    return normalizeOpenAIResponsesReasoningReplayItem(rest as ReplayableResponseReasoningItem);
+    return normalizeOpenAIResponsesReasoningReplayItem(rest);
   }
-  const stripped = stripEncryptedReasoningContentFields(rest);
   return normalizeOpenAIResponsesReasoningReplayItem(
-    stripped.value as ReplayableResponseReasoningItem,
+    stripEncryptedReasoningContentFields(rest) as ReplayableResponseReasoningItem,
   );
 }
 
-function normalizeResponsesReplayItemId(
-  id: string | undefined,
-  prefix: string,
-): string | undefined {
+function normalizeResponsesReplayItemId(id: string | undefined): string | undefined {
   if (!id) {
     return undefined;
   }
   if (id.length <= OPENAI_RESPONSES_REPLAY_ITEM_ID_MAX_LENGTH) {
     return id;
   }
-  return `${prefix}_${shortHash(id)}`;
+  return `msg_${shortHash(id)}`;
 }
 
 export { encodeTextSignatureV1 } from "../utils/text-signature.js";
@@ -344,10 +342,7 @@ function convertResponsesMessagesWithStyle(
   );
   const includeSystemPrompt = options?.includeSystemPrompt ?? true;
   if (includeSystemPrompt && context.systemPrompt) {
-    const supportsDeveloperRole =
-      model.reasoning &&
-      (model.compat as { supportsDeveloperRole?: boolean } | undefined)?.supportsDeveloperRole !==
-        false;
+    const instructionRole = resolveResponsesInstructionRole(model);
     const pushSystemPromptMessage = (role: "system" | "developer", text: string) => {
       messages.push(
         buildResponsesInputMessage(role, [
@@ -363,16 +358,17 @@ function convertResponsesMessagesWithStyle(
     // model reads precedence structurally instead of inferring it from prose.
     // Heavily instruction-tuned reasoners resolve priority by role first; a
     // single flattened blob gives identity and Discord formatting rules equal
-    // standing. Routes without the hierarchy fall back to the previous single
-    // message unchanged.
-    const identitySplit = supportsDeveloperRole
-      ? splitSystemPromptIdentityBoundary(context.systemPrompt)
-      : undefined;
+    // standing. Routes without the hierarchy fall back to upstream's single
+    // message at the resolved instruction role.
+    const identitySplit =
+      instructionRole === "developer"
+        ? splitSystemPromptIdentityBoundary(context.systemPrompt)
+        : undefined;
     if (identitySplit) {
       pushSystemPromptMessage("system", identitySplit.identity);
       pushSystemPromptMessage("developer", identitySplit.operational);
     } else {
-      pushSystemPromptMessage(supportsDeveloperRole ? "developer" : "system", context.systemPrompt);
+      pushSystemPromptMessage(instructionRole, context.systemPrompt);
     }
   }
   // The compact endpoint's output is already canonical provider input, not
@@ -387,7 +383,7 @@ function convertResponsesMessagesWithStyle(
   // Each carrier stays with its preceding user/checkpoint; moving it past an
   // appended steering user would rewrite the already admitted request prefix.
   const isCarrier = (message: (typeof replayMessages)[number]) =>
-    "role" in message && message.role === "user" && message.runtimeContextCarrier === true;
+    "role" in message && hasRuntimeContextMarker(message);
   if (replayMessages.some(isCarrier)) {
     const anchored: typeof replayMessages = [];
     // A canonical window is already emitted above; its checkpoint anchors an otherwise userless tail.
@@ -414,7 +410,16 @@ function convertResponsesMessagesWithStyle(
       messages.push(msg);
       continue;
     }
-    if (msg.role === "user") {
+    if (isRuntimeContextMessage(msg)) {
+      messages.push(
+        buildResponsesInputMessage(resolveResponsesInstructionRole(model), [
+          {
+            type: "input_text",
+            text: sanitizeTransportPayloadText(runtimeContextContentToText(msg.content)),
+          },
+        ]),
+      );
+    } else if (msg.role === "user") {
       if (typeof msg.content === "string") {
         messages.push(
           buildResponsesInputMessage(
@@ -499,7 +504,7 @@ function convertResponsesMessagesWithStyle(
           if (!textSignature?.id) {
             textFallbackOrdinal += 1;
           }
-          msgId = normalizeResponsesReplayItemId(msgId, "msg");
+          msgId = normalizeResponsesReplayItemId(msgId);
           const messageItem: ReplayableResponseOutputMessage = {
             type: "message",
             role: "assistant",

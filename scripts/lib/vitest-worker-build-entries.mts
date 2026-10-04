@@ -25,6 +25,7 @@ import {
 } from "../../src/agents/code-mode-retention-entrypoint.test-support.ts";
 import { cliCompactionBackendEntrypoints } from "../../src/agents/command/cli-compaction-runtime.test-support.ts";
 import { agentProcessTestEntrypoints } from "../../src/agents/process-runtime.test-support.ts";
+import { sdkStateOwnerFixtureEntrypoint } from "../../src/agents/sandbox/sdk-state-owner-runtime.test-support.ts";
 import { bashOutputSpillEntrypoints } from "../../src/agents/sessions/bash-output-spill-entrypoints.test-support.ts";
 import { managedWorktreeGcEntrypoint } from "../../src/agents/worktrees/service-gc-runtime.test-support.ts";
 import { clawProjectBuildEntrypoint } from "../../src/claws/project-runtime.test-support.ts";
@@ -201,6 +202,7 @@ export const preservedModuleBuildSources = [
   "src/worker/inference-stream.runtime.ts",
   "src/cli/mcp-cli.ts",
   "src/cli/exec-approvals-local.ts",
+  "src/cli/exec-policy-cli.ts",
   "src/agents/agent-bundle-mcp-materialize.ts",
   "src/plugins/tool-metadata.ts",
   "src/plugins/tools.ts",
@@ -311,6 +313,7 @@ export const vitestWorkerBuildEntries = {
     nativeWorkerResourceEntrypoint,
     ...Object.values(stateNativeProcessEntrypoints),
     ...Object.values(agentProcessTestEntrypoints),
+    sdkStateOwnerFixtureEntrypoint,
     ...Object.values(pluginProcessRuntimeEntrypoints),
     ...Object.values(pluginRetentionEntrypoints),
     execOutputRetentionEntrypoint,

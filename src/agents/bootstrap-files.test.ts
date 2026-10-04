@@ -205,9 +205,8 @@ async function writeCompletedWorkspaceState(workspaceDir: string): Promise<void>
 }
 
 async function writeLegacyCompletedWorkspaceState(workspaceDir: string): Promise<void> {
-  await fs.mkdir(path.join(workspaceDir, ".openclaw"), { recursive: true });
   await fs.writeFile(
-    path.join(workspaceDir, ".openclaw", "workspace-state.json"),
+    path.join(workspaceDir, "openclaw-workspace-state.json"),
     `${JSON.stringify({
       version: 1,
       bootstrapSeededAt: "2026-05-16T00:00:00.000Z",
@@ -730,7 +729,7 @@ describe("resolveBootstrapContextForRun", () => {
       config: {
         agents: {
           defaults: { heartbeat: {} },
-          list: [{ id: "main" }],
+          entries: { main: {} },
         },
       },
     });
@@ -1002,7 +1001,7 @@ describe("resolveContextInjectionMode", () => {
         {
           agents: {
             defaults: { contextInjection: "continuation-skip" },
-            list: [{ id: "strict", contextInjection: "always" }],
+            entries: { strict: { contextInjection: "always" } },
           },
         } as never,
         "strict",
@@ -1016,7 +1015,7 @@ describe("resolveContextInjectionMode", () => {
         {
           agents: {
             defaults: { contextInjection: "never" },
-            list: [{ id: "worker" }],
+            entries: { worker: {} },
           },
         } as never,
         "worker",

@@ -5,6 +5,7 @@ import { trackSqliteStatementExecutions } from "../../../test/helpers/sqlite-sta
 import * as boardStore from "../../boards/sqlite-board-store.kernel.js";
 import { requireNodeSqlite } from "../../infra/node-sqlite.js";
 import { runExclusiveSessionLifecycleMutation } from "../../sessions/session-lifecycle-admission.js";
+import { sessionChanges } from "../../sessions/session-row-changes.js";
 import { closeOpenClawAgentDatabaseByPathAsync } from "../../state/openclaw-agent-db-lifecycle.js";
 import { OpenClawAgentDatabaseReadOnlyScope } from "../../state/openclaw-agent-db-readonly-scope.js";
 import { withOpenClawAgentDatabaseReadOnly } from "../../state/openclaw-agent-db-readonly.js";
@@ -13,6 +14,7 @@ import {
   resolveOpenClawAgentSqlitePath,
   runOpenClawAgentWriteTransaction,
 } from "../../state/openclaw-agent-db.js";
+import { runOpenClawAgentWriteAdmission } from "../../state/openclaw-agent-write-admission.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { normalizeSessionDeliveryState } from "../../utils/delivery-context.shared.js";
 import * as entryCache from "./session-accessor.sqlite-entry-cache.js";
@@ -202,7 +204,7 @@ it("reads row metadata, board presence, and cold summary position from one snaps
     const concurrentCommit = vi
       .spyOn(boardStore, "readBoardSessionKeys")
       .mockImplementationOnce((reader, key) => {
-        // Commit after entry decoding; the remaining facts must retain its original snapshot.
+        // Commit after entry acquisition; the remaining facts must retain its original snapshot.
         peer.exec("BEGIN IMMEDIATE");
         try {
           peer
@@ -234,9 +236,27 @@ it("reads row metadata, board presence, and cold summary position from one snaps
         if (!opened.found) {
           throw new Error("Expected the seeded read-only database");
         }
-        const queries = trackSqliteStatementExecutions(opened.value.db, ["boards"], (sql) =>
-          /\bfrom "board_tabs"/iu.test(sql) ? "boards" : null,
+        const queries = trackSqliteStatementExecutions(
+          opened.value.db,
+          ["boards", "entries"],
+          (sql) => {
+            if (/\bfrom "board_tabs"/iu.test(sql)) {
+              return "boards";
+            }
+            return /\bfrom "session_nodes"/iu.test(sql) && sql.includes('"entry_json"')
+              ? "entries"
+              : null;
+          },
         );
+        const parse = vi.spyOn(JSON, "parse");
+        const entryParseCount = () =>
+          parse.mock.calls.filter(
+            ([value]) =>
+              typeof value === "string" &&
+              value.includes('"sessionId":') &&
+              (value.includes(sessionId) ||
+                sessionKeys.slice(1).some((key) => value.includes(key))),
+          ).length;
         try {
           const read = () =>
             readSessionRowDatabaseFacts({
@@ -248,6 +268,9 @@ it("reads row metadata, board presence, and cold summary position from one snaps
           const first = read();
           expect(first.rows).toHaveLength(64);
           expect(queries.counts.boards).toBe(1);
+          expect(queries.counts.entries).toBe(1);
+          expect(queries.rowCounts.entries).toBe(64);
+          expect(entryParseCount()).toBe(64);
           expect(first.rows.filter((row) => row.hasBoard).map((row) => row.sessionKey)).toEqual(
             boardKeys,
           );
@@ -268,7 +291,10 @@ it("reads row metadata, board presence, and cold summary position from one snaps
             activitySummaryWatermark: { generation: "next-generation", maxSeq: 42 },
           });
           expect(queries.counts.boards).toBe(2);
+          expect(queries.counts.entries).toBe(2);
+          expect(entryParseCount()).toBe(128);
         } finally {
+          parse.mockRestore();
           queries.restore();
         }
       });
@@ -721,6 +747,74 @@ it.each(["durable", "incognito"] as const)(
       } finally {
         authority.release();
       }
+    });
+  },
+);
+
+it("orders native reads with writers and ignores unrelated metadata notifications", async () => {
+  await withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
+    const database = openOpenClawAgentDatabase({ agentId: "main", env });
+    const sessionKey = "agent:main:ordered-consumer";
+    writeSessionEntry(database, sessionKey, { sessionId: "ordered-session", updatedAt: 1 });
+    const input = { agentId: "main", storePath: database.path, sessionKeys: [sessionKey], env };
+    let escaped: (() => void) | undefined;
+    await withSessionEntriesFromStoresInWorker(
+      [input],
+      ([read]) => {
+        escaped = read!.assertCurrent;
+        sessionChanges.emit({ sessionKey, scope: "runtime" });
+        sessionChanges.emit({ all: true, scope: "agent-runs" });
+        sessionChanges.emit({ all: true, scope: "worker-placements" });
+        sessionChanges.emit({ all: true, scope: "profiles" });
+        sessionChanges.emit({ sessionKey, agentId: "main" });
+        sessionChanges.emit({ sessionKey, storePath: database.path, facts: { kind: "unchanged" } });
+        sessionChanges.emit({
+          all: true,
+          scope: { storePath: path.join(path.dirname(database.path), "unrelated.sqlite") },
+          factsInvalidated: true,
+        });
+        read!.assertCurrent();
+        expect(read!.result.entries[0]?.entry.sessionId).toBe("ordered-session");
+        sessionChanges.emit({ sessionKey, storePath: database.path, factsInvalidated: true });
+        expect(read!.assertCurrent).toThrow("Session entry changed during read");
+      },
+      { ordered: true },
+    );
+    expect(escaped).toThrow("consumer is no longer active");
+    await expect(
+      runOpenClawAgentWriteAdmission({ agentId: "main", path: database.path, env }, () =>
+        withSessionEntriesFromStoresInWorker([input], () => {}, { ordered: true }),
+      ),
+    ).rejects.toThrow("cannot reenter an active SQLite writer admission");
+  });
+});
+
+it.each(["entry", "store", "topology"] as const)(
+  "revokes an ordered reader after authoritative %s changes",
+  async (change) => {
+    await withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
+      const database = openOpenClawAgentDatabase({ agentId: "main", env });
+      const sessionKey = "agent:main:changed-consumer";
+      writeSessionEntry(database, sessionKey, { sessionId: "original", updatedAt: 1 });
+      await withSessionEntriesFromStoresInWorker(
+        [{ agentId: "main", storePath: database.path, sessionKeys: [sessionKey], env }],
+        ([read]) => {
+          read!.assertCurrent();
+          if (change === "entry") {
+            writeSessionEntry(database, sessionKey, { sessionId: "successor", updatedAt: 2 });
+          } else if (change === "store") {
+            sessionChanges.emit({
+              all: true,
+              scope: { storePath: database.path },
+              factsInvalidated: true,
+            });
+          } else {
+            sessionChanges.emit({ all: true, scope: "stores" });
+          }
+          expect(read!.assertCurrent).toThrow("Session entry changed during read");
+        },
+        { ordered: true },
+      );
     });
   },
 );

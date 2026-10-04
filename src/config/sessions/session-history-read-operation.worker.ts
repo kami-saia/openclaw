@@ -1,3 +1,4 @@
+import { assertExistingDatabaseIdentity } from "../../infra/sqlite-worker-identity.js";
 import type { OpenClawAgentReadOnlyDatabase } from "../../state/openclaw-agent-db-readonly-open.js";
 import { cloneEnvWithPlatformSemantics } from "../config-env-vars.js";
 import { runWithSessionTranscriptReadFence } from "./session-transcript-read-fence.js";
@@ -17,7 +18,10 @@ type DurableHistoryReadOperationRequest = Extract<
       | "session-preview"
       | "model-context"
       | "transcript-watermark"
-      | "session-pending-input-receipts";
+      | "transcript-message-presence"
+      | "transcript-anchors"
+      | "session-pending-input-receipts"
+      | "session-pending-input-source";
   }
 >;
 
@@ -42,7 +46,10 @@ export function isSessionHistoryReadOperation(
     case "session-preview":
     case "model-context":
     case "transcript-watermark":
+    case "transcript-message-presence":
+    case "transcript-anchors":
     case "session-pending-input-receipts":
+    case "session-pending-input-source":
       return true;
     default:
       return false;
@@ -50,11 +57,88 @@ export function isSessionHistoryReadOperation(
 }
 
 /** Load dependencies before the owner enters its synchronous, admitted read scope. */
+export function prepareSessionHistoryReadOperation<
+  Request extends SessionHistoryReadOperationRequest,
+>(
+  request: Request,
+  retainedDatabase?: OpenClawAgentReadOnlyDatabase,
+): Promise<() => SessionTranscriptWorkerValues[Request["kind"]]>;
 export async function prepareSessionHistoryReadOperation(
   request: SessionHistoryReadOperationRequest,
   retainedDatabase?: OpenClawAgentReadOnlyDatabase,
 ): Promise<() => SessionTranscriptWorkerValues[SessionHistoryReadOperationRequest["kind"]]> {
+  const execute = await prepareHistoryRead(request, retainedDatabase);
+  return () => {
+    if (
+      "expectedIdentity" in request &&
+      request.expectedIdentity &&
+      request.kind !== "transcript-anchors"
+    ) {
+      assertExistingDatabaseIdentity(
+        request.kind === "model-context" ? request.target.storePath : request.database.path,
+        request.expectedIdentity.key,
+        request.expectedIdentity.birthtime,
+      );
+    }
+    return execute();
+  };
+}
+
+async function prepareHistoryRead(
+  request: SessionHistoryReadOperationRequest,
+  retainedDatabase?: OpenClawAgentReadOnlyDatabase,
+): Promise<() => SessionTranscriptWorkerValues[SessionHistoryReadOperationRequest["kind"]]> {
   switch (request.kind) {
+    case "transcript-anchors": {
+      const [
+        { withOpenClawAgentDatabaseReadOnly },
+        { readSessionTranscriptAnchorFactsInDatabase },
+      ] = await Promise.all([
+        import("../../state/openclaw-agent-db-readonly.js"),
+        import("./session-transcript-anchor-read.kernel.js"),
+      ]);
+      return () => {
+        assertExistingDatabaseIdentity(
+          request.database.path,
+          request.expectedIdentity.key,
+          request.expectedIdentity.birthtime,
+        );
+        const read = withOpenClawAgentDatabaseReadOnly(
+          (database) =>
+            readSessionTranscriptAnchorFactsInDatabase(
+              database,
+              request.resolved,
+              request.selection,
+            ),
+          { ...request.database, env: request.resolved.env },
+        );
+        return { kind: request.kind, facts: read.found ? read.value : { anchors: [] } };
+      };
+    }
+    case "session-pending-input-source": {
+      const [
+        { withOpenClawAgentDatabaseReadOnly },
+        { assertCapturedSessionEntryReadSource },
+        { readPendingInputSourceInDatabase },
+      ] = await Promise.all([
+        import("../../state/openclaw-agent-db-readonly.js"),
+        import("./session-accessor.sqlite-exact-read.js"),
+        import("./session-pending-input-source.kernel.js"),
+      ]);
+      return () => {
+        const read = withOpenClawAgentDatabaseReadOnly(
+          (database) => {
+            assertCapturedSessionEntryReadSource(request.source, database);
+            return readPendingInputSourceInDatabase(database, request.input);
+          },
+          { ...request.database, env: request.env },
+        );
+        return {
+          kind: request.kind,
+          snapshot: read.found ? read.value : { kind: "source", current: false },
+        };
+      };
+    }
     case "transcript-match": {
       const [{ findTranscriptEventMatchingInDatabase }, { withOpenClawAgentDatabaseReadOnly }] =
         await Promise.all([
@@ -138,10 +222,23 @@ export async function prepareSessionHistoryReadOperation(
     case "transcript-watermark": {
       const { readSessionTranscriptWatermark } =
         await import("./session-accessor.sqlite-transcript-watermark.js");
-      return () => ({
-        kind: request.kind,
-        watermark: readSessionTranscriptWatermark(request.scope),
-      });
+      return () => {
+        return { kind: request.kind, watermark: readSessionTranscriptWatermark(request.scope) };
+      };
+    }
+    case "transcript-message-presence": {
+      const [{ withOpenClawAgentDatabaseReadOnly }, { hasSessionTranscriptMessageInDatabase }] =
+        await Promise.all([
+          import("../../state/openclaw-agent-db-readonly.js"),
+          import("./session-accessor.sqlite-read.js"),
+        ]);
+      return () => {
+        const read = withOpenClawAgentDatabaseReadOnly(
+          (database) => hasSessionTranscriptMessageInDatabase(database, request.scope.sessionId),
+          { ...request.database, env: request.scope.env },
+        );
+        return { kind: request.kind, present: read.found && read.value };
+      };
     }
     case "session-pending-input-receipts": {
       const { listSessionPendingInputReceipts } =

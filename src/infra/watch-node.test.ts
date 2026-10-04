@@ -6,8 +6,12 @@ import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
 import { bundledPluginFile } from "openclaw/plugin-sdk/test-fixtures";
 import { describe, expect, it, vi } from "vitest";
-import { runNodeWatchedPaths } from "../../scripts/run-node.mts";
-import { runWatchMain } from "../../scripts/watch-node.mts";
+import { runNodeWatchedPaths } from "../../scripts/run-node-watch-paths.mts";
+import {
+  runWatch,
+  watchReady,
+  type WatchFixture as WatchRunParams,
+} from "../../test/scripts/watch-node.test-support.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { withTestDir } from "../test-helpers/temp-dir.js";
 
@@ -16,9 +20,6 @@ const VOICE_CALL_MANIFEST = bundledPluginFile("voice-call", "openclaw.plugin.jso
 const VOICE_CALL_PACKAGE = bundledPluginFile("voice-call", "package.json");
 const VOICE_CALL_INDEX = bundledPluginFile("voice-call", "index.ts");
 const VOICE_CALL_RUNTIME = bundledPluginFile("voice-call", "src/runtime.ts");
-type WatchRunParams = NonNullable<Parameters<typeof runWatchMain>[0]>;
-
-const runWatch = (params: WatchRunParams) => runWatchMain(params);
 
 function observe(
   watcher: EventEmitter & { close(): Promise<void> },
@@ -82,7 +83,7 @@ const createAutoExitChild = () => {
   return child;
 };
 
-const startWatchRun = ({
+const startWatchRun = async ({
   args = ["gateway", "--force"],
   env,
   spawn,
@@ -103,10 +104,10 @@ const startWatchRun = ({
     createWatcher,
     env,
     fs: { existsSync: () => true },
-    lockDisabled: true,
     process: fakeProcess,
     spawn,
   });
+  await watchReady();
   return { watcher, createWatcher, fakeProcess, runPromise };
 };
 
@@ -162,6 +163,7 @@ describe("watch-node script", () => {
             return observe(watcher, options);
           },
         });
+        await watchReady();
         const failure = new Error("physical watcher close failed");
         const completion =
           outcome === "reject" ? expect(run).rejects.toBe(failure) : expect(run).resolves.toBe(0);
@@ -195,11 +197,11 @@ describe("watch-node script", () => {
       const run = runWatch({
         args: ["gateway"],
         env: {},
-        lockDisabled: true,
         process: fakeProcess,
         spawn,
         createWatcher: () => ({ on: () => {}, close: async () => {} }),
       });
+      await watchReady();
       child.emit("exit", null, signal);
       await expect(run).resolves.toBe(signal);
       expect(spawn).toHaveBeenCalledOnce();
@@ -220,7 +222,6 @@ describe("watch-node script", () => {
         args: ["gateway"],
         env: {},
         fs: { existsSync: () => true },
-        lockDisabled: true,
         process: fakeProcess,
         spawn,
         ...(phase === "startup-error"
@@ -231,6 +232,7 @@ describe("watch-node script", () => {
             }
           : { createWatcher: (_paths, options) => observe(watcher, options) }),
       });
+      await watchReady();
       if (phase === "restart") {
         watcher.emit("change", "src/index.ts");
       } else if (phase === "shutdown") {
@@ -257,11 +259,11 @@ describe("watch-node script", () => {
       args: ["gateway"],
       env: {},
       fs: { existsSync: () => true },
-      lockDisabled: true,
       process: fakeProcess,
       spawn,
       createWatcher: (_paths, options) => observe(watcher, options),
     });
+    await watchReady();
     watcher.emit("change", "src/index.ts");
     expect(first.kill).toHaveBeenCalledWith("SIGTERM");
     first.emit("exit", null, "SIGTERM");
@@ -283,11 +285,11 @@ describe("watch-node script", () => {
         cwd,
         createWatcher,
         env: { PATH: "/usr/bin" },
-        lockDisabled: true,
         now: () => 1700000000000,
         process: fakeProcess,
         spawn,
       });
+      await watchReady();
 
       expect(createWatcher).toHaveBeenCalledTimes(1);
       const [watchPaths, watchOptions] = requireMockCall(createWatcher, 0) as unknown as [
@@ -368,10 +370,10 @@ describe("watch-node script", () => {
         cwd,
         createWatcher,
         env: { OPENCLAW_TRACE_SYNC_IO: "0" },
-        lockDisabled: true,
         process: fakeProcess,
         spawn,
       });
+      await watchReady();
 
       const spawnCall = requireMockCall(spawn, 0);
       expect(spawnCall[0]).toBe("/usr/local/bin/node");
@@ -405,10 +407,10 @@ describe("watch-node script", () => {
     const runPromise = runWatch({
       args: ["gateway", "--force"],
       loadWatcher,
-      lockDisabled: true,
       process: fakeProcess,
       spawn,
     });
+    await watchReady();
 
     expect(spawn).toHaveBeenCalledTimes(1);
     expect(loadWatcher).toHaveBeenCalledTimes(1);
@@ -449,11 +451,11 @@ describe("watch-node script", () => {
       args: ["gateway", "--force"],
       createWatcher: (_paths, options) => observe(watcher, options),
       fs: { existsSync: () => true },
-      lockDisabled: true,
       pathClassifier,
       process: fakeProcess,
       spawn,
     });
+    await watchReady();
 
     expect(pathClassifier.refreshGeneratedPluginAssetPaths).toHaveBeenCalledTimes(1);
     watcher.emit("change", "extensions/browser/package.json");
@@ -475,10 +477,10 @@ describe("watch-node script", () => {
     const runPromise = runWatch({
       args: ["gateway", "--force"],
       createWatcher,
-      lockDisabled: true,
       process: fakeProcess,
       spawn,
     });
+    await watchReady();
 
     fakeProcess.emit("SIGINT");
     const exitCode = await runPromise;
@@ -496,10 +498,10 @@ describe("watch-node script", () => {
     const runPromise = runWatch({
       args: ["gateway", "--force"],
       createWatcher,
-      lockDisabled: true,
       process: fakeProcess,
       spawn,
     });
+    await watchReady();
 
     fakeProcess.emit("SIGTERM");
     const exitCode = await runPromise;
@@ -517,10 +519,10 @@ describe("watch-node script", () => {
     const runPromise = runWatch({
       args: ["config", "validate"],
       createWatcher,
-      lockDisabled: true,
       process: fakeProcess,
       spawn,
     });
+    await watchReady();
 
     child.emit("exit", 0, null);
     const exitCode = await runPromise;
@@ -540,7 +542,7 @@ describe("watch-node script", () => {
       .mockReturnValueOnce(gatewayA)
       .mockReturnValueOnce(doctor)
       .mockReturnValueOnce(gatewayB);
-    const { watcher, fakeProcess, runPromise } = startWatchRun({ env: {}, spawn });
+    const { watcher, fakeProcess, runPromise } = await startWatchRun({ env: {}, spawn });
 
     gatewayA.emit("exit", 1, null);
     await new Promise((resolve) => {
@@ -583,10 +585,10 @@ describe("watch-node script", () => {
       args: ["gateway", "--force"],
       createWatcher,
       env: { OPENCLAW_GATEWAY_WATCH_AUTO_DOCTOR: "0" },
-      lockDisabled: true,
       process: fakeProcess,
       spawn,
     });
+    await watchReady();
 
     child.emit("exit", 1, null);
     const exitCode = await runPromise;
@@ -602,7 +604,7 @@ describe("watch-node script", () => {
     });
     const childB = createKillableChild();
     const spawn = vi.fn().mockReturnValueOnce(childA).mockReturnValueOnce(childB);
-    const { watcher, fakeProcess, runPromise } = startWatchRun({ spawn });
+    const { watcher, fakeProcess, runPromise } = await startWatchRun({ spawn });
 
     childA.emit("exit", 143, null);
     await new Promise((resolve) => {
@@ -627,10 +629,10 @@ describe("watch-node script", () => {
         LAUNCH_JOB_LABEL: "ai.openclaw.gateway",
         PATH: "/usr/bin",
       },
-      lockDisabled: true,
       process: fakeProcess,
       spawn,
     });
+    await watchReady();
 
     const spawnCall = requireMockCall(spawn, 0);
     expect(spawnCall[0]).toBe("/usr/local/bin/node");
@@ -650,7 +652,7 @@ describe("watch-node script", () => {
     const first = createAutoExitChild();
     const second = createKillableChild();
     const spawn = vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second);
-    const { watcher, fakeProcess, runPromise } = startWatchRun({ spawn });
+    const { watcher, fakeProcess, runPromise } = await startWatchRun({ spawn });
     watcher.emit("change");
     watcher.emit("change", "src/index.ts");
     expect(first.kill).toHaveBeenCalledExactlyOnceWith("SIGTERM");
@@ -671,7 +673,7 @@ describe("watch-node script", () => {
       .mockReturnValueOnce(childB)
       .mockReturnValueOnce(childC)
       .mockReturnValueOnce(childD);
-    const { watcher, fakeProcess, runPromise } = startWatchRun({ spawn });
+    const { watcher, fakeProcess, runPromise } = await startWatchRun({ spawn });
 
     watcher.emit("change", "src/infra/watch-node.test.ts");
     await new Promise((resolve) => {
@@ -747,11 +749,11 @@ describe("watch-node script", () => {
       args: ["gateway", "--force"],
       createWatcher: (_paths, options) => observe(watcher, options),
       fs: { existsSync: () => distEntryExists },
-      lockDisabled: true,
       process: fakeProcess,
       sleep,
       spawn,
     });
+    await watchReady();
 
     watcher.emit("change", "src/infra/restart.ts");
     watcher.emit("change", "src/infra/restart.ts");
@@ -782,7 +784,6 @@ describe("watch-node script", () => {
       args: ["gateway", "--force"],
       createWatcher: (_paths, options) => observe(watcher, options),
       fs: { existsSync: () => false },
-      lockDisabled: true,
       process: fakeProcess,
       sleep: () =>
         new Promise<void>((resolve) => {
@@ -790,6 +791,7 @@ describe("watch-node script", () => {
         }),
       spawn,
     });
+    await watchReady();
 
     watcher.emit("change", "src/infra/restart.ts");
     fakeProcess.emit("SIGINT");
@@ -815,7 +817,6 @@ describe("watch-node script", () => {
       args: ["gateway", "--force"],
       createWatcher: (_paths, options) => observe(watcher, options),
       fs: { existsSync: () => distEntryExists },
-      lockDisabled: true,
       process: fakeProcess,
       sleep: () =>
         new Promise<void>((resolve) => {
@@ -823,6 +824,7 @@ describe("watch-node script", () => {
         }),
       spawn,
     });
+    await watchReady();
 
     watcher.emit("change", "src/infra/restart.ts");
     childA.emit("exit", 1, null);
@@ -848,10 +850,10 @@ describe("watch-node script", () => {
     const runPromise = runWatch({
       args: ["gateway", "--force"],
       createWatcher,
-      lockDisabled: true,
       process: fakeProcess,
       spawn,
     });
+    await watchReady();
 
     watcher.emit("error", new Error("watch failed"));
     const exitCode = await runPromise;
@@ -983,6 +985,7 @@ describe("watch-node script", () => {
         sleep: async () => {},
         spawn,
       });
+      await watchReady();
 
       await new Promise((resolve) => {
         setImmediate(resolve);

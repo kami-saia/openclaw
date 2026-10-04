@@ -653,6 +653,8 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["sessions.files.assets", "sessions-files", "operator.read", "2026.9"],
   ["worktrees.recoverRemoval", "worktrees", "operator.admin", "2026.9", CONTROL_PLANE_WRITE],
   ["worktrees.retireSnapshot", "worktrees", "operator.admin", "2026.9", CONTROL_PLANE_WRITE],
+  ["sessions.processes.list", "session-processes", "operator.read", "2026.9", OBSERVATION],
+  ["sessions.processes.stop", "session-processes", "operator.write", "2026.9"],
   // FORK: tts.stream mints one-off streaming voice URLs for node voice.play.
   // The handler lives in server-methods/tts.ts; without this row the registry
   // skips it and dispatch reports `unknown method: tts.stream`.
