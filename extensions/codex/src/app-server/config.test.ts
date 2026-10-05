@@ -345,7 +345,6 @@ describe("Codex app-server config", () => {
     });
     expect(runtime).toMatchObject({
       connectionClass: "remote",
-      remoteAppsSubstrate: "preconfigured",
       remoteWorkspaceRoot: "/srv/workspaces",
     });
   });

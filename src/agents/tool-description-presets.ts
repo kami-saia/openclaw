@@ -103,7 +103,7 @@ export function describeSessionsSearchTool(options?: SessionLinkDescriptionOptio
 /** Describes the sessions_send tool for model-facing instructions. */
 export function describeSessionsSendTool(): string {
   return [
-    "Run a visible session on this Gateway by sessionKey/label, or a configured local agent by agentId; sessionKey wins redundant label.",
+    "Run a permitted session on this Gateway by sessionKey/label, or a configured local agent by agentId; sessionKey wins redundant label. Explicit per-agent send destinations can permit messaging without transcript access.",
     "A session identifies model context, not an external address. A peer reply reaches you once: inline when available, otherwise as a later inter-session input. Continue with another sessions_send; post to channels with message.",
     SESSIONS_SEND_RESULT_GUIDANCE,
     "Omit mode to automatically continue your paused native child task; returns runId/taskRunId with task-owned completion instead of an inline wait or watch. With timeoutSeconds:0, your own running child is steered into its active run (admission only, no separate completion turn; use mode:followup for one); other sessions use ordinary message delivery. mode:notify queues ephemeral context for the next turn without waking or starting work (bounded process memory, not a durable inbox). mode:steer injects guidance into an active supported run and never starts idle work. mode:followup starts a separate turn without steering or resuming a paused task. mode:resume requires a paused native child task and rejects watch:true and positive timeoutSeconds.",
@@ -112,7 +112,7 @@ export function describeSessionsSendTool(): string {
     // We default timeoutSeconds to 0 and skip the A2A announce-back flow.
     "Fire-and-forget: returns immediately after enqueuing the wake. The target's reply (if any) goes to the target's own delivery channel, not back here.",
     "To get a response routed back, the receiving session must call sessions_send itself.",
-    "A timeoutSeconds:0 followup to your existing native child gives this turn a completion to await with sessions_yield, even while queued. watch:true additionally reports later target-session changes; on a steer it can claim the child's existing pending completion.",
+    "A timeoutSeconds:0 followup to your existing native child gives this turn a completion to await with sessions_yield, even while queued. watch:true requires status visibility and additionally reports later target-session changes; on a steer it can claim the child's existing pending completion.",
   ].join(" ");
 }
 
