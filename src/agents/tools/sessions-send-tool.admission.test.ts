@@ -44,7 +44,7 @@ import type { AgentToolGatewayRequestCaller } from "./in-process-gateway.js";
 import * as sessionsSendFollowup from "./sessions-send-followup-custody.js";
 import { runSessionsSendA2AFlow } from "./sessions-send-tool.a2a.js";
 import * as sessionsSendDelivery from "./sessions-send-tool.delivery.js";
-import { createSessionsSendTool } from "./sessions-send-tool.js";
+import { createSessionsSendTool, forkFireAndForgetTesting } from "./sessions-send-tool.js";
 
 vi.mock("./sessions-send-tool.a2a.js", () => ({
   runSessionsSendA2AFlow: vi.fn(async () => {}),
@@ -79,6 +79,8 @@ describe("sessions_send dispatch admission", () => {
   let registerWatch: MockInstance<typeof sessionStateEvents.registerSessionStateWatch>;
 
   beforeEach(async () => {
+    // FORK(fire-and-forget): these cases cover upstream's delivery/A2A contract.
+    forkFireAndForgetTesting.setForTest(false);
     state = await createOpenClawTestState({ scenario: "minimal" });
     setRuntimeConfigSnapshot(config);
     setActivePluginRegistry(createSessionConversationTestRegistry());
@@ -97,6 +99,7 @@ describe("sessions_send dispatch admission", () => {
   });
 
   afterEach(async () => {
+    forkFireAndForgetTesting.reset();
     await vi.waitFor(() => expect(getActiveGatewayRootWorkCount()).toBe(0));
     registerWatch.mockRestore();
     resetGatewayWorkAdmission();
