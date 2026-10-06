@@ -3,14 +3,14 @@ import type { AgentToolResult } from "openclaw/plugin-sdk/agent-core";
 import type { JsonSchemaObject } from "openclaw/plugin-sdk/json-schema-runtime";
 import type { Message } from "openclaw/plugin-sdk/llm";
 import { readPositiveIntegerParam } from "openclaw/plugin-sdk/param-readers";
+import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
+import { wrapExternalContent } from "openclaw/plugin-sdk/security-runtime";
 import {
-  browserPageContent,
-  getRuntimeConfig,
   normalizeOptionalString,
   readStringValue,
-  wrapExternalContent,
-} from "./browser-tool.runtime.js";
+} from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { BrowserProxyRequest } from "./browser-node-proxy.js";
+import type { browserPageContent } from "./browser/client-actions.js";
 import {
   BROWSER_EXTRACT_MAX_CHARS,
   BROWSER_EXTRACT_TRUNCATION_MARKER,

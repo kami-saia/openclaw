@@ -124,7 +124,7 @@ export async function getTailnetHostname(exec: typeof runExec = runExec, detecte
     try {
       const { stdout } = await exec(candidate, ["status", "--json"], {
         timeoutMs: 5000,
-        maxBuffer: 400_000,
+        maxBuffer: 16 * 1024 * 1024,
       });
       return tailnetHostnameFromStatus(stdout ? parsePossiblyNoisyJsonObject(stdout) : {});
     } catch (err) {
@@ -444,7 +444,7 @@ export async function getTailnetHostnameAfterServe(
     async () => {
       const { stdout } = await exec(candidate, ["status", "--json"], {
         timeoutMs: 5000,
-        maxBuffer: 400_000,
+        maxBuffer: 16 * 1024 * 1024,
         // Hostname discovery is best-effort. Avoid scary command-failure logs while the
         // local daemon settles after Serve configuration.
         logOutput: false,
@@ -608,8 +608,7 @@ function readCachedWhois(ip: string, now: number): TailscaleWhoisIdentity | null
   if (!cached) {
     return undefined;
   }
-  const expiresAt = asDateTimestampMs(cached.expiresAt);
-  if (expiresAt === undefined || expiresAt <= validNow) {
+  if (cached.expiresAt <= validNow) {
     whoisCache.delete(ip);
     return undefined;
   }

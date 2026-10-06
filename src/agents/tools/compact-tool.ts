@@ -21,14 +21,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { Type } from "typebox";
+// FORK: reserveTokens default now lives in agent-core (dropped from AgentCompactionConfig upstream).
+import { DEFAULT_COMPACTION_SETTINGS } from "../../../packages/agent-core/src/harness/compaction/compaction.js";
 import { incrementCompactionCount } from "../../auto-reply/reply/session-updates.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { resolveUserTimezone } from "../date-time.js";
 import { restoreAgentOverflowStash } from "../embedded-agent-runner/run/agent-overflow-fallback.js";
-import { prepareCompaction, type SessionManager } from "../sessions/index.js";
-// FORK: reserveTokens default now lives in agent-core (dropped from AgentCompactionConfig upstream).
-import { DEFAULT_COMPACTION_SETTINGS } from "../../../packages/agent-core/src/harness/compaction/compaction.js";
+// FORK: upstream dropped the sessions-index re-export of prepareCompaction.
+import { prepareCompaction } from "../runtime/index.js";
+import type { SessionManager } from "../sessions/index.js";
 import type { AnyAgentTool } from "./common.js";
 
 const log = createSubsystemLogger("agent-compaction");

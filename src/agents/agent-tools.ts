@@ -492,6 +492,7 @@ function* assembleOpenClawCodingTools(
             withSessionWriteLock: options?.compactToolRuntime?.withSessionWriteLock,
             inheritedToolAllowlist,
             inheritedToolDenylist,
+            inheritedToolPolicySource: capabilityProfile.policy.inheritedToolPolicySource,
             processScopeKey: scopeKey,
           },
         )

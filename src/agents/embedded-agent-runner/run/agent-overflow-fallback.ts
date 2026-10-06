@@ -1,3 +1,5 @@
+// FORK: upstream dropped the sessions-compaction re-export of findTurnStartIndex.
+import { findTurnStartIndex } from "../../../plugin-sdk/agent-core.js";
 /**
  * FORK: agent-compaction context-overflow fallback.
  *
@@ -16,7 +18,6 @@
  * Ordering after recovery: summary -> re-appended tail -> completion notice.
  */
 import type { AgentMessage } from "../../runtime/index.js";
-import { findTurnStartIndex } from "../../sessions/compaction/index.js";
 import type { SessionEntry, SessionManager } from "../../sessions/index.js";
 import { log } from "../logger.js";
 
