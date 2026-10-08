@@ -348,7 +348,8 @@ export async function getReplyFromConfig(
   let model = defaultModel;
   let hasResolvedHeartbeatModelOverride = false;
   let heartbeatAuthProfile: { provider: string; model: string; profileId: string } | undefined;
-  if (opts?.isHeartbeat) {
+  // Conversation continuations keep the session model; heartbeat.model applies to polls only.
+  if (opts?.isHeartbeat && opts.continuesConversation !== true) {
     // Prefer the resolved per-agent heartbeat model passed from the heartbeat runner,
     // fall back to the global defaults heartbeat model for backward compatibility.
     const heartbeatRaw =

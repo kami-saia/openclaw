@@ -122,7 +122,11 @@ export async function runHeartbeatOnce(opts: HeartbeatRunOptions): Promise<Heart
             isHeartbeat: true,
           }),
           [REPLY_OPERATION_RUN_STATE]: state,
-          heartbeatModelOverride: heartbeat?.model?.trim(),
+          // A conversation's continuation (e.g. its own exec completion) answers on the
+          // conversation's model; heartbeat.model is for periodic polls only.
+          ...(wake.preflight.conversationRoute
+            ? {}
+            : { heartbeatModelOverride: heartbeat?.model?.trim() }),
           ...(prepared.usesHeartbeatResponseTool
             ? {
                 enableHeartbeatTool: true,

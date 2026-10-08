@@ -151,3 +151,9 @@ it.each([
     );
   },
 );
+
+it("keeps heartbeat.model for polls but not for a conversation's own exec completion", async () => {
+  const poll = await replyOptions({ heartbeat: { model: "anthropic/claude-sonnet-4.6" } });
+  expect(poll.options?.heartbeatModelOverride).toBe("anthropic/claude-sonnet-4.6");
+  expect(poll.options?.continuesConversation).toBe(false);
+});
