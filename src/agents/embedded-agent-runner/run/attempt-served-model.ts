@@ -60,19 +60,44 @@ function normalizeModelLabelForComparison(label: string): string {
 // token adds nothing and re-rendering the system prompt to inject it only churns
 // the prompt digest, which invalidates the provider prompt cache every turn.
 // Report a divergence only.
+//
+// A swap is judged per message: the provider-reported `responseModel` against
+// the model THAT message requested (`model`). Comparing the newest message to
+// the CURRENT request is wrong whenever the newest message came from a run that
+// legitimately requested something else — a heartbeat/exec-completion wake on
+// `heartbeat.model` (Sonnet inside an Opus session), or the last turn before a
+// `/model` switch. Both read as a phantom swap on the next turn. So only
+// messages that requested the current model count as evidence; others are
+// skipped, and no matching message means no evidence (render nothing).
 export function resolveDivergentServedModel(params: {
   messages: AgentMessage[] | undefined;
   requestedModel: string | undefined;
 }): string | undefined {
-  const served = resolveLastServedModel(params.messages);
-  if (!served) {
-    return undefined;
-  }
   const requested = params.requestedModel;
   if (!requested) {
-    return served;
+    return resolveLastServedModel(params.messages);
   }
-  return normalizeModelLabelForComparison(requested) === normalizeModelLabelForComparison(served)
-    ? undefined
-    : served;
+  const messages = params.messages;
+  if (!messages?.length) {
+    return undefined;
+  }
+  const requestedKey = normalizeModelLabelForComparison(requested);
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message?.role !== "assistant") {
+      continue;
+    }
+    // SAFETY: responseModel is a fork-added optional field read as unknown and type-checked below.
+    const record = message as unknown as { responseModel?: unknown; model?: unknown };
+    const own = typeof record.model === "string" ? record.model.trim() : "";
+    if (!own || normalizeModelLabelForComparison(own) !== requestedKey) {
+      continue;
+    }
+    const override = typeof record.responseModel === "string" ? record.responseModel.trim() : "";
+    if (!override) {
+      return undefined;
+    }
+    return normalizeModelLabelForComparison(override) === requestedKey ? undefined : override;
+  }
+  return undefined;
 }
