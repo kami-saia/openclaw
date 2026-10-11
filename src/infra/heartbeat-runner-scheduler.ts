@@ -235,6 +235,20 @@ export function startHeartbeatRunner(opts: {
         conversationTurn:
           pendingEvents.length > 0 && pendingEvents.every(isConversationExecCompletion),
       });
+      if (deferral.defer && execEventWake) {
+        // Deferred exec wakes are otherwise silent until the next tick; leave a trace.
+        log.info("heartbeat: exec wake deferred", {
+          agentId,
+          reason: deferral.reason,
+          retryAtMs: deferral.retryAtMs,
+          sessionKey: requestedSessionKey ?? "(none)",
+          pendingEvents: pendingEvents.map((event) => ({
+            fromConversationTurn: event.fromConversationTurn === true,
+            contextKey: event.contextKey,
+            text: event.text.slice(0, 60),
+          })),
+        });
+      }
       if (deferral.defer) {
         // Retained exec work never owns cadence unless a scheduled tick joined it.
         if (
