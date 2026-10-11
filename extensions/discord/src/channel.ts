@@ -652,6 +652,12 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount, DiscordProbe, 
           currentChannelId: nativeChannelId
             ? normalizeDiscordMessagingTarget(nativeChannelId)
             : currentMessagingTarget,
+          // A Discord thread is its own channel; carry it so routes captured in this
+          // turn (exec completions, sends) match the stored thread delivery context.
+          currentThreadTs:
+            context.MessageThreadId != null
+              ? normalizeOptionalString(String(context.MessageThreadId))
+              : undefined,
           currentChatType,
           currentMessagingTarget,
           currentMessageId: context.CurrentMessageId,
