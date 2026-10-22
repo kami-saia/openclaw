@@ -432,7 +432,11 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
           runId,
         );
       }
-      if (resolveSessionThreadInfo(resolvedKey).threadId) {
+      // FORK(thread-send): opt-in via tools.sessions.allowThreadTargets.
+      if (
+        cfg.tools?.sessions?.allowThreadTargets !== true &&
+        resolveSessionThreadInfo(resolvedKey).threadId
+      ) {
         return sendFailure(
           "error",
           "sessions_send cannot target a thread session for inter-agent coordination. Use the parent channel session key instead.",
