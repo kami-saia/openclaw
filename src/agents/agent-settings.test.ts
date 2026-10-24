@@ -282,6 +282,19 @@ describe("resolveEffectiveCompactionMode", () => {
       }),
     ).toBe("safeguard");
   });
+
+  it("returns agent for explicit agent mode", () => {
+    expect(
+      resolveEffectiveCompactionMode({
+        agents: { defaults: { compaction: { mode: "agent" } } },
+      }),
+    ).toBe("agent");
+    expect(
+      resolveEffectiveCompactionMode({
+        agents: { defaults: { compaction: { mode: "agent", provider: "deepseek" } } },
+      }),
+    ).toBe("agent");
+  });
 });
 
 describe("isSilentOverflowProneModel", () => {
@@ -384,6 +397,19 @@ describe("applyAgentAutoCompactionGuard", () => {
       reserveTokens: 50_000,
       keepRecentTokens: 20_000,
     });
+  });
+
+  it("disables embedded auto-compaction when compactionMode is agent", () => {
+    const settingsManager = SettingsManager.inMemory({
+      compaction: { enabled: true, reserveTokens: 20_000 },
+    });
+
+    applyAgentAutoCompactionGuard({
+      settingsManager,
+      compactionMode: "agent",
+    });
+
+    expect(settingsManager.getCompactionEnabled()).toBe(false);
   });
 
   // Default-mode runs against ordinary providers must keep OpenClaw runtime's auto-compaction

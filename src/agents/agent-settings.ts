@@ -68,6 +68,9 @@ export function applyAgentCompactionSettingsFromConfig(params: {
 /** Resolve the compaction mode after provider-backed safeguard promotion. */
 export function resolveEffectiveCompactionMode(cfg?: OpenClawConfig): AgentCompactionMode {
   const compaction = cfg?.agents?.defaults?.compaction;
+  if (compaction?.mode === "agent") {
+    return "agent";
+  }
   if (compaction?.provider) {
     return "safeguard";
   }
@@ -114,6 +117,7 @@ export function applyAgentAutoCompactionGuard(params: {
   const disable =
     params.contextEngineInfo?.ownsCompaction === true ||
     params.compactionMode === "safeguard" ||
+    params.compactionMode === "agent" ||
     params.silentOverflowProneProvider === true ||
     params.compactionForbidden === true;
   if (disable) {

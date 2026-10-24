@@ -142,8 +142,6 @@ async function runEmbeddedAttemptOwned(
   // set is constructed before the session/session-manager/lock exist, so the
   // tool closes over this ref instead of the values.
   const compactLive: {
-    sessionManager?: unknown;
-    session?: { agent?: { state?: { messages?: unknown[] } } };
     withLock?: <T>(run: () => Promise<T> | T) => Promise<T>;
   } = {};
   let releasePreparedTools: ((reason: string) => Promise<void>) | undefined;
@@ -251,15 +249,15 @@ async function runEmbeddedAttemptOwned(
         agentDir,
         attempt: params,
         compactToolRuntime: {
-          getSessionManager: () => compactLive.sessionManager,
+          getSessionManager: () => sessionResources.resources.sessionManager,
           withSessionWriteLock: (run) =>
             compactLive.withLock ? compactLive.withLock(run) : Promise.resolve(run()),
           updateAgentMessagesAfterCompaction: (toolCallId, resultText) => {
             // SAFETY: only buildSessionContext is called; the cast narrows to that one method.
-            const manager = compactLive.sessionManager as
+            const manager = sessionResources.resources.sessionManager as
               | { buildSessionContext: () => { messages: unknown[] } }
               | undefined;
-            const state = compactLive.session?.agent?.state;
+            const state = sessionResources.resources.session?.agent?.state;
             if (!manager || !state) {
               return;
             }
@@ -414,6 +412,7 @@ async function runEmbeddedAttemptOwned(
         externalAbortController,
       }),
     );
+    compactLive.withLock = sessionLock.withOwnedTranscriptWrite;
     try {
       const preparedSessionRuntime = await prepare("attempt.session-runtime", () =>
         prepareEmbeddedAttemptSessionRuntime({
