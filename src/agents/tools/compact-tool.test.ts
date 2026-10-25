@@ -69,7 +69,7 @@ function agentConfig(extra?: Record<string, unknown>): OpenClawConfig {
 
 function makeTool(
   overrides: Partial<Parameters<typeof createCompactTool>[0]> = {},
-  prepareResult: unknown = { firstKeptEntryId: "e3", tokensBefore: 12345 },
+  prepareResult: unknown = { ok: true, value: { firstKeptEntryId: "e3", tokensBefore: 12345 } },
 ) {
   const managed = createManager([
     entry("e1", "user"),
@@ -81,9 +81,9 @@ function makeTool(
     sessionKey: KEY,
     config: agentConfig(),
     getSessionManager: () => managed.manager,
-    prepareCompactionOverride: (pathEntries: unknown[], settings: unknown) => {
+    prepareCompactionOverride: (pathEntries, settings) => {
       prepareCalls.push({ pathEntries, settings });
-      return prepareResult;
+      return prepareResult as never;
     },
     ...overrides,
   });
@@ -149,7 +149,7 @@ describe("compact-tool", () => {
     });
 
     it("reports nothing to compact when prepareCompaction declines", async () => {
-      const { tool, managed } = makeTool({}, null);
+      const { tool, managed } = makeTool({}, { ok: true, value: undefined });
       const { text } = await run(tool!, { summary: "s" });
       expect(text).toContain("Nothing to compact");
       expect(managed.compactions).toHaveLength(0);
@@ -186,9 +186,9 @@ describe("compact-tool", () => {
         // reserveTokens is a dead config key upstream; the tool always uses agent-core's default.
         config: agentConfig({ keepRecentTokens: 1024, reserveTokens: 77 }),
         getSessionManager: () => managed.manager,
-        prepareCompactionOverride: (_e: unknown, settings: unknown) => {
+        prepareCompactionOverride: (_e, settings) => {
           prepareCalls.push(settings);
-          return { firstKeptEntryId: "e2", tokensBefore: 1 };
+          return { ok: true, value: { firstKeptEntryId: "e2", tokensBefore: 1 } };
         },
       });
       await run(tool!, { summary: "s" });
@@ -239,7 +239,10 @@ describe("compact-tool", () => {
         sessionKey: KEY,
         config: agentConfig(),
         getSessionManager: () => managed.manager,
-        prepareCompactionOverride: () => ({ firstKeptEntryId: "e2", tokensBefore: 5 }),
+        prepareCompactionOverride: () => ({
+          ok: true,
+          value: { firstKeptEntryId: "e2", tokensBefore: 5 },
+        }),
       });
       const { text } = await run(tool!, { summary: "s" });
       expect(text).toContain("Compaction failed: boom");
@@ -321,7 +324,10 @@ describe("compact-tool", () => {
         sessionId: "sess-1",
         config: agentConfig(),
         getSessionManager: () => managed.manager,
-        prepareCompactionOverride: () => ({ firstKeptEntryId: "e1", tokensBefore: 9 }),
+        prepareCompactionOverride: () => ({
+          ok: true,
+          value: { firstKeptEntryId: "e1", tokensBefore: 9 },
+        }),
       });
       const { text } = await run(tool!, { summary: "s", keepRecent: false });
       // cut tail + the "fallback completed" notice
@@ -337,7 +343,10 @@ describe("compact-tool", () => {
         sessionId: "sess-1",
         config: agentConfig(),
         getSessionManager: () => managed.manager,
-        prepareCompactionOverride: () => ({ firstKeptEntryId: "e1", tokensBefore: 9 }),
+        prepareCompactionOverride: () => ({
+          ok: true,
+          value: { firstKeptEntryId: "e1", tokensBefore: 9 },
+        }),
       });
       const { text } = await run(tool!, { summary: "s" });
       expect(managed.appended).toHaveLength(0);
@@ -369,7 +378,10 @@ describe("compact-tool", () => {
         sessionId: "sess-1",
         config: agentConfig(),
         getSessionManager: () => managed.manager,
-        prepareCompactionOverride: () => ({ firstKeptEntryId: "e1", tokensBefore: 9 }),
+        prepareCompactionOverride: () => ({
+          ok: true,
+          value: { firstKeptEntryId: "e1", tokensBefore: 9 },
+        }),
       });
       await run(tool!, { summary: "s", keepRecent: false });
       expect(order[0]).toBe("compaction");
@@ -417,21 +429,11 @@ describe("compact-tool", () => {
       expect(managed.compactions).toHaveLength(0);
     });
 
-    it("unwraps CoreResult<CompactionPreparation> returned by prepareCompaction", async () => {
-      const { tool, managed } = makeTool(
-        {},
-        { ok: true, value: { firstKeptEntryId: "e2", tokensBefore: 54321 } },
-      );
-      const { text } = await run(tool!, { summary: "wrapped-result" });
-      expect(text).toContain("Compaction complete. tokensBefore=54321");
-      expect(managed.compactions).toEqual([
-        {
-          summary: "wrapped-result",
-          firstKeptEntryId: "e2",
-          tokensBefore: 54321,
-          fromHook: true,
-        },
-      ]);
+    it("surfaces the error arm of prepareCompaction without appending", async () => {
+      const { tool, managed } = makeTool({}, { ok: false, error: new Error("prep exploded") });
+      const { text } = await run(tool!, { summary: "s" });
+      expect(text).toContain("prep exploded");
+      expect(managed.compactions).toHaveLength(0);
     });
   });
 });

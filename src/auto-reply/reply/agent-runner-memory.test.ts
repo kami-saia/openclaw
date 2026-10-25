@@ -1073,7 +1073,7 @@ describe("runMemoryFlushIfNeeded", () => {
     let capturedRunParams: EmbeddedAgentParams | undefined;
     runEmbeddedAgentMock.mockImplementationOnce(async (params: EmbeddedAgentParams) => {
       capturedRunParams = params;
-      return { payloads: [], meta: {} };
+      return { payloads: [], meta: { agentMeta: { compactionCount: 1 } } };
     });
 
     const cfg = compactionConfig({ mode: "agent", memoryFlush: {} });
@@ -1114,6 +1114,25 @@ describe("runMemoryFlushIfNeeded", () => {
       sessionId: "session",
       memoryFlush: { kind: "succeeded", compactionCount: 2 },
     });
+  });
+
+  it("fails an agent-mode flush turn that never called compact", async () => {
+    const storePath = path.join(rootDir, "sessions.json");
+    const sessionKey = "main";
+    const sessionEntry = createFlushSessionEntry({ totalTokens: 90_000, compactionCount: 2 });
+    const sessionStore = { [sessionKey]: sessionEntry };
+    await writeTestSessionStore(storePath, sessionKey, sessionEntry);
+    runEmbeddedAgentMock.mockImplementationOnce(async () => ({ payloads: [], meta: {} }));
+
+    const flushed = await runDefaultMemoryFlush(sessionEntry, {
+      cfg: compactionConfig({ mode: "agent", memoryFlush: {} }),
+      sessionStore,
+      sessionKey,
+      storePath,
+    });
+
+    expect(flushed.outcome).toBe("failed");
+    expect(flushed.sessionEntry?.memoryFlush).toMatchObject({ kind: "failed", failureCount: 1 });
   });
 
   it("does not compact after cancellation during the pre-compaction checkpoint", async () => {

@@ -1352,6 +1352,16 @@ export async function runMemoryFlushIfNeeded(params: {
     ) {
       throw new Error("no persistence tool call succeeded");
     }
+    // FORK: agent-mode flush runs on the live session and the detached compactor
+    // is skipped, so a flush turn that never called `compact` leaves the context
+    // over threshold with nothing else to shrink it. Count it as a failed flush so
+    // the next turn retries (and exhaustion surfaces memory_flush_degraded).
+    if (
+      params.cfg?.agents?.defaults?.compaction?.mode === "agent" &&
+      (flushExecution.result.meta?.agentMeta?.compactionCount ?? 0) < 1
+    ) {
+      throw new Error("agent-mode flush turn ended without a successful compact call");
+    }
     if (params.storePath && params.sessionKey) {
       try {
         const updatedEntry = await updateSessionEntry(

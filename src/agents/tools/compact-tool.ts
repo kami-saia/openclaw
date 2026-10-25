@@ -29,7 +29,13 @@ import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { resolveUserTimezone } from "../date-time.js";
 import { restoreAgentOverflowStash } from "../embedded-agent-runner/run/agent-overflow-fallback.js";
 // FORK: upstream dropped the sessions-index re-export of prepareCompaction.
-import { prepareCompaction } from "../runtime/index.js";
+import {
+  prepareCompaction,
+  type CompactionPreparation,
+  type CompactionSettings,
+  type Result,
+  type SessionTreeEntry,
+} from "../runtime/index.js";
 import type { SessionManager } from "../sessions/index.js";
 import type { AnyAgentTool } from "./common.js";
 
@@ -102,9 +108,14 @@ export function createCompactTool(options: {
    * (EmbeddedAttemptSessionTakeoverError) before the toolResult is persisted.
    */
   withSessionWriteLock?: <T>(run: () => Promise<T> | T) => Promise<T>;
-  /** Test seam. */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  prepareCompactionOverride?: (pathEntries: any[], settings: any) => any;
+  /** Test seam; same contract as agent-core's prepareCompaction. */
+  prepareCompactionOverride?: (
+    pathEntries: SessionTreeEntry[],
+    settings: CompactionSettings,
+  ) => Result<
+    Pick<CompactionPreparation, "firstKeptEntryId" | "tokensBefore"> | undefined,
+    unknown
+  >;
 }): AnyAgentTool | null {
   const cfg = options.config;
   if (cfg?.agents?.defaults?.compaction?.mode !== "agent") {
@@ -158,23 +169,11 @@ export function createCompactTool(options: {
             : 0,
         };
 
-        const rawPreparation = prep(pathEntries, settings);
-        const preparation =
-          rawPreparation &&
-          typeof rawPreparation === "object" &&
-          "ok" in rawPreparation &&
-          typeof (rawPreparation as { ok?: unknown }).ok === "boolean"
-            ? (rawPreparation as { ok: true; value: typeof rawPreparation }).ok
-              ? (
-                  rawPreparation as {
-                    ok: true;
-                    value: { firstKeptEntryId: string; tokensBefore: number } | undefined;
-                  }
-                ).value
-              : (() => {
-                  throw (rawPreparation as { ok: false; error: unknown }).error;
-                })()
-            : (rawPreparation as { firstKeptEntryId: string; tokensBefore: number } | undefined);
+        const prepared = prep(pathEntries, settings);
+        if (!prepared.ok) {
+          throw prepared.error;
+        }
+        const preparation = prepared.value;
         if (!preparation) {
           return {
             content: [
