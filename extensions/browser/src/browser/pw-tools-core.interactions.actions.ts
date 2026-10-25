@@ -1,11 +1,10 @@
-import { resolveNonNegativeIntegerOption } from "openclaw/plugin-sdk/number-runtime";
+import { addAbortListener } from "node:events";
 import { sleepWithAbort } from "openclaw/plugin-sdk/runtime-env";
-import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
-import type { Page } from "playwright-core";
-import { ACT_MAX_CLICK_DELAY_MS, resolveActInteractionTimeoutMs } from "./act-policy.js";
+import type { Locator, Page } from "playwright-core";
+import { resolveActInteractionTimeoutMs } from "./act-policy.js";
 import type { BrowserFormField } from "./client-actions.types.js";
 import { normalizeBrowserEvaluateFunctionSource } from "./evaluate-source.js";
-import { DEFAULT_FILL_FIELD_TYPE } from "./form-fields.js";
+import { evaluateBrowserFunction } from "./page-function-runtime.js";
 import {
   type CursorPoint,
   humanClickSettleMs,
@@ -13,6 +12,7 @@ import {
   humanCursorStepDelayMs,
   humanKeyDelaysMs,
   humanSubmitPauseMs,
+  isHumanInputPacingEnabled,
   typeWithHumanPacing,
 } from "./human-pacing.js";
 import {
@@ -25,20 +25,16 @@ import {
 } from "./pw-session.js";
 import {
   assertInteractionCurrent,
-  awaitNavigationGuardedInteraction,
-  createAbortPromiseWithListener,
   type ElementInteractionOptions,
   getRestoredPageForTarget,
   type GuardedInteractionOptions,
   type InteractionTargetOptions,
-  interactionNavigationPolicy,
-  reconcileRemoteDialogAfterActionSettled,
-  resolveBoundedDelayMs,
   runCancellablePageInteraction,
+  runGuardedPageInteraction,
   throwIfInteractionAborted,
   toFriendlyInteractionError,
 } from "./pw-tools-core.interactions.navigation.js";
-import { normalizeTimeoutMs, requireRef, requireRefOrSelector } from "./pw-tools-core.shared.js";
+import { normalizeTimeoutMs, requireRef } from "./pw-tools-core.shared.js";
 
 export async function highlightViaPlaywright(
   opts: InteractionTargetOptions & {
@@ -63,32 +59,35 @@ export async function clickViaPlaywright(
     resolvedPage?: Page;
   },
 ): Promise<void> {
-  const resolved = requireRefOrSelector(opts.ref, opts.selector);
-  const page = opts.resolvedPage ?? (await getRestoredPageForTarget(opts));
-  if (opts.resolvedPage) {
-    ensurePageState(page);
-    restoreRoleRefsForTarget({ cdpUrl: opts.cdpUrl, targetId: opts.targetId, page });
-  }
-  const { label, locator } = resolveInteractionElement(page, resolved);
-  const timeout = resolveActInteractionTimeoutMs(opts.timeoutMs);
-  await runCancellablePageInteraction(
-    page,
+  await runElementInteraction(
     opts,
-    async (signal) => {
-      const delayMs = resolveBoundedDelayMs(opts.delayMs, "click delayMs", ACT_MAX_CLICK_DELAY_MS);
-      // Approach the element along a human cursor path, then settle briefly
-      // before pressing, instead of teleporting straight onto the target.
-      await moveCursorToLocator(page, locator, opts.signal);
-      throwIfInteractionAborted(opts.signal);
-      await sleepWithAbort(delayMs > 0 ? delayMs : humanClickSettleMs(), opts.signal);
-      if (opts.assertCurrent) {
-        await assertInteractionCurrent(opts);
+    async (locator, { timeout, signal, page }) => {
+      const delayMs = opts.delayMs ?? 0;
+      if (isHumanInputPacingEnabled()) {
+        // FORK: approach the element along a human cursor path, then settle briefly
+        // before pressing, instead of teleporting straight onto the target.
+        await moveCursorToLocator(page, locator, opts.signal);
+        throwIfInteractionAborted(opts.signal);
+        await sleepWithAbort(delayMs > 0 ? delayMs : humanClickSettleMs(), opts.signal);
+        const assertion = assertInteractionCurrent(opts);
+        if (assertion) {
+          await assertion;
+        }
+        throwIfInteractionAborted(opts.signal);
+      } else if (delayMs > 0) {
+        await locator.hover({ timeout, signal });
+        throwIfInteractionAborted(opts.signal);
+        await sleepWithAbort(delayMs, opts.signal);
+        const assertion = assertInteractionCurrent(opts);
+        if (assertion) {
+          await assertion;
+        }
+        throwIfInteractionAborted(opts.signal);
       }
-      throwIfInteractionAborted(opts.signal);
       const clickOptions = { timeout, signal, button: opts.button, modifiers: opts.modifiers };
       await (opts.doubleClick ? locator.dblclick(clickOptions) : locator.click(clickOptions));
     },
-    label,
+    opts.resolvedPage,
   );
 }
 
@@ -126,7 +125,11 @@ async function moveCursorToLocator(
   locator: ReturnType<typeof resolveInteractionElement>["locator"],
   signal?: AbortSignal,
 ): Promise<void> {
-  const box = await locator.boundingBox();
+  // Best effort: the glide is cosmetic and must never fail the click itself.
+  const box = await Promise.resolve()
+    .then(() => locator.boundingBox())
+    .catch(() => null);
+  throwIfInteractionAborted(signal);
   if (!box) {
     return;
   }
@@ -153,43 +156,21 @@ export async function clickCoordsViaPlaywright(
 ): Promise<void> {
   const page = await getRestoredPageForTarget(opts);
   await runGuardedPageInteraction(page, opts, async () => {
-    await moveCursorLikeHuman(page, { x: opts.x, y: opts.y }, opts.signal);
+    if (isHumanInputPacingEnabled()) {
+      await moveCursorLikeHuman(page, { x: opts.x, y: opts.y }, opts.signal);
+    }
     await page.mouse.click(opts.x, opts.y, {
       button: opts.button,
       clickCount: opts.doubleClick ? 2 : 1,
-      delay: resolveBoundedDelayMs(opts.delayMs, "clickCoords delayMs", ACT_MAX_CLICK_DELAY_MS),
+      delay: opts.delayMs ?? 0,
     });
   });
 }
 
-async function runGuardedPageInteraction<T>(
+function resolveInteractionElement(
   page: Page,
-  opts: GuardedInteractionOptions,
-  action: () => Promise<T>,
-): Promise<T> {
-  // Mouse and keyboard primitives lack native cancellation. Keep their guard
-  // alive after foreground interruption until the underlying operation settles.
-  const { abortPromise, cleanup } = createAbortPromiseWithListener(opts.signal);
-  try {
-    return await awaitNavigationGuardedInteraction(
-      {
-        action,
-        cdpUrl: opts.cdpUrl,
-        page,
-        ...interactionNavigationPolicy(opts),
-        targetId: opts.targetId,
-        assertCurrent: opts.assertCurrent,
-      },
-      abortPromise,
-      opts.signal,
-      () => reconcileRemoteDialogAfterActionSettled(page, opts.signal),
-    );
-  } finally {
-    cleanup();
-  }
-}
-
-function resolveInteractionElement(page: Page, resolved: ReturnType<typeof requireRefOrSelector>) {
+  resolved: Pick<ElementInteractionOptions, "ref" | "selector">,
+) {
   return {
     label: resolved.ref ?? resolved.selector!,
     locator: resolved.ref
@@ -198,17 +179,33 @@ function resolveInteractionElement(page: Page, resolved: ReturnType<typeof requi
   };
 }
 
-export async function hoverViaPlaywright(opts: ElementInteractionOptions): Promise<void> {
-  const resolved = requireRefOrSelector(opts.ref, opts.selector);
-  const page = await getRestoredPageForTarget(opts);
-  const { label, locator } = resolveInteractionElement(page, resolved);
+async function runElementInteraction(
+  opts: ElementInteractionOptions,
+  // FORK(human pacing): page is passed so cursor glides need not call locator.page().
+  action: (
+    locator: Locator,
+    options: { timeout: number; signal: AbortSignal; page: Page },
+  ) => Promise<unknown>,
+  resolvedPage?: Page,
+  resolveTimeout = resolveActInteractionTimeoutMs,
+): Promise<void> {
+  const page = resolvedPage ?? (await getRestoredPageForTarget(opts));
+  if (resolvedPage) {
+    ensurePageState(page);
+    restoreRoleRefsForTarget({ cdpUrl: opts.cdpUrl, targetId: opts.targetId, page });
+  }
+  const { label, locator } = resolveInteractionElement(page, opts);
+  const timeout = resolveTimeout(opts.timeoutMs);
   await runCancellablePageInteraction(
     page,
     opts,
-    async (signal) =>
-      await locator.hover({ timeout: resolveActInteractionTimeoutMs(opts.timeoutMs), signal }),
+    (signal) => action(locator, { timeout, signal, page }),
     label,
   );
+}
+
+export async function hoverViaPlaywright(opts: ElementInteractionOptions): Promise<void> {
+  await runElementInteraction(opts, (locator, options) => locator.hover(options));
 }
 
 export async function dragViaPlaywright(
@@ -220,14 +217,15 @@ export async function dragViaPlaywright(
     timeoutMs?: number;
   },
 ): Promise<void> {
-  const resolvedStart = requireRefOrSelector(opts.startRef, opts.startSelector);
-  const resolvedEnd = requireRefOrSelector(opts.endRef, opts.endSelector);
   const page = await getRestoredPageForTarget(opts);
-  const { label: startLabel, locator: startLocator } = resolveInteractionElement(
-    page,
-    resolvedStart,
-  );
-  const { label: endLabel, locator: endLocator } = resolveInteractionElement(page, resolvedEnd);
+  const { label: startLabel, locator: startLocator } = resolveInteractionElement(page, {
+    ref: opts.startRef,
+    selector: opts.startSelector,
+  });
+  const { label: endLabel, locator: endLocator } = resolveInteractionElement(page, {
+    ref: opts.endRef,
+    selector: opts.endSelector,
+  });
   await runCancellablePageInteraction(
     page,
     opts,
@@ -245,22 +243,8 @@ export async function selectOptionViaPlaywright(
     values: string[];
   },
 ): Promise<void> {
-  const resolved = requireRefOrSelector(opts.ref, opts.selector);
-  if (!opts.values?.length) {
-    throw new Error("values are required");
-  }
-  const page = await getRestoredPageForTarget(opts);
-  const { label, locator } = resolveInteractionElement(page, resolved);
-  await runCancellablePageInteraction(
-    page,
-    opts,
-    async (signal) => {
-      await locator.selectOption(opts.values, {
-        timeout: resolveActInteractionTimeoutMs(opts.timeoutMs),
-        signal,
-      });
-    },
-    label,
+  await runElementInteraction(opts, (locator, options) =>
+    locator.selectOption(opts.values, options),
   );
 }
 
@@ -270,14 +254,10 @@ export async function pressKeyViaPlaywright(
     delayMs?: number;
   },
 ): Promise<void> {
-  const key = normalizeOptionalString(opts.key) ?? "";
-  if (!key) {
-    throw new Error("key is required");
-  }
   const page = await getPageForTargetId(opts);
   await runGuardedPageInteraction(page, opts, async () => {
-    await page.keyboard.press(key, {
-      delay: resolveNonNegativeIntegerOption(opts.delayMs, 0),
+    await page.keyboard.press(opts.key, {
+      delay: opts.delayMs ?? 0,
     });
   });
 }
@@ -306,55 +286,68 @@ export async function typeViaPlaywright(
     slowly?: boolean;
   },
 ): Promise<void> {
-  const resolved = requireRefOrSelector(opts.ref, opts.selector);
-  const text = opts.text ?? "";
-  const page = await getRestoredPageForTarget(opts);
-  const { label, locator } = resolveInteractionElement(page, resolved);
-  const timeout = resolveActInteractionTimeoutMs(opts.timeoutMs);
-  await runCancellablePageInteraction(
-    page,
-    opts,
-    async (signal) => {
-      // Always dispatch real keystrokes. `fill()` sets the value in one shot
-      // without any key events, which is trivially detectable; uniform
-      // `delay: 75` typing is equally unlike a human. Pace both paths with
-      // jittered per-character delays instead.
-      await locator.click({ timeout, signal });
-      if (opts.assertCurrent) {
-        await assertInteractionCurrent(opts);
-      }
-      throwIfInteractionAborted(opts.signal);
-      await sleepWithAbort(humanClickSettleMs(), opts.signal);
-      throwIfInteractionAborted(opts.signal);
-      // Preserve `fill()` semantics (replace, not append) without using fill's
-      // one-shot value set: clear via a real select-all + delete keystroke.
-      await locator.press("ControlOrMeta+a", { timeout, signal });
-      await locator.press("Delete", { timeout, signal });
-      throwIfInteractionAborted(opts.signal);
-      await typeWithHumanPacing({
-        text,
-        delays: humanKeyDelaysMs(text, opts.slowly ? undefined : 46),
-        pressKey: async (char, delayMs) => {
-          await locator.type(char, { timeout, signal, delay: 0 });
-          await sleepWithAbort(delayMs, opts.signal);
-        },
-        throwIfAborted: () => throwIfInteractionAborted(opts.signal),
-      });
-      if (opts.submit) {
-        if (opts.assertCurrent) {
-          const assertion = assertInteractionCurrent(opts);
-          if (assertion) {
-            await assertion;
-          }
+  if (!isHumanInputPacingEnabled()) {
+    await runElementInteraction(opts, async (locator, { timeout, signal }) => {
+      if (opts.slowly) {
+        await locator.click({ timeout, signal });
+        const assertion = assertInteractionCurrent(opts);
+        if (assertion) {
+          await assertion;
         }
         throwIfInteractionAborted(opts.signal);
-        await sleepWithAbort(humanSubmitPauseMs(), opts.signal);
+        await locator.type(opts.text, { timeout, signal, delay: 75 });
+      } else {
+        await locator.fill(opts.text, { timeout, signal });
+      }
+      if (opts.submit) {
+        const assertion = assertInteractionCurrent(opts);
+        if (assertion) {
+          await assertion;
+        }
         throwIfInteractionAborted(opts.signal);
         await locator.press("Enter", { timeout, signal });
       }
-    },
-    label,
-  );
+    });
+    return;
+  }
+  const text = opts.text ?? "";
+  await runElementInteraction(opts, async (locator, { timeout, signal }) => {
+    // FORK: always dispatch real, jittered keystrokes. `fill()` sets the value with
+    // no key events and uniform `delay: 75` typing is equally unlike a human.
+    await locator.click({ timeout, signal });
+    {
+      const assertion = assertInteractionCurrent(opts);
+      if (assertion) {
+        await assertion;
+      }
+    }
+    throwIfInteractionAborted(opts.signal);
+    await sleepWithAbort(humanClickSettleMs(), opts.signal);
+    throwIfInteractionAborted(opts.signal);
+    // Preserve fill() replace semantics via a real select-all + delete.
+    await locator.press("ControlOrMeta+a", { timeout, signal });
+    await locator.press("Delete", { timeout, signal });
+    throwIfInteractionAborted(opts.signal);
+    await typeWithHumanPacing({
+      text,
+      delays: humanKeyDelaysMs(text, opts.slowly ? undefined : 46),
+      pressKey: async (char, delayMs) => {
+        await locator.type(char, { timeout, signal, delay: 0 });
+        await sleepWithAbort(delayMs, opts.signal);
+      },
+      throwIfAborted: () => throwIfInteractionAborted(opts.signal),
+    });
+    if (opts.submit) {
+      const assertion = assertInteractionCurrent(opts);
+      if (assertion) {
+        await assertion;
+      }
+      throwIfInteractionAborted(opts.signal);
+      await sleepWithAbort(humanSubmitPauseMs(), opts.signal);
+      throwIfInteractionAborted(opts.signal);
+      await locator.press("Enter", { timeout, signal });
+    }
+  });
 }
 
 export async function fillFormViaPlaywright(
@@ -366,18 +359,8 @@ export async function fillFormViaPlaywright(
   const page = await getRestoredPageForTarget(opts);
   const timeout = resolveActInteractionTimeoutMs(opts.timeoutMs);
   for (const field of opts.fields) {
-    const ref = field.ref.trim();
-    if (!ref) {
-      continue;
-    }
-    const type = (field.type || DEFAULT_FILL_FIELD_TYPE).trim() || DEFAULT_FILL_FIELD_TYPE;
-    const rawValue = field.value;
-    const value =
-      typeof rawValue === "string"
-        ? rawValue
-        : typeof rawValue === "number" || typeof rawValue === "boolean"
-          ? String(rawValue)
-          : "";
+    const { ref, type, value: rawValue } = field;
+    const value = String(rawValue ?? "");
     const locator = refLocator(page, ref);
     await runCancellablePageInteraction(
       page,
@@ -403,12 +386,8 @@ export async function evaluateViaPlaywright(
     timeoutMs?: number;
   },
 ): Promise<unknown> {
-  const fnText = normalizeOptionalString(opts.fn) ?? "";
-  if (!fnText) {
-    throw new Error("function is required");
-  }
   const fnSource = normalizeBrowserEvaluateFunctionSource(
-    fnText,
+    opts.fn,
     opts.ref ? { argumentName: "el" } : undefined,
   );
   const page = await getRestoredPageForTarget(opts);
@@ -426,8 +405,8 @@ export async function evaluateViaPlaywright(
   evaluateTimeout = Math.min(evaluateTimeout, outerTimeout);
 
   const signal = opts.signal;
-  const { abortPromise, cleanup } = createAbortPromiseWithListener(signal, (reason) => {
-    if (isBrowserObservedDialogBlockedError(reason)) {
+  const onAbort = () => {
+    if (isBrowserObservedDialogBlockedError(signal?.reason)) {
       return;
     }
     void forceDisconnectPlaywrightForTarget({
@@ -436,80 +415,30 @@ export async function evaluateViaPlaywright(
       targetId: opts.targetId,
       ssrfPolicy: opts.ssrfPolicy,
     }).catch(() => {});
-  });
+  };
   if (signal?.aborted) {
+    onAbort();
     throw signal.reason ?? new Error("aborted");
   }
+  const abortListener = signal && addAbortListener(signal, onAbort);
 
   try {
-    const navigationPolicy = interactionNavigationPolicy(opts);
-    const reconcileRemoteDialog = () => reconcileRemoteDialogAfterActionSettled(page, signal);
-    const evaluatorBody = `
-        "use strict";
-        var fnSource = args.fnSource, timeoutMs = args.timeoutMs;
-        try {
-          var candidate = eval("(" + fnSource + ")");
-          if (typeof candidate !== "function") {
-            throw new Error("evaluate source did not produce a function");
-          }
-          var result = candidate(${opts.ref ? "el" : ""});
-          if (result && typeof result.then === "function") {
-            return Promise.race([
-              result,
-              new Promise(function(_, reject) {
-                setTimeout(function() { reject(new Error("evaluate timed out after " + timeoutMs + "ms")); }, timeoutMs);
-              })
-            ]);
-          }
-          return result;
-        } catch (err) {
-          throw new Error("Invalid evaluate function: " + (err && err.message ? err.message : String(err)));
-        }
-      `;
     const args = { fnSource, timeoutMs: evaluateTimeout };
-    type EvaluateArgs = typeof args;
-    let action: () => Promise<unknown>;
-    if (opts.ref) {
-      const locator = refLocator(page, opts.ref);
-      // eslint-disable-next-line @typescript-eslint/no-implied-eval -- required for browser-context eval
-      const evaluate = new Function("el", "args", evaluatorBody) as (
-        el: Element,
-        args: EvaluateArgs,
-      ) => unknown;
-      action = async () => await locator.evaluate(evaluate, args);
-    } else {
-      // eslint-disable-next-line @typescript-eslint/no-implied-eval -- required for browser-context eval
-      const evaluate = new Function("args", evaluatorBody) as (args: EvaluateArgs) => unknown;
-      action = async () => await page.evaluate(evaluate, args);
-    }
-    return await awaitNavigationGuardedInteraction(
-      {
-        action,
-        cdpUrl: opts.cdpUrl,
-        page,
-        ...navigationPolicy,
-        targetId: opts.targetId,
-        assertCurrent: opts.assertCurrent,
-      },
-      abortPromise,
-      signal,
-      reconcileRemoteDialog,
-    );
+    const ref = opts.ref;
+    const action = ref
+      ? async () => await refLocator(page, ref).evaluate(evaluateBrowserFunction, args)
+      : async () => await page.evaluate(evaluateBrowserFunction, args);
+    return await runGuardedPageInteraction(page, opts, action);
   } finally {
-    cleanup();
+    abortListener?.[Symbol.dispose]();
   }
 }
 
 export async function scrollIntoViewViaPlaywright(opts: ElementInteractionOptions): Promise<void> {
-  const resolved = requireRefOrSelector(opts.ref, opts.selector);
-  const page = await getRestoredPageForTarget(opts);
-  const timeout = normalizeTimeoutMs(opts.timeoutMs, 20_000);
-
-  const { label, locator } = resolveInteractionElement(page, resolved);
-  await runCancellablePageInteraction(
-    page,
+  await runElementInteraction(
     opts,
-    async (signal) => await locator.scrollIntoViewIfNeeded({ timeout, signal }),
-    label,
+    (locator, options) => locator.scrollIntoViewIfNeeded(options),
+    undefined,
+    (timeoutMs) => normalizeTimeoutMs(timeoutMs, 20_000),
   );
 }

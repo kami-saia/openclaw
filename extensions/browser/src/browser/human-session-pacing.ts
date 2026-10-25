@@ -194,8 +194,9 @@ export async function recordNavigationForPacing(page: PacingPage): Promise<void>
   if (!isSessionPacingEnabled()) {
     return;
   }
-  const contentLength = await page
-    .evaluate<number>("document.body ? document.body.innerText.length : 0")
+  // Best effort: pacing bookkeeping must never fail the navigation itself.
+  const contentLength = await Promise.resolve()
+    .then(() => page.evaluate<number>("document.body ? document.body.innerText.length : 0"))
     .catch(() => 0);
   pacingStateByPage.set(page as object, {
     lastNavigationAtMs: Date.now(),

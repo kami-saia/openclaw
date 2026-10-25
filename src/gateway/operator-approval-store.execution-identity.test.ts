@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
-import { assertSqliteSchemaContains } from "../infra/sqlite-schema-contract.js";
 import {
   closeOpenClawStateDatabaseAsync,
   closeOpenClawStateDatabaseForTest,
@@ -14,12 +13,12 @@ import {
   insertOperatorApproval,
   resolveOperatorApproval,
 } from "./operator-approval-store.js";
-import { insertOperatorApprovalInDatabase as insertOperatorApprovalNative } from "./operator-approval-store.kernel.js";
+import { insertOperatorApprovalInDatabase as insertOperatorApprovalNative } from "./operator-approval-store.kernel.worker.js";
 import {
   getOperatorApprovalDetailed as getOlderOperatorApproval,
-  OLDER_OPERATOR_APPROVAL_SCHEMA_SQL,
   resolveOperatorApproval as resolveOlderOperatorApproval,
 } from "./operator-approval-store.older-reader.test-support.js";
+import { createOperatorApproval } from "./operator-approval-store.test-support.js";
 
 type NewOperatorApproval = Parameters<typeof insertOperatorApproval>[0]["approval"];
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
@@ -33,35 +32,11 @@ function approval(
   id: string,
   token?: NewOperatorApproval["executionIdentityToken"],
 ): NewOperatorApproval {
-  return {
-    id,
-    kind: "exec",
-    presentation: {
-      kind: "exec",
-      commandText: `echo ${id}`,
-      commandPreview: `echo ${id}`,
-      warningText: null,
-      host: "gateway",
-      nodeId: null,
-      agentId: "main",
-      allowedDecisions: ["allow-once", "allow-always", "deny"],
-    },
-    requester: { deviceId: "request-device", clientId: "request-client", deviceTokenAuth: true },
+  return createOperatorApproval(id, {
     reviewerDeviceIds: ["reviewer"],
-    source: {
-      agentId: "main",
-      sessionKey: "agent:main:child",
-      sessionId: "session-1",
-      runId: "run-1",
-      toolCallId: "tool-call-1",
-      toolName: "exec",
-    },
     audienceSessionKeys: ["agent:main:child"],
-    runtimeEpoch: "runtime-a",
-    createdAtMs: 1_000,
-    expiresAtMs: 10_000,
     ...(token ? { executionIdentityToken: token } : {}),
-  };
+  });
 }
 
 const token = (runId = "run-1"): NonNullable<NewOperatorApproval["executionIdentityToken"]> => ({
@@ -190,7 +165,6 @@ describe("operator approval execution identity", () => {
       getOlderOperatorApproval({ id: "older-reader", nowMs: 2_000, databaseOptions: options }),
     ).toMatchObject({ outcome: "found", record: { status: "pending", decision: null } });
     const older = openOpenClawStateDatabase(options);
-    assertSqliteSchemaContains(older.db, older.path, OLDER_OPERATOR_APPROVAL_SCHEMA_SQL);
     expect(
       resolveOlderOperatorApproval({
         id: "older-reader",

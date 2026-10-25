@@ -1,14 +1,25 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { rotateAgentEventLifecycleGeneration } from "../../infra/agent-events.js";
 import {
   resetAgentRunRegistryForTest,
   rotateAgentRunRegistryLifecycleGeneration,
 } from "../../infra/agent-run-registry.js";
 import {
+  captureExecRequestCustodySelection,
+  captureExecRequestOwners,
+  withExecRequestTurn,
+} from "../../infra/exec-request-context.js";
+import {
   createAdmittedRunOperatorAuthority,
   type AdmittedRunOperatorAuthority,
 } from "../admitted-run-context.js";
 import { prepareOperatorModelPolicy } from "../operator-model-policy.js";
+import {
+  createAdmittedGatewayToolCallerIdentity,
+  withGatewayToolCallerIdentity,
+} from "../tools/gateway-caller-context.js";
+import { createAgentHarnessHostCapabilities } from "./host-capability.js";
+import { testTool } from "./host-capability.shard.test-support.js";
 import { createAdmittedHostCapabilityTestFixture } from "./host-capability.test-support.js";
 
 const cleanup: Array<() => void> = [];
@@ -56,6 +67,45 @@ it("returns no retained source authority without an operator", async () => {
   expect(host.hostCapabilities.retainSourceAuthority?.()).toBeUndefined();
   host.closeHost();
   expect(() => host.hostCapabilities.retainSourceAuthority?.()).toThrow("no longer active");
+});
+
+it("records completed turn bookkeeping while revocation blocks the next tool effect", async () => {
+  let current = true;
+  const source = createAdmittedRunOperatorAuthority({
+    profileId: "bookkeeping-source",
+    scopes: ["operator.write"],
+    assertCurrent: () => {
+      if (!current) {
+        throw new Error("operator source revoked");
+      }
+    },
+  });
+  const recorder = { recordEvent: vi.fn(), flush: vi.fn(async () => {}) };
+  const fixture = await createAdmittedHostCapabilityTestFixture(
+    {
+      runId: "bookkeeping-source",
+      agentId: "main",
+      sessionKey: "agent:main:bookkeeping",
+      trajectoryRecorder: recorder,
+    },
+    { operatorAuthority: source },
+  );
+  cleanup.push(fixture.closeAdmission, fixture.closeHost);
+  const host = await withGatewayToolCallerIdentity(
+    createAdmittedGatewayToolCallerIdentity(fixture.attempt),
+    () => createAgentHarnessHostCapabilities({ attempt: fixture.attempt, pluginId: "codex" }),
+  );
+  cleanup.push(host.close);
+  const { tool, execute } = testTool();
+  const bound = host.capabilities.bindToolSurface([tool])[0]!;
+  await bound.execute("before-revocation", {});
+  await Promise.resolve();
+  current = false;
+  host.capabilities.reportOutputTokens?.(12);
+  host.capabilities.trajectory!.recordEvent("completed-output", { outputTokens: 12 });
+  expect(recorder.recordEvent).toHaveBeenCalledWith("completed-output", { outputTokens: 12 });
+  await expect(bound.execute("after-revocation", {})).rejects.toThrow("no longer active");
+  expect(execute).toHaveBeenCalledOnce();
 });
 
 it.each([
@@ -213,4 +263,37 @@ it("guards retained unknown-model work through policy introduction and releases 
   retained.release();
   expect(holds).toBe(0);
   expect(listeners.size).toBe(0);
+});
+
+it("captures request custody before plugin handoff and retains continuation ancestry", async () => {
+  const identity = {
+    runId: "retained-source",
+    sessionKey: "agent:main:request-custody",
+    sessionId: "physical-session",
+    ownerConnId: "request-owner",
+  };
+  const captured = await withExecRequestTurn({ identity }, async () => {
+    const host = await createAdmittedHostCapabilityTestFixture(identity);
+    cleanup.push(host.closeAdmission, host.closeHost);
+    return { host, owners: captureExecRequestOwners(identity) };
+  });
+  const host = captured.host.hostCapabilities;
+  const custody = host.captureRequestCustody?.();
+  expect(custody).toBeDefined();
+  expect(captureExecRequestCustodySelection(captured.owners ?? [])(custody)).toBe(true);
+  await withExecRequestTurn(
+    { identity: { ...identity, runId: "continuation" }, owners: captured.owners },
+    async () => {
+      const owners = captureExecRequestOwners({ ...identity, runId: "continuation" });
+      expect(captureExecRequestCustodySelection(owners ?? [])(custody)).toBe(true);
+    },
+  );
+  await withExecRequestTurn({ identity }, async () => {
+    const replacement = captureExecRequestOwners(identity);
+    expect(host.captureRequestCustody?.()).toBe(custody);
+    expect(captureExecRequestCustodySelection(replacement ?? [])(custody)).toBe(false);
+  });
+  captured.host.closeHost();
+  expect(() => host.captureRequestCustody?.()).toThrow();
+  expect(captureExecRequestCustodySelection(captured.owners ?? [])(custody)).toBe(true);
 });

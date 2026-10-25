@@ -28,16 +28,31 @@ export function splitSystemPromptIdentityBoundary(
 export const SYSTEM_PROMPT_RELOCATABLE_BOUNDARY = "\n<!-- OPENCLAW-RELOCATABLE-BOUNDARY -->\n";
 export const SYSTEM_PROMPT_RELOCATABLE_BOUNDARY_END = "\n<!-- /OPENCLAW-RELOCATABLE-BOUNDARY -->";
 
+// Request conversion and egress observation strip the same session prompt every turn.
+const strippedSystemPrompts = new Map<string, string>();
+const MAX_STRIPPED_SYSTEM_PROMPTS = 32;
+
 export function stripSystemPromptCacheBoundary(text: string): string {
-  // FORK: also strips the identity boundary: like the cache/relocatable markers
-  // it is internal structure that must never reach a provider payload, and every
-  // transport already funnels system-prompt text through this one call.
-  return stripSystemPromptRelocatableBoundary(
-    text
-      .replaceAll(SYSTEM_PROMPT_CACHE_BOUNDARY, "\n")
-      .replaceAll(SYSTEM_PROMPT_CACHE_BOUNDARY.trim(), "")
-      .replaceAll(SYSTEM_PROMPT_IDENTITY_BOUNDARY, "\n"),
-  );
+  let stripped = strippedSystemPrompts.get(text);
+  if (stripped === undefined) {
+    // Marker removal is ordered: one removal can join text into the next marker.
+    stripped = stripSystemPromptRelocatableBoundary(
+      text
+        .replaceAll(SYSTEM_PROMPT_CACHE_BOUNDARY, "\n")
+        .replaceAll(SYSTEM_PROMPT_CACHE_BOUNDARY.trim(), "")
+        // FORK: the *** boundary is internal structure too and must never
+        // reach a provider payload; every transport funnels through this call.
+        .replaceAll(SYSTEM_PROMPT_IDENTITY_BOUNDARY, "\n"),
+    );
+    for (const oldest of strippedSystemPrompts.keys()) {
+      if (strippedSystemPrompts.size < MAX_STRIPPED_SYSTEM_PROMPTS) {
+        break;
+      }
+      strippedSystemPrompts.delete(oldest);
+    }
+    strippedSystemPrompts.set(text, stripped);
+  }
+  return stripped;
 }
 
 /** Reject ambiguous markers from workspace or hook text instead of moving instructions. */

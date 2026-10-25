@@ -8,6 +8,16 @@
  * pauses at word boundaries, slight settle time before a click).
  */
 
+/**
+ * FORK: kill switch. `OPENCLAW_BROWSER_HUMAN_INPUT=off` restores upstream's
+ * machine-speed click/type paths (the browser test shard sets it so upstream's
+ * guard tests keep pinning upstream's exact call sequence).
+ */
+export function isHumanInputPacingEnabled(): boolean {
+  const raw = process.env.OPENCLAW_BROWSER_HUMAN_INPUT?.trim().toLowerCase();
+  return raw !== "off" && raw !== "0" && raw !== "false";
+}
+
 const BASE_KEY_DELAY_MS = 92;
 const KEY_JITTER_RATIO = 0.45;
 const WORD_PAUSE_PROBABILITY = 0.18;

@@ -9,6 +9,9 @@ if (codexAppServerTestPattern.test(expect.getState().testPath?.replaceAll("\\", 
 }
 
 const testEnv = installSharedTestSetup({ loadProfileEnv: false });
+// FORK: browser human input pacing is on in production; keep upstream's guard
+// tests pinned to upstream's machine-speed call sequence.
+process.env.OPENCLAW_BROWSER_HUMAN_INPUT ??= "off";
 let restoreUpstreamLinks: (() => void) | undefined;
 
 beforeEach(async (context) => {

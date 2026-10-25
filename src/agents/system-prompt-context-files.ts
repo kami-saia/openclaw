@@ -24,9 +24,9 @@ export function isBootstrapContextFile(pathValue: string): boolean {
   return /(^|[\\/])BOOTSTRAP\.md$/iu.test(pathValue.trim());
 }
 
+// FORK: exported for buildSoulSection in system-prompt.ts.
 export function sanitizeContextFileContentForPrompt(content: string): string {
-  // Old workspace templates otherwise route Claude subscriptions to paid extra
-  // usage; heartbeat behavior remains in the actual scheduled user turn.
+  // Old workspace templates otherwise route Claude subscriptions to paid extra usage.
   return content.replaceAll(DEFAULT_HEARTBEAT_PROMPT_CONTEXT_BLOCK, "").replace(/\n{3,}/g, "\n\n");
 }
 
@@ -80,18 +80,17 @@ export function buildProjectContextSection(files: ReturnType<typeof prepareConte
     return [];
   }
   const lines = ["# Project Context", ""];
-  const hasMemoryFile = contextFiles.some((file) => file.basename === "memory.md");
-  const hasUserFile = contextFiles.some((file) => file.basename === "user.md");
   lines.push("Loaded project context:");
-  if (hasMemoryFile) {
-    lines.push(
+  // FORK: no "SOUL.md: persona/tone" bullet; SOUL.md renders above the *** boundary.
+  for (const [basename, guidance] of Object.entries({
+    "memory.md":
       "MEMORY.md: durable non-profile facts and decisions; use when relevant unless higher-priority instructions override.",
-    );
-  }
-  if (hasUserFile) {
-    lines.push(
+    "user.md":
       "USER.md: durable user preferences and profile directives; follow unless higher-priority instructions override.",
-    );
+  })) {
+    if (files.some((file) => file.basename === basename)) {
+      lines.push(guidance);
+    }
   }
   if (files.some(({ file }) => file.personalUser)) {
     lines.push(PERSONAL_USER_CONTEXT_INSTRUCTIONS);

@@ -15,14 +15,17 @@ import {
   validateWorkerConnectRequestFrame,
   validateWorkerTranscriptCommitParams,
 } from "../../../../packages/gateway-protocol/src/index.js";
+import { WORKER_EXEC_APPROVAL_METHOD } from "../../../../packages/gateway-protocol/src/schema/worker-exec-approval.js";
 import {
   WORKER_GATEWAY_TOOL_METHODS,
   WORKER_GATEWAY_TOOLS_PROTOCOL_FEATURE,
 } from "../../../../packages/gateway-protocol/src/schema/worker-gateway-tool.js";
 import { WORKER_INFERENCE_METHODS } from "../../../../packages/gateway-protocol/src/schema/worker-inference.js";
 import { WORKER_PROTOCOL_MAX_CONCURRENT_TOOLS } from "../../../../packages/gateway-protocol/src/schema/worker-protocol-primitives.js";
+import { WORKER_TURN_ADMISSION_METHOD } from "../../../../packages/gateway-protocol/src/schema/worker-turn-admission.js";
 import { GATEWAY_STARTUP_RETRY_AFTER_MS } from "../../../../packages/gateway-protocol/src/startup-unavailable.js";
 import { isWorkerTranscriptFrameWithinBudget } from "../../../../packages/gateway-protocol/src/worker-transcript-budget.js";
+import { formatErrorMessage } from "../../../infra/errors.js";
 import { rawDataByteLength } from "../../../infra/ws.js";
 import {
   getGatewaySuspendAdmissionPhase,
@@ -33,6 +36,7 @@ import {
 import { AUTH_RATE_LIMIT_SCOPE_WORKER_ADMISSION } from "../../auth-rate-limit.js";
 import type { GatewayConnectionWork } from "../../server-connection-work.js";
 import { runWorkerTurnAdmissionContinuation } from "../../worker-environments/placement-turn-claim-events.js";
+import { isReplayableWorkerTranscriptCommitError } from "../../worker-environments/transcript-commit-failure.js";
 import type { PublicWorkerIngressContext } from "../public-worker-ingress-context.js";
 import { raiseGatewayReceiverPayloadLimit } from "../ws-receiver.js";
 import type { GatewayWsClient, WsHandshakePhase } from "../ws-types.js";
@@ -59,10 +63,15 @@ export type { WorkerConnectionService } from "./worker-connection-dispatch.js";
 type WorkerLogger = { warn(message: string): void };
 const MAX_QUEUED_WORKER_FRAMES = 16;
 const MAX_QUEUED_WORKER_BYTES = 32 * 1024 * 1024;
-const workerMethods = new Set<string>([...WORKER_PROTOCOL_METHODS, ...WORKER_INFERENCE_METHODS]);
+const workerMethods = new Set<string>([
+  ...WORKER_PROTOCOL_METHODS,
+  ...WORKER_INFERENCE_METHODS,
+  WORKER_TURN_ADMISSION_METHOD,
+]);
 
 type WorkerWsMessageHandlerParams = {
   socket: WebSocket;
+  transport: GatewayWsClient["socket"];
   connectionWork: GatewayConnectionWork;
   connId: string;
   service?: WorkerConnectionService;
@@ -177,7 +186,7 @@ export function attachWorkerWsMessageHandler(params: WorkerWsMessageHandlerParam
       publicAdmission: params.publicAdmission,
       claim: (identity) => {
         const client: GatewayWsClient = {
-          socket: params.socket,
+          socket: params.transport,
           connect: {
             minProtocol: connect.minProtocol,
             maxProtocol: connect.maxProtocol,
@@ -343,6 +352,7 @@ export function attachWorkerWsMessageHandler(params: WorkerWsMessageHandlerParam
     if (
       frameBytes > WORKER_PROTOCOL_MAX_PAYLOAD_BYTES &&
       parsed.method !== WORKER_INFERENCE_METHODS[0] &&
+      parsed.method !== WORKER_TURN_ADMISSION_METHOD &&
       !mediaTranscript
     ) {
       failConnection(1009);
@@ -394,10 +404,16 @@ export function attachWorkerWsMessageHandler(params: WorkerWsMessageHandlerParam
           warn: (message) => params.logGateway.warn(message),
           ...(signal ? { signal } : {}),
         });
-      return GatewayRpcDiagnostics.runHandler(invoke, diagnostics);
+      return GatewayRpcDiagnostics.runHandler(
+        workerMethods.has(parsed.method) ? parsed.method : "unknown",
+        invoke,
+        diagnostics,
+      );
     };
     const isLongToolOperation =
-      parsed.method === "worker.computer" || parsed.method === WORKER_GATEWAY_TOOL_METHODS.invoke;
+      parsed.method === "worker.computer" ||
+      parsed.method === WORKER_GATEWAY_TOOL_METHODS.invoke ||
+      parsed.method === WORKER_EXEC_APPROVAL_METHOD;
     if (isLongToolOperation) {
       if (toolOperations.has(parsed.id)) {
         failConnection(1008);
@@ -436,7 +452,26 @@ export function attachWorkerWsMessageHandler(params: WorkerWsMessageHandlerParam
       await dispatch();
     } catch (error) {
       outcome = "threw";
-      throw error;
+      if (parsed.method !== "worker.transcript.commit") {
+        throw error;
+      }
+      if (isReplayableWorkerTranscriptCommitError(error)) {
+        params.logGateway.warn(
+          `worker transcript commit interrupted; reconnecting: ${formatErrorMessage(error)}`,
+        );
+        throw error;
+      }
+      // A settled persistence failure must not masquerade as a lost ACK and replay forever.
+      params.logGateway.warn(`worker transcript commit failed: ${formatErrorMessage(error)}`);
+      respond(
+        false,
+        undefined,
+        workerProtocolError("gateway-unavailable", {
+          code: ErrorCodes.UNAVAILABLE,
+          message: "Worker transcript commit failed; check Gateway logs.",
+          retryable: false,
+        }),
+      );
     } finally {
       diagnostics?.finish(outcome);
     }

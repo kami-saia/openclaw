@@ -18,7 +18,6 @@ type FetchBotOpenIdOptions = {
 
 export type FeishuMonitorBotIdentity = {
   botOpenId?: string;
-  botName?: string;
   source?: "provider" | "cache";
 };
 
@@ -62,13 +61,12 @@ export async function fetchBotIdentityForMonitor(
         botName: result.botName,
       });
     } catch {
-      options.runtime?.log?.(
+      options.runtime?.log(
         `feishu[${account.accountId}]: bot identity cache write failed; continuing startup`,
       );
     }
     return {
       botOpenId: normalizeOptionalString(result.botOpenId),
-      botName: normalizeOptionalString(result.botName),
       source: "provider",
     };
   }
@@ -76,7 +74,7 @@ export async function fetchBotIdentityForMonitor(
   if (result.ok) {
     const log = options.runtime?.log ?? console.log;
     log(
-      `feishu[${account.accountId}]: bot info probe returned identity for a different app; ignoring stale result`,
+      `feishu[${account.accountId}]: bot info check returned identity for a different app; ignoring stale result`,
     );
   }
 
@@ -88,7 +86,7 @@ export async function fetchBotIdentityForMonitor(
   if (probeError.includes("timeout") || probeError.includes("timed out")) {
     const error = options.runtime?.error ?? console.error;
     error(
-      `feishu[${account.accountId}]: bot info probe timed out after ${timeoutMs}ms; continuing startup`,
+      `feishu[${account.accountId}]: bot info check timed out after ${timeoutMs}ms; continuing startup`,
     );
   }
   if (options.allowCachedFallback === false) {
@@ -102,12 +100,12 @@ export async function fetchBotIdentityForMonitor(
     if (!cached) {
       return {};
     }
-    options.runtime?.log?.(
-      `feishu[${account.accountId}]: using cached provider-verified bot identity while the fresh probe is unavailable`,
+    options.runtime?.log(
+      `feishu[${account.accountId}]: using cached provider-verified bot identity while the fresh check is unavailable`,
     );
-    return { botOpenId: cached.botOpenId, botName: cached.botName, source: "cache" };
+    return { botOpenId: cached.botOpenId, source: "cache" };
   } catch {
-    options.runtime?.log?.(
+    options.runtime?.log(
       `feishu[${account.accountId}]: bot identity cache read failed; continuing without cached identity`,
     );
     return {};

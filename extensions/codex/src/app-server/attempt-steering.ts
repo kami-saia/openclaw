@@ -1,10 +1,13 @@
 import {
   embeddedAgentLog,
   type AgentMessage,
+  cancelPendingAgentQuestionForSession,
+  claimPendingAgentQuestionAnswer,
   type queueAgentHarnessMessage,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import type { NativeSessionBindingAuthority } from "openclaw/plugin-sdk/agent-harness-session-runtime";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
+import { hasPromptImageInput } from "openclaw/plugin-sdk/session-transcript-runtime";
 import {
   isCodexAppServerIndeterminateRequestCancellationError,
   isCodexAppServerIndeterminateTransportError,
@@ -17,6 +20,67 @@ type AgentHarnessQueueMessageOptions = NonNullable<Parameters<typeof queueAgentH
 export type CodexSteeringPreparation = Parameters<
   NonNullable<NativeSessionBindingAuthority["withPreparedCurrent"]>
 >[1][number];
+export type CodexQuestionInputAuthority = NonNullable<
+  Parameters<typeof claimPendingAgentQuestionAnswer>[0]["authority"]
+>;
+
+/** Only admitted image input may replace a pending native question. */
+export function shouldCancelCodexQuestionForImage(options?: CodexSteeringQueueOptions): boolean {
+  return (
+    options?.isInboundUserMessage === true &&
+    options.allowPendingUserInputAnswer !== false &&
+    hasPromptImageInput(options)
+  );
+}
+
+export function createCodexQuestionInputHandlers(sessionKey: string, assertActive: () => void) {
+  const questionAuthority = (
+    kind: CodexQuestionInputAuthority["kind"],
+    assertSource: (() => void) | undefined,
+    toolAuthorityPreparation?: CodexSteeringPreparation,
+  ): CodexQuestionInputAuthority => ({
+    kind,
+    toolAuthorityPreparation,
+    assertCurrent: () => {
+      assertSource?.();
+      assertActive();
+    },
+  });
+  const claimPendingUserInputAnswer = async (
+    text: string,
+    optionsLocal?: CodexSteeringQueueOptions,
+    assertCurrent?: () => void,
+    authorityKind: CodexQuestionInputAuthority["kind"] = assertCurrent ? "source-bound" : "run",
+    toolAuthorityPreparation?: CodexSteeringPreparation,
+  ) => {
+    if (
+      optionsLocal?.isInboundUserMessage !== true ||
+      optionsLocal.allowPendingUserInputAnswer === false ||
+      hasPromptImageInput(optionsLocal)
+    ) {
+      return false;
+    }
+    assertActive();
+    return await claimPendingAgentQuestionAnswer({
+      sessionKey,
+      text,
+      authority: questionAuthority(authorityKind, assertCurrent, toolAuthorityPreparation),
+      sourceRecorder: optionsLocal.userTurnTranscriptRecorder,
+    });
+  };
+  const cancelPendingUserInput = (
+    resolvedBy: string,
+    assertCurrent?: () => void,
+    authorityKind: CodexQuestionInputAuthority["kind"] = assertCurrent ? "source-bound" : "run",
+    toolAuthorityPreparation?: CodexSteeringPreparation,
+  ) =>
+    cancelPendingAgentQuestionForSession({
+      sessionKey,
+      resolvedBy,
+      authority: questionAuthority(authorityKind, assertCurrent, toolAuthorityPreparation),
+    });
+  return { claimPendingUserInputAnswer, cancelPendingUserInput };
+}
 
 export class CodexSteeringAcceptedUnconfirmedError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -27,19 +91,23 @@ export class CodexSteeringAcceptedUnconfirmedError extends Error {
 
 export type CodexSteeringQueueOptions = Pick<
   AgentHarnessQueueMessageOptions,
+  | "currentInboundContext"
   | "debounceMs"
   | "images"
   | "imageOrder"
   | "media"
   | "isInboundUserMessage"
+  | "isInboundUserReply"
+  | "allowPendingUserInputAnswer"
   | "onQueueAccepted"
   | "onQueueSettled"
   | "userTurnTranscriptRecorder"
+  | "waitForTranscriptCommit"
 >;
 
 type CodexSteeringCommitItem = Pick<
   CodexSteeringQueueOptions,
-  "isInboundUserMessage" | "userTurnTranscriptRecorder"
+  "isInboundUserMessage" | "isInboundUserReply" | "userTurnTranscriptRecorder"
 >;
 
 /**
@@ -72,7 +140,6 @@ export function createCodexSteeringQueue(params: {
     text: string;
     resolve: () => void;
     reject: (error: unknown) => void;
-    settled: boolean;
   };
   type PreparedSteerMessage = PendingSteerMessage & {
     prepared: Awaited<ReturnType<typeof params.prepareMessage>>;
@@ -81,6 +148,7 @@ export function createCodexSteeringQueue(params: {
   let batchedMessages: PendingSteerMessage[] = [];
   const dispatchedBatches = new Map<string, PreparedSteerMessage[]>();
   const pendingMessages = new Set<PendingSteerMessage>();
+  const confirmationTimers = new Map<string, NodeJS.Timeout>();
   let batchTimer: NodeJS.Timeout | undefined;
   let batchSequence = 0;
   let sendChain: Promise<void> = Promise.resolve();
@@ -97,10 +165,8 @@ export function createCodexSteeringQueue(params: {
   };
 
   const clearBatchTimer = () => {
-    if (batchTimer) {
-      clearTimeout(batchTimer);
-      batchTimer = undefined;
-    }
+    clearTimeout(batchTimer);
+    batchTimer = undefined;
   };
 
   const reportItemAcceptance = (item: PendingSteerMessage, accepted: boolean) => {
@@ -120,21 +186,19 @@ export function createCodexSteeringQueue(params: {
   };
 
   const resolveItem = (item: PreparedSteerMessage) => {
-    if (item.settled) {
+    if (!pendingMessages.has(item)) {
       return;
     }
     acceptItem(item);
-    item.settled = true;
     pendingMessages.delete(item);
     item.onQueueSettled?.();
     item.resolve();
   };
 
   const rejectItem = (item: PendingSteerMessage, error: unknown) => {
-    if (item.settled) {
+    if (!pendingMessages.has(item)) {
       return;
     }
-    item.settled = true;
     pendingMessages.delete(item);
     reportItemAcceptance(item, false);
     item.onQueueSettled?.();
@@ -164,6 +228,10 @@ export function createCodexSteeringQueue(params: {
       }
     }
     dispatchedBatches.clear();
+    for (const timer of confirmationTimers.values()) {
+      clearTimeout(timer);
+    }
+    confirmationTimers.clear();
     for (const item of pendingMessages) {
       rejectItem(item, error);
     }
@@ -192,7 +260,7 @@ export function createCodexSteeringQueue(params: {
   };
 
   const sendBatch = async (items: PendingSteerMessage[]) => {
-    const pendingItems = items.filter((item) => !item.settled);
+    const pendingItems = items.filter((item) => pendingMessages.has(item));
     let liveItems: PreparedSteerMessage[] = [];
     if (pendingItems.length === 0) {
       return;
@@ -203,7 +271,7 @@ export function createCodexSteeringQueue(params: {
       assertActive();
       const prepared: PreparedSteerMessage[] = [];
       const isCurrent = (item: PendingSteerMessage) => {
-        if (item.settled) {
+        if (!pendingMessages.has(item)) {
           return false;
         }
         try {
@@ -307,6 +375,33 @@ export function createCodexSteeringQueue(params: {
       });
       for (const item of liveItems) {
         acceptItem(item);
+        // Queue-only callers need the acknowledgement, not the later consumption
+        // receipt. Keep receiver custody until consumption or this receiving run closes.
+        if (item.waitForTranscriptCommit === false) {
+          item.resolve();
+        }
+      }
+      // A confirmation deadline ends only the caller's wait. Accepted input
+      // remains in receiver custody until consumption or this run closes.
+      const batchId = clientUserMessageId;
+      if (
+        dispatchedBatches.has(batchId) &&
+        liveItems.some((item) => item.waitForTranscriptCommit !== false)
+      ) {
+        const timer = setTimeout(() => {
+          confirmationTimers.delete(batchId);
+          const error = new CodexSteeringAcceptedUnconfirmedError(
+            "Codex accepted steering but did not confirm transcript consumption",
+            { cause: new Error("Codex steering transcript consumption confirmation timed out") },
+          );
+          for (const item of dispatchedBatches.get(batchId) ?? []) {
+            if (item.waitForTranscriptCommit !== false) {
+              item.reject(error);
+            }
+          }
+        }, params.requestTimeoutMs);
+        timer.unref?.();
+        confirmationTimers.set(batchId, timer);
       }
     } catch (error) {
       if (clientUserMessageId) {
@@ -380,7 +475,6 @@ export function createCodexSteeringQueue(params: {
         text,
         resolve,
         reject,
-        settled: false,
       };
       pendingMessages.add(item);
       batchedMessages.push(item);
@@ -402,6 +496,8 @@ export function createCodexSteeringQueue(params: {
         return false;
       }
       dispatchedBatches.delete(clientUserMessageId);
+      clearTimeout(confirmationTimers.get(clientUserMessageId));
+      confirmationTimers.delete(clientUserMessageId);
       for (const item of batch) {
         resolveItem(item);
       }

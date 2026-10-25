@@ -15,11 +15,6 @@ type NormalizedOpenAICompletionsDelta = {
   toolCalls: ChatCompletionToolCallDelta[];
 };
 
-type OpenAICompletionsToolCallFinalizationOptions = {
-  allowSilentToolCallPromotion?: boolean;
-  onConfirmedToolCall?: (block: ToolCall, contentIndex: number) => void;
-};
-
 /** Keep encrypted provider reasoning attached to the first matching tool call. */
 export function createOpenAIEncryptedToolCallReasoningTracker() {
   const firstBlocks = new Map<string, { block: ToolCall; signature?: string }>();
@@ -71,6 +66,31 @@ export function createOpenAIEncryptedToolCallReasoningTracker() {
   };
 }
 
+function hasObservableContent(value: unknown): boolean {
+  if (typeof value === "string") {
+    return value.length > 0;
+  }
+  if (Array.isArray(value)) {
+    return value.some(hasObservableContent);
+  }
+  if (isRecord(value)) {
+    return Object.entries(value).some(
+      ([field, nestedValue]) =>
+        field !== "type" &&
+        field !== "id" &&
+        field !== "index" &&
+        hasObservableContent(nestedValue),
+    );
+  }
+  return false;
+}
+
+export function hasOpenAICompletionsDeltaContent(delta: ChatCompletionChunk.Choice.Delta): boolean {
+  return Object.entries(delta).some(
+    ([field, value]) => field !== "role" && hasObservableContent(value),
+  );
+}
+
 /** Normalize the SDK's legacy single-function lane into its modern tool-call shape. */
 export function createOpenAICompletionsToolCallDeltaNormalizer(): (
   delta: ChatCompletionChunk.Choice.Delta,
@@ -99,25 +119,6 @@ export function createOpenAICompletionsToolCallDeltaNormalizer(): (
     }
     pendingFollowingDeltaBytes += nextDeltaBytes;
     pendingFollowingDeltas.push(delta);
-  };
-
-  const hasObservableContent = (value: unknown): boolean => {
-    if (typeof value === "string") {
-      return value.length > 0;
-    }
-    if (Array.isArray(value)) {
-      return value.some(hasObservableContent);
-    }
-    if (isRecord(value)) {
-      return Object.entries(value).some(
-        ([field, nestedValue]) =>
-          field !== "type" &&
-          field !== "id" &&
-          field !== "index" &&
-          hasObservableContent(nestedValue),
-      );
-    }
-    return false;
   };
 
   return (delta, finishReason) => {
@@ -162,11 +163,7 @@ export function createOpenAICompletionsToolCallDeltaNormalizer(): (
 
     const hadPendingLegacyCall = pendingLegacyToolCall !== undefined;
     const leadingDeltas: NormalizedOpenAICompletionsDelta[] = [];
-    if (
-      Object.entries(ordinaryDelta).some(
-        ([field, value]) => field !== "role" && hasObservableContent(value),
-      )
-    ) {
+    if (hasOpenAICompletionsDeltaContent(ordinaryDelta)) {
       if (hadPendingLegacyCall) {
         // Keep every lane behind its provisional call; publishing text early
         // permanently reverses the assistant's original tool/content order.
@@ -233,7 +230,10 @@ export function createOpenAICompletionsToolCallDeltaNormalizer(): (
 /** Publish only executable calls; streaming scratch state never belongs in replay. */
 export function finalizeOpenAICompletionsToolCalls(
   output: Pick<AssistantMessage, "content" | "stopReason" | "errorMessage">,
-  options: OpenAICompletionsToolCallFinalizationOptions = {},
+  options: {
+    allowSilentToolCallPromotion?: boolean;
+    onConfirmedToolCall?: (block: ToolCall, contentIndex: number) => void;
+  } = {},
 ): void {
   const isToolCall = (block: AssistantMessage["content"][number]): block is ToolCall =>
     block.type === "toolCall";
@@ -259,10 +259,7 @@ export function finalizeOpenAICompletionsToolCalls(
     return;
   }
 
-  type FinalToolCall = ToolCall & {
-    partialArgs?: unknown;
-  };
-  const toolCalls = output.content.filter(isToolCall) as FinalToolCall[];
+  const toolCalls = output.content.filter(isToolCall);
   const rejectToolCalls = () => {
     output.stopReason = "error";
     output.errorMessage = "Provider returned an incomplete or malformed tool call";
@@ -273,15 +270,15 @@ export function finalizeOpenAICompletionsToolCalls(
       (call) =>
         typeof call.name !== "string" ||
         call.name.trim().length === 0 ||
-        typeof call.partialArgs !== "string" ||
-        call.partialArgs.trim().length === 0,
+        typeof call.partialJson !== "string" ||
+        call.partialJson.trim().length === 0,
     )
   ) {
     rejectToolCalls();
     return;
   }
   try {
-    finalizeTerminalToolCallArguments(toolCalls, (call) => call.partialArgs);
+    finalizeTerminalToolCallArguments(toolCalls, (call) => call.partialJson);
   } catch {
     rejectToolCalls();
     return;
@@ -292,8 +289,7 @@ export function finalizeOpenAICompletionsToolCalls(
     if (!block || !isToolCall(block)) {
       continue;
     }
-    delete (block as { partialArgs?: string }).partialArgs;
-    delete (block as { streamIndex?: number }).streamIndex;
+    delete block.partialJson;
     options.onConfirmedToolCall?.(block, contentIndex);
   }
 }

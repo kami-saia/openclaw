@@ -1,4 +1,3 @@
-// GitHub Copilot source-token validation and account endpoint resolution.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { readProviderJsonResponse } from "openclaw/plugin-sdk/provider-http";
 import { PUBLIC_GITHUB_COPILOT_DOMAIN, resolveGithubCopilotDomain } from "./domain.js";
@@ -119,7 +118,6 @@ export async function resolveCopilotRuntimeAuth(params: {
   config?: OpenClawConfig;
 }): Promise<{
   apiKey: string;
-  source: string;
   baseUrl: string;
   expiresAt?: number;
 }> {
@@ -158,10 +156,10 @@ export async function resolveCopilotRuntimeAuth(params: {
       fetchImpl,
       signal,
     });
+    // FORK(53f821e5e40): enterprise CAPI flaps 403 on raw ghu_ bearers; prefer the exchanged token.
     if (exchanged) {
       return {
         apiKey: exchanged.apiKey,
-        source: `exchanged:${copilotTokenUrl(domain)}`,
         baseUrl: exchanged.baseUrl ?? baseUrl,
         expiresAt: exchanged.expiresAt,
       };
@@ -170,7 +168,6 @@ export async function resolveCopilotRuntimeAuth(params: {
     // token the way the Copilot CLI/SDK does.
     return {
       apiKey: params.githubToken,
-      source: `validated:${userUrl}`,
       baseUrl,
     };
   } catch (error) {

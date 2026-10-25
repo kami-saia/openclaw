@@ -1,9 +1,4 @@
 import { normalizeConversationReadInvocationOrigin } from "../channels/plugins/conversation-read-origin.js";
-/**
- * Runtime context resolver for OpenClaw plugin tools.
- *
- * Normalizes workspace, delivery, browser, sandbox, and active-model inputs before plugin tool invocation.
- */
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   assertMemoryAudienceCurrent,
@@ -15,12 +10,12 @@ import { modelKey } from "./model-ref-shared.js";
 import type { OpenClawToolsOptions } from "./openclaw-tools.types.js";
 import { resolveWorkspaceRoot } from "./workspace-dir.js";
 
-/** Options provided by agent runtime callers when invoking OpenClaw plugin tools. */
 export type OpenClawPluginToolOptions = Pick<
   OpenClawToolsOptions,
   | "agentSessionKey"
   | "runSessionKey"
   | "runId"
+  | "inputProvenance"
   | "assertInvocationCurrent"
   | "assertInputCommitAllowed"
   | "agentChannel"
@@ -29,6 +24,7 @@ export type OpenClawPluginToolOptions = Pick<
   | "currentMessagingTarget"
   | "currentChannelId"
   | "agentThreadId"
+  | "approvalReviewerDeviceIds"
   | "nativeChannelId"
   | "messageActionTurnCapability"
   | "agentDir"
@@ -37,6 +33,7 @@ export type OpenClawPluginToolOptions = Pick<
   | "fsPolicy"
   | "modelProvider"
   | "modelId"
+  | "modelContextWindowTokens"
   | "requesterSenderId"
   | "senderIsOwner"
   | "memoryAudience"
@@ -48,12 +45,17 @@ export type OpenClawPluginToolOptions = Pick<
   | "oneShotCliRun"
   | "sandboxBrowserBridgeUrl"
   | "allowHostBrowserControl"
+  | "allowLocalBrowserLoopback"
+  | "assertLocalBrowserLoopbackCurrent"
   | "sandboxed"
   | "allowGatewaySubagentBinding"
   | "toolBindings"
-> & { activeProjectKeys?: readonly string[] };
+  | "sandbox"
+  | "abortSignal"
+  | "pluginExecutionSkillsSnapshot"
+  | "pluginExecutionAuthority"
+> & { activeProjectKeys?: readonly string[]; approvalReviewerDeviceId?: string };
 
-/** Resolves plugin-tool context inputs from runtime options and config state. */
 export function resolveOpenClawPluginToolInputs(params: {
   options?: OpenClawPluginToolOptions;
   resolvedConfig?: OpenClawConfig;
@@ -106,6 +108,13 @@ export function resolveOpenClawPluginToolInputs(params: {
       agentId: sessionAgentId,
       sessionKey,
       sessionId: options?.sessionId,
+      runId: options?.runId,
+      inputProvenance: options?.inputProvenance,
+      approvalReviewerDeviceIds: options?.approvalReviewerDeviceIds
+        ? [...options.approvalReviewerDeviceIds]
+        : options?.approvalReviewerDeviceId
+          ? [options.approvalReviewerDeviceId]
+          : undefined,
       toolBindings: options?.toolBindings,
       activeProjectKeys: options?.activeProjectKeys,
       conversationRecall: options?.conversationRecall,
@@ -113,6 +122,12 @@ export function resolveOpenClawPluginToolInputs(params: {
       browser: {
         sandboxBridgeUrl: options?.sandboxBrowserBridgeUrl,
         allowHostControl: options?.allowHostBrowserControl,
+        ...(options?.assertLocalBrowserLoopbackCurrent
+          ? { assertLocalLoopbackCurrent: options.assertLocalBrowserLoopbackCurrent }
+          : {}),
+        ...(options?.allowLocalBrowserLoopback !== undefined
+          ? { allowLocalLoopback: options.allowLocalBrowserLoopback }
+          : {}),
       },
       messageChannel: options?.agentChannel,
       agentAccountId: options?.agentAccountId,

@@ -2,6 +2,7 @@
 // Lives in its own file because gateway-misc.test.ts is at the max-lines ratchet.
 import { describe, expect, it, vi } from "vitest";
 import { createGatewayBroadcaster } from "./server-broadcast.js";
+import { GatewayClientRegistry } from "./server/client-registry.js";
 import type { GatewayWsClient } from "./server/ws-types.js";
 
 type RecordingSocket = {
@@ -40,7 +41,7 @@ describe("gateway broadcaster node exclusion", () => {
     const operatorSocket = makeRecordingSocket();
     const nodeSocket = makeRecordingSocket();
 
-    const clients = new Set<GatewayWsClient>([
+    const clients = new GatewayClientRegistry([
       makeClient("c-operator", operatorSocket, {
         role: "operator",
         scopes: ["operator.admin"],

@@ -50,8 +50,10 @@ export function isMattermostSenderAllowed(params: {
   return match.allowed;
 }
 
-function mapMattermostChannelTypeToChatType(channelType?: string | null): ChatType {
-  const normalized = channelType?.trim().toUpperCase();
+export function resolveMattermostTrustedChatKind(params: {
+  channelType?: string | null;
+}): ChatType {
+  const normalized = params.channelType?.trim().toUpperCase();
   if (!normalized) {
     return "direct";
   }
@@ -62,16 +64,6 @@ function mapMattermostChannelTypeToChatType(channelType?: string | null): ChatTy
     return "group";
   }
   return "channel";
-}
-
-export function resolveMattermostTrustedChatKind(params: {
-  channelType?: string | null;
-  fallback?: ChatType;
-}): ChatType {
-  const channelType = params.channelType?.trim();
-  return channelType
-    ? mapMattermostChannelTypeToChatType(channelType)
-    : (params.fallback ?? "direct");
 }
 
 type MattermostCommandDenyReason =
@@ -115,7 +107,7 @@ export async function resolveMattermostMonitorInboundAccess(params: {
   const readStoreAllowFrom =
     params.readStoreAllowFrom ??
     (storeAllowFrom != null ? async () => [...storeAllowFrom] : undefined);
-  const ingress = await getMattermostRuntime().channel.inbound.ingress.resolveStable({
+  return await getMattermostRuntime().channel.inbound.ingress.resolveStable({
     channelId: "mattermost",
     accountId: account.accountId,
     identity: mattermostIngressIdentity,
@@ -149,7 +141,6 @@ export async function resolveMattermostMonitorInboundAccess(params: {
       directGroupAllowFrom: kind === "direct" ? "effective" : "none",
     },
   });
-  return ingress;
 }
 
 /** Live and recovered history share the same trigger-versus-visibility policy. */
@@ -244,7 +235,7 @@ export async function authorizeMattermostCommandInvocation(params: {
     };
   }
 
-  const kind = mapMattermostChannelTypeToChatType(channelInfo.type);
+  const kind = resolveMattermostTrustedChatKind({ channelType: channelInfo.type });
   const chatType = kind;
   const channelName = channelInfo.name ?? "";
   const channelDisplay = channelInfo.display_name ?? channelName;

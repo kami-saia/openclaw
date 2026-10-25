@@ -1,5 +1,5 @@
 {
-  "startupJsGzipBytes": 372878,
-  "reason": "Native sidebar bridge landing: measured production startup JS 372,878 B after rebasing onto main, +1,107 B (0.298%) over the prior baseline within the approved sub-1% ceiling rule. Matched-toolchain main measured 372,406 B versus 372,597 B before final action-module extraction (+191 B); retain the existing 512 B growth and 64 B build-variance allowances.",
-  "updatedAt": "2026-10-02"
+  "startupJsGzipBytes": 270085,
+  "reason": "Consolidated asset delivery on main 39ceca404cec preserves the shared plugin-inline-view contract. Same-host production builds reduce startup from 273896 to 270085 B gzip and from seven to five JS requests, retaining one startup CSS request. Ratchet to the measured integrated head.",
+  "updatedAt": "2026-10-25"
 }
