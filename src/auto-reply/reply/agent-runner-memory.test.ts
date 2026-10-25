@@ -1063,6 +1063,59 @@ describe("runMemoryFlushIfNeeded", () => {
     expect(incrementCompactionCountMock).not.toHaveBeenCalled();
   });
 
+  it("runs the pre-compaction checkpoint on the live session and skips the detached compactor in agent mode", async () => {
+    const storePath = path.join(rootDir, "sessions.json");
+    const sessionKey = "main";
+    const sessionEntry = createFlushSessionEntry({ totalTokens: 90_000, compactionCount: 2 });
+    const sessionStore = { [sessionKey]: sessionEntry };
+    await writeTestSessionStore(storePath, sessionKey, sessionEntry);
+
+    let capturedRunParams: EmbeddedAgentParams | undefined;
+    runEmbeddedAgentMock.mockImplementationOnce(async (params: EmbeddedAgentParams) => {
+      capturedRunParams = params;
+      return { payloads: [], meta: {} };
+    });
+
+    const cfg = compactionConfig({ mode: "agent", memoryFlush: {} });
+    const beforeCompaction = vi.fn(async (entry: SessionEntry) => {
+      const flushed = await runDefaultMemoryFlush(entry, {
+        cfg,
+        sessionStore,
+        sessionKey,
+        storePath,
+      });
+      expect(flushed.outcome).toBe("completed");
+      return flushed.sessionEntry;
+    });
+
+    const result = await runDefaultPreflight(sessionEntry, {
+      cfg,
+      sessionStore,
+      sessionKey,
+      storePath,
+      beforeCompaction,
+    });
+
+    expect(beforeCompaction).toHaveBeenCalledOnce();
+    expect(runEmbeddedAgentMock).toHaveBeenCalledOnce();
+    expect(capturedRunParams).toMatchObject({
+      sessionId: "session",
+      sessionKey: "main",
+      sessionTarget: {
+        agentId: "main",
+        sessionId: "session",
+        sessionKey: "main",
+        storePath,
+      },
+    });
+    expect(capturedRunParams?.sessionPersistence).toBeUndefined();
+    expect(compactEmbeddedAgentSessionMock).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      sessionId: "session",
+      memoryFlush: { kind: "succeeded", compactionCount: 2 },
+    });
+  });
+
   it("does not compact after cancellation during the pre-compaction checkpoint", async () => {
     const sessionEntry = createFlushSessionEntry({ totalTokens: 90_000 });
     const controller = new AbortController();

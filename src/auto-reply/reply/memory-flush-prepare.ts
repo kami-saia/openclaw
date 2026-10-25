@@ -129,19 +129,35 @@ export async function prepareMemoryFlushAttempt(params: {
   };
   try {
     // The detached transcript keeps maintenance messages out of the source session.
+    // FORK: in agent compaction mode, the flush turn drives compaction directly
+    // via the `compact` tool, so it must open and mutate the live session transcript.
+    const agentCompaction = params.cfg?.agents?.defaults?.compaction?.mode === "agent";
     params.assertCurrent();
-    const memorySession = await prepareMemoryFlushSession({
-      admission: params.preflightAdmission,
-      source: {
-        agentId,
-        sessionId: sessionEntry.sessionId,
-        sessionKey,
-        storePath: sourceStorePath,
-      },
-      runId: params.flushRunId,
-      workspaceDir: followupRun.run.workspaceDir,
-      signal: params.abortSignal,
-    });
+    const memorySession = agentCompaction
+      ? {
+          sessionId: sessionEntry.sessionId,
+          sessionKey,
+          sessionFile: sessionKey,
+          sessionTarget: {
+            agentId,
+            sessionId: sessionEntry.sessionId,
+            sessionKey,
+            storePath: sourceStorePath,
+          },
+          cleanupBundleMcpOnRunEnd: true as const,
+        }
+      : await prepareMemoryFlushSession({
+          admission: params.preflightAdmission,
+          source: {
+            agentId,
+            sessionId: sessionEntry.sessionId,
+            sessionKey,
+            storePath: sourceStorePath,
+          },
+          runId: params.flushRunId,
+          workspaceDir: followupRun.run.workspaceDir,
+          signal: params.abortSignal,
+        });
     if (!isToolsMemoryFlushPlan(plan)) {
       await ensureMemoryFlushTargetFile({
         workspaceDir: followupRun.run.workspaceDir,

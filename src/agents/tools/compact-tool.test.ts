@@ -383,5 +383,38 @@ describe("compact-tool", () => {
       await run(tool!, { summary: "s" });
       expect(managed.compactions).toHaveLength(1);
     });
+
+    it("prefers appendCompactionAsync when available on the live session manager", async () => {
+      const asyncCalls: AppendedCompaction[] = [];
+      const { tool, managed } = makeTool();
+      (
+        managed.manager as unknown as {
+          appendCompactionAsync: (
+            summary: string,
+            firstKeptEntryId: string | undefined,
+            tokensBefore: number,
+            _meta: unknown,
+            fromHook: boolean,
+          ) => Promise<void>;
+        }
+      ).appendCompactionAsync = async (
+        summary,
+        firstKeptEntryId,
+        tokensBefore,
+        _meta,
+        fromHook,
+      ) => {
+        asyncCalls.push({ summary, firstKeptEntryId, tokensBefore, fromHook });
+      };
+      await run(tool!, { summary: "async-summary" });
+      expect(asyncCalls).toHaveLength(1);
+      expect(asyncCalls[0]).toMatchObject({
+        summary: "async-summary",
+        firstKeptEntryId: "e3",
+        tokensBefore: 12345,
+        fromHook: true,
+      });
+      expect(managed.compactions).toHaveLength(0);
+    });
   });
 });

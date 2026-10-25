@@ -176,13 +176,23 @@ export function createCompactTool(options: {
           options.withSessionWriteLock ?? (async <T>(run: () => Promise<T> | T) => await run());
 
         await wrap(async () => {
-          sessionManager.appendCompaction(
-            summary,
-            firstKeptEntryId,
-            tokensBefore,
-            undefined,
-            true /* fromHook */,
-          );
+          if (typeof sessionManager.appendCompactionAsync === "function") {
+            await sessionManager.appendCompactionAsync(
+              summary,
+              firstKeptEntryId,
+              tokensBefore,
+              undefined,
+              true /* fromHook */,
+            );
+          } else {
+            sessionManager.appendCompaction(
+              summary,
+              firstKeptEntryId,
+              tokensBefore,
+              undefined,
+              true /* fromHook */,
+            );
+          }
         });
 
         log.info(
@@ -195,7 +205,7 @@ export function createCompactTool(options: {
         let restoredTailCount = 0;
         if (!keepRecent) {
           await wrap(async () => {
-            restoredTailCount = restoreAgentOverflowStash({
+            restoredTailCount = await restoreAgentOverflowStash({
               sessionManager,
               sessionKey,
               ...(options.sessionId ? { sessionId: options.sessionId } : {}),

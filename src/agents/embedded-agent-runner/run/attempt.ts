@@ -21,6 +21,7 @@ import {
 } from "../../agent-run-terminal-outcome.js";
 import { resolveAgentDir } from "../../agent-scope.js";
 import { recordAgentCleanupFailure, runOwnedAgentCleanup } from "../../run-cleanup-timeout.js";
+import { estimateContextTokens } from "../../runtime/index.js";
 import { withRuntimeToolSchemaQuarantine } from "../../tool-schema-quarantine.js";
 import {
   clearToolSearchCatalog,
@@ -56,19 +57,16 @@ import { prepareEmbeddedAttemptSystemPrompt } from "./attempt-system-prompt-prep
 import { prepareEmbeddedAttemptToolCatalog } from "./attempt-tool-catalog.js";
 import { prepareEmbeddedAttemptToolBase } from "./attempt-tool-prepare.js";
 import { prepareEmbeddedAttemptTranscriptLifecycle } from "./attempt-transcript-lifecycle-prepare.js";
+import type { EmbeddedRunAttemptInternalParams } from "./internal-params.js";
 import { measureEmbeddedAgentPreparation } from "./preparation-timing.js";
-import type {
-  EmbeddedAttemptExecutionState,
-  EmbeddedRunAttemptParams,
-  EmbeddedRunAttemptResult,
-} from "./types.js";
+import type { EmbeddedAttemptExecutionState, EmbeddedRunAttemptResult } from "./types.js";
 
 // FORK: re-exported from attempt-served-model.ts (extracted to avoid an import
 // cycle with attempt-session-runtime-prepare.ts).
 export { resolveDivergentServedModel, resolveLastServedModel } from "./attempt-served-model.js";
 
 export async function runEmbeddedAttempt(
-  input: EmbeddedRunAttemptParams,
+  input: EmbeddedRunAttemptInternalParams,
 ): Promise<EmbeddedRunAttemptResult> {
   const modelExecution = bindOperatorModelExecution(readRunOperatorAuthority(input), {
     provider: input.provider,
@@ -104,7 +102,7 @@ export async function runEmbeddedAttempt(
 }
 
 async function runEmbeddedAttemptOwned(
-  input: EmbeddedRunAttemptParams,
+  input: EmbeddedRunAttemptInternalParams,
   retainToolCleanup: (release: () => Promise<void>) => void,
   resourceAbortSignal: AbortSignal | undefined,
 ): Promise<EmbeddedRunAttemptResult> {
@@ -143,6 +141,7 @@ async function runEmbeddedAttemptOwned(
   // tool closes over this ref instead of the values.
   const compactLive: {
     withLock?: <T>(run: () => Promise<T> | T) => Promise<T>;
+    sessionRuntimeState?: { prePromptMessageCount: number };
   } = {};
   let releasePreparedTools: ((reason: string) => Promise<void>) | undefined;
   const sessionResources = createEmbeddedAttemptSessionResources(
@@ -290,6 +289,13 @@ async function runEmbeddedAttemptOwned(
               }
               // SAFETY: messages came from state.messages via buildSessionContext, same shape back.
               state.messages = messages as never;
+              if (compactLive.sessionRuntimeState) {
+                compactLive.sessionRuntimeState.prePromptMessageCount = messages.length;
+              }
+              params.onContextAccountingEvent?.({
+                kind: "compaction",
+                tokensAfter: estimateContextTokens(messages as never).tokens,
+              });
             } catch {
               /* best-effort: compaction already landed on disk */
             }
@@ -445,6 +451,7 @@ async function runEmbeddedAttemptOwned(
           },
         }),
       );
+      compactLive.sessionRuntimeState = preparedSessionRuntime.state;
       const promptToolPolicy = createPromptBuildToolPolicy({
         session: preparedSessionRuntime.agentSession.activeSession,
         readModelTools: () => preparedSessionRuntime.agentSession.activeSession.agent.state.tools,

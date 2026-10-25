@@ -594,6 +594,17 @@ export async function runSessionCompactionIfNeeded(params: {
     });
   }
 
+  // FORK: in agent compaction mode, the pre-compaction memoryFlush turn (or the
+  // in-turn overflow fallback) drives compaction via the `compact` tool on the
+  // live session; never fall through to the detached summarizer.
+  if (params.cfg?.agents?.defaults?.compaction?.mode === "agent") {
+    logVerbose(
+      `preflightCompaction skipped: sessionKey=${params.sessionKey} ` +
+        `reason=agent_compaction_mode`,
+    );
+    return entry;
+  }
+
   const compactionTrigger = shouldCompactByTranscriptBytes ? "transcript_bytes" : "tokens";
   logVerbose(
     `preflightCompaction triggered: sessionKey=${params.sessionKey} ` +
@@ -1356,6 +1367,9 @@ export async function runMemoryFlushIfNeeded(params: {
         );
         if (updatedEntry) {
           activeSessionEntry = updatedEntry;
+          if (params.sessionStore) {
+            params.sessionStore[params.sessionKey] = updatedEntry;
+          }
         }
       } catch (err) {
         logVerbose(`failed to persist memory flush metadata: ${String(err)}`);
