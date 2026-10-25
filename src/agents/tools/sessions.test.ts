@@ -1177,6 +1177,29 @@ describe("sessions_send gating", () => {
     expect(requireGatewayRequest().method).toBe("sessions.resolve");
   });
 
+  it("allows thread session targets when tools.sessions.allowThreadTargets is true", async () => {
+    setActivePluginRegistry(createSessionConversationTestRegistry());
+    loadConfigMock.mockReturnValue({
+      session: { scope: "per-sender", mainKey: "main" },
+      tools: {
+        agentToAgent: { enabled: false },
+        sessions: { visibility: "all", allowThreadTargets: true },
+      },
+    });
+    const threadSessionKey = "agent:main:slack:channel:C123:thread:1710000000.000100";
+    const tool = createMainSessionsSendTool();
+
+    const result = await tool.execute("call-thread-target-allowed", {
+      sessionKey: threadSessionKey,
+      message: "hi",
+      timeoutSeconds: 0,
+    });
+
+    expect((result.details as { error?: string } | undefined)?.error ?? "").not.toContain(
+      "cannot target a thread session",
+    );
+  });
+
   it("rejects label targets that resolve to canonical thread sessions", async () => {
     setActivePluginRegistry(createSessionConversationTestRegistry());
     loadConfigMock.mockReturnValue({

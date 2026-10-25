@@ -719,6 +719,11 @@ export const ToolsSchema = z
          * - "all": any session (default; cross-agent access is governed by tools.agentToAgent)
          */
         visibility: z.enum(["self", "tree", "agent", "all"]).optional(),
+        /**
+         * FORK(thread-send): allow sessions_send to target thread/topic-scoped chat sessions.
+         * Default: false (thread targets are rejected; use the parent channel session).
+         */
+        allowThreadTargets: z.boolean().optional(),
       })
       .optional(),
     loopDetection: ToolLoopDetectionSchema,

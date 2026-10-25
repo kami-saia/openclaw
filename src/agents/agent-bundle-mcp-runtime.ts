@@ -546,7 +546,8 @@ function createServerMcpRuntime(
       return result;
     } catch (error) {
       // A stateful server uses HTTP 404 to invalidate an expired MCP session.
-      // Reinitialize a fresh client, but never replay a possibly mutating call.
+      // Reinitialize a fresh client. Only runServerRequest may replay, and only
+      // where the protocol guarantees the rejected request never ran.
       const sessionExpired = isMcpHttpSessionExpired(session, error);
       let recycleReason: "expired HTTP session" | "repeated request timeouts" | undefined;
       if (sessionExpired && !requestSignal?.aborted) {
@@ -573,11 +574,6 @@ function createServerMcpRuntime(
       throw error;
     }
   };
-  const runGuardedMcpRequest = <T>(
-    session: BundleMcpSession,
-    request: (signal: AbortSignal, holdForHumanInput: () => () => void) => Promise<T>,
-    options?: McpRequestOptions,
-  ) => runGuardedServerRequest(session, () => requests.run(session, request), options);
   const collectServerItems = (session: BundleMcpSession, kind: "prompts" | "resources") => {
     const callerSignal = getSessionMcpRequestSignal();
     return collectMcpPaginatedItems({
@@ -883,8 +879,57 @@ function createServerMcpRuntime(
     const signal = getSessionMcpRequestSignal();
     signal?.throwIfAborted();
     await racePromiseWithAbortSignal(getCatalog(), signal);
+    if (!currentSession?.connected && catalogInFlight) {
+      // A recycle returns the stale catalog while a replacement connects in the
+      // background. Join that bounded reconnect instead of failing fast.
+      await racePromiseWithAbortSignal(catalogInFlight, signal);
+    }
     return requireConnectedSession();
   };
+  const runServerRequest = async <T>(
+    requestedServer: string,
+    request: (session: BundleMcpSession) => Promise<T>,
+    options?: McpRequestOptions,
+  ): Promise<T> => {
+    const session = await getActiveSession(requestedServer);
+    try {
+      return await runGuardedServerRequest(session, () => request(session), options);
+    } catch (error) {
+      // Streamable HTTP servers MUST answer 404 for an unknown session id
+      // before dispatching the request, so this request never ran. Replay it
+      // once on the replacement session. Legacy SSE has no such guarantee.
+      // A second expiry surfaces to the caller.
+      if (
+        session.transportType !== "streamable-http" ||
+        !isMcpHttpSessionExpired(session, error) ||
+        getSessionMcpRequestSignal()?.aborted
+      ) {
+        throw error;
+      }
+      const replacement = await getActiveSession(requestedServer);
+      if (replacement === session) {
+        throw error;
+      }
+      return await runGuardedServerRequest(replacement, () => request(replacement), options);
+    }
+  };
+  const runServerMcpRequest = <T>(
+    requestedServer: string,
+    request: (
+      session: BundleMcpSession,
+      signal: AbortSignal,
+      holdForHumanInput: () => () => void,
+    ) => Promise<T>,
+    options?: McpRequestOptions,
+  ) =>
+    runServerRequest(
+      requestedServer,
+      (session) =>
+        requests.run(session, (signal, holdForHumanInput) =>
+          request(session, signal, holdForHumanInput),
+        ),
+      options,
+    );
 
   const runtime: ServerMcpRuntime = {
     resetStartupBackoff() {
@@ -947,39 +992,41 @@ function createServerMcpRuntime(
       lastUsedAt = Date.now();
     },
     async callTool(requestedServer, toolName, input, options) {
-      const session = await getActiveSession(requestedServer);
-      const validateResult = session.toolMetadata?.validatorForCall(toolName);
-      const result = (await runGuardedMcpRequest(session, (signal, holdForHumanInput) => {
-        options?.assertCurrent?.();
-        const call = () =>
-          withGuardedFetchRequestAuthority(options?.assertCurrent, () =>
-            session.client.callTool(
-              {
-                name: toolName,
-                arguments: isRecord(input) ? input : {},
-                ...(options?._meta ? { _meta: options._meta } : {}),
-              },
-              undefined,
-              {
-                // The local deadline owns active work; the SDK bounds the total
-                // call, including one shared allowance for pending human input.
-                timeout:
-                  session.requestTimeoutMs +
-                  (session.withElicitation ? MCP_ELICITATION_TIMEOUT_MS : 0),
-                signal,
-              },
-            ),
-          );
-        return session.withElicitation
-          ? session.withElicitation(signal, call, holdForHumanInput)
-          : call();
-      })) as CallToolResult;
+      let validateResult: ((result: CallToolResult) => void) | undefined;
+      const result = (await runServerMcpRequest(
+        requestedServer,
+        (session, signal, holdForHumanInput) => {
+          validateResult = session.toolMetadata?.validatorForCall(toolName);
+          options?.assertCurrent?.();
+          const call = () =>
+            withGuardedFetchRequestAuthority(options?.assertCurrent, () =>
+              session.client.callTool(
+                {
+                  name: toolName,
+                  arguments: isRecord(input) ? input : {},
+                  ...(options?._meta ? { _meta: options._meta } : {}),
+                },
+                undefined,
+                {
+                  // The local deadline owns active work; the SDK bounds the total
+                  // call, including one shared allowance for pending human input.
+                  timeout:
+                    session.requestTimeoutMs +
+                    (session.withElicitation ? MCP_ELICITATION_TIMEOUT_MS : 0),
+                  signal,
+                },
+              ),
+            );
+          return session.withElicitation
+            ? session.withElicitation(signal, call, holdForHumanInput)
+            : call();
+        },
+      )) as CallToolResult;
       validateResult?.(result);
       return result;
     },
     async listTools(requestedServer, requestParams) {
-      const session = await getActiveSession(requestedServer);
-      return await runGuardedMcpRequest(session, (signal) =>
+      return await runServerMcpRequest(requestedServer, (session, signal) =>
         session.client.request(
           { method: "tools/list", params: requestParams },
           ListToolsResultSchema,
@@ -988,18 +1035,16 @@ function createServerMcpRuntime(
       );
     },
     async listResources(requestedServer, options) {
-      const session = await getActiveSession(requestedServer);
-      return await runGuardedServerRequest(
-        session,
-        async () => collectServerItems(session, "resources"),
+      return await runServerRequest(
+        requestedServer,
+        async (session) => collectServerItems(session, "resources"),
         options,
       );
     },
     async readResource(requestedServer, uri, options) {
-      const session = await getActiveSession(requestedServer);
-      return await runGuardedMcpRequest(
-        session,
-        (signal) =>
+      return await runServerMcpRequest(
+        requestedServer,
+        (session, signal) =>
           session.client.readResource(
             { uri, ...(options?._meta ? { _meta: options._meta } : {}) },
             { timeout: session.requestTimeoutMs, signal },
@@ -1008,8 +1053,7 @@ function createServerMcpRuntime(
       );
     },
     async listResourceTemplates(requestedServer, requestParams) {
-      const session = await getActiveSession(requestedServer);
-      return await runGuardedMcpRequest(session, (signal) =>
+      return await runServerMcpRequest(requestedServer, (session, signal) =>
         session.client.listResourceTemplates(requestParams, {
           timeout: session.requestTimeoutMs,
           signal,
@@ -1017,14 +1061,12 @@ function createServerMcpRuntime(
       );
     },
     async listPrompts(requestedServer) {
-      const session = await getActiveSession(requestedServer);
-      return await runGuardedServerRequest(session, async () =>
+      return await runServerRequest(requestedServer, async (session) =>
         collectServerItems(session, "prompts"),
       );
     },
     async getPrompt(requestedServer, name, args) {
-      const session = await getActiveSession(requestedServer);
-      return await runGuardedMcpRequest(session, (signal) =>
+      return await runServerMcpRequest(requestedServer, (session, signal) =>
         session.client.getPrompt(
           { name, ...(args ? { arguments: args } : {}) },
           { timeout: session.requestTimeoutMs, signal },

@@ -3065,137 +3065,176 @@ describe("disposeSession timeout", () => {
     },
   );
 
-  it(
-    "reconnects a stateful streamable-http server after its session expires",
-    { timeout: 15_000 },
-    async ({ signal }) => {
-      let activeServerSessionId: string | undefined;
-      let initializeCount = 0;
-      const callAttempts: Array<{ attempt: unknown; sessionId: string | undefined }> = [];
-      const staleTerminations: string[] = [];
-      const invalidAuthHeaders: Array<string | undefined> = [];
+  async function startStatefulStreamableHttpServer() {
+    const state = {
+      activeServerSessionId: undefined as string | undefined,
+      initializeCount: 0,
+      // Expire the active session before each of the next N tools/call requests.
+      expireBeforeCalls: 0,
+      // Holds initialize responses so a test can observe the reconnect window.
+      initializeGate: undefined as Promise<void> | undefined,
+      callAttempts: [] as Array<{ attempt: unknown; sessionId: string | undefined }>,
+      staleTerminations: [] as string[],
+      invalidAuthHeaders: [] as Array<string | undefined>,
+    };
+    const server = http.createServer((req, res) => {
+      const authHeader = req.headers["x-mcp-recovery"];
+      if (authHeader !== "proof") {
+        state.invalidAuthHeaders.push(
+          Array.isArray(authHeader) ? authHeader.join(",") : authHeader,
+        );
+        res.writeHead(401).end();
+        return;
+      }
+      if (req.method === "GET") {
+        res.writeHead(405).end();
+        return;
+      }
+      if (req.method === "DELETE") {
+        const sessionId = req.headers["mcp-session-id"];
+        if (typeof sessionId === "string" && sessionId !== state.activeServerSessionId) {
+          state.staleTerminations.push(sessionId);
+          res.writeHead(404).end("Session not found");
+          return;
+        }
+        res.writeHead(204).end();
+        return;
+      }
+      if (req.method !== "POST") {
+        res.writeHead(405).end();
+        return;
+      }
 
-      const server = http.createServer((req, res) => {
-        const authHeader = req.headers["x-mcp-recovery"];
-        if (authHeader !== "proof") {
-          invalidAuthHeaders.push(Array.isArray(authHeader) ? authHeader.join(",") : authHeader);
-          res.writeHead(401).end();
-          return;
-        }
-        if (req.method === "GET") {
-          res.writeHead(405).end();
-          return;
-        }
-        if (req.method === "DELETE") {
-          const sessionId = req.headers["mcp-session-id"];
-          if (typeof sessionId === "string" && sessionId !== activeServerSessionId) {
-            staleTerminations.push(sessionId);
-            res.writeHead(404).end("Session not found");
-            return;
-          }
-          res.writeHead(204).end();
-          return;
-        }
-        if (req.method !== "POST") {
-          res.writeHead(405).end();
-          return;
-        }
-
-        let body = "";
-        req.on("data", (chunk: Buffer) => {
-          body += chunk.toString();
-        });
-        req.on("end", () => {
-          const message = JSON.parse(body) as {
-            id?: number | string;
-            method?: string;
-            params?: { arguments?: { attempt?: unknown }; protocolVersion?: string };
-          };
-          if (message.method === "initialize") {
-            initializeCount += 1;
-            activeServerSessionId = `server-session-${initializeCount}`;
-            res.setHeader("mcp-session-id", activeServerSessionId);
-            res.setHeader("content-type", "application/json");
-            res.writeHead(200).end(
-              JSON.stringify({
-                jsonrpc: "2.0",
-                id: message.id,
-                result: {
-                  protocolVersion: message.params?.protocolVersion ?? "2025-03-26",
-                  capabilities: { tools: {} },
-                  serverInfo: { name: "stateful-recovery-server", version: "1.0.0" },
-                },
-              }),
-            );
-            return;
-          }
-
-          const requestSessionId = req.headers["mcp-session-id"];
-          const sessionId = typeof requestSessionId === "string" ? requestSessionId : undefined;
-          if (message.method === "tools/call") {
-            callAttempts.push({ attempt: message.params?.arguments?.attempt, sessionId });
-          }
-          if (!sessionId || sessionId !== activeServerSessionId) {
-            res.writeHead(404).end("Session not found");
-            return;
-          }
-          if (message.method === "notifications/initialized") {
-            res.writeHead(202).end();
-            return;
-          }
-          res.setHeader("mcp-session-id", sessionId);
+      let body = "";
+      req.on("data", (chunk: Buffer) => {
+        body += chunk.toString();
+      });
+      req.on("end", async () => {
+        const message = JSON.parse(body) as {
+          id?: number | string;
+          method?: string;
+          params?: { arguments?: { attempt?: unknown }; protocolVersion?: string };
+        };
+        if (message.method === "initialize") {
+          await state.initializeGate;
+          state.initializeCount += 1;
+          state.activeServerSessionId = `server-session-${state.initializeCount}`;
+          res.setHeader("mcp-session-id", state.activeServerSessionId);
           res.setHeader("content-type", "application/json");
-          if (message.method === "tools/list") {
-            res.writeHead(200).end(
-              JSON.stringify({
-                jsonrpc: "2.0",
-                id: message.id,
-                result: {
-                  tools: [{ name: "probe", description: "probe", inputSchema: { type: "object" } }],
-                },
-              }),
-            );
-            return;
-          }
-          if (message.method === "tools/call") {
-            res.writeHead(200).end(
-              JSON.stringify({
-                jsonrpc: "2.0",
-                id: message.id,
-                result: {
-                  content: [{ type: "text", text: `recovered ${sessionId}` }],
-                },
-              }),
-            );
-            return;
-          }
-          res.writeHead(405).end();
-        });
-      });
+          res.writeHead(200).end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: message.id,
+              result: {
+                protocolVersion: message.params?.protocolVersion ?? "2025-03-26",
+                capabilities: { tools: {} },
+                serverInfo: { name: "stateful-recovery-server", version: "1.0.0" },
+              },
+            }),
+          );
+          return;
+        }
 
-      await new Promise<void>((resolve) => {
-        server.listen(0, "127.0.0.1", resolve);
+        const requestSessionId = req.headers["mcp-session-id"];
+        const sessionId = typeof requestSessionId === "string" ? requestSessionId : undefined;
+        if (message.method === "tools/call") {
+          if (state.expireBeforeCalls > 0) {
+            state.expireBeforeCalls -= 1;
+            state.activeServerSessionId = undefined;
+          }
+          state.callAttempts.push({ attempt: message.params?.arguments?.attempt, sessionId });
+        }
+        if (!sessionId || sessionId !== state.activeServerSessionId) {
+          res.setHeader("content-type", "application/json");
+          res.writeHead(404).end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              error: { code: -32001, message: "Session not found" },
+              id: message.id,
+            }),
+          );
+          return;
+        }
+        if (message.method === "notifications/initialized") {
+          res.writeHead(202).end();
+          return;
+        }
+        res.setHeader("mcp-session-id", sessionId);
+        res.setHeader("content-type", "application/json");
+        if (message.method === "tools/list") {
+          res.writeHead(200).end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: message.id,
+              result: {
+                tools: [{ name: "probe", description: "probe", inputSchema: { type: "object" } }],
+              },
+            }),
+          );
+          return;
+        }
+        if (message.method === "tools/call") {
+          res.writeHead(200).end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: message.id,
+              result: {
+                content: [{ type: "text", text: `recovered ${sessionId}` }],
+              },
+            }),
+          );
+          return;
+        }
+        res.writeHead(405).end();
       });
-      const address = server.address() as { port: number };
+    });
+
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address() as { port: number };
+    return {
+      state,
+      url: `http://127.0.0.1:${address.port}/mcp`,
+      close: () =>
+        new Promise<void>((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()));
+        }),
+    };
+  }
+
+  function createStatefulRuntime(sessionId: string, url: string) {
+    return getOrCreateSessionMcpRuntime({
+      sessionId,
+      sessionKey: `agent:test:${sessionId}`,
+      workspaceDir: "/workspace",
+      cfg: {
+        mcp: {
+          servers: {
+            stateful: {
+              url,
+              transport: "streamable-http",
+              headers: { "x-mcp-recovery": "proof" },
+            },
+          },
+        },
+      },
+    });
+  }
+
+  it(
+    "replays a call once on a fresh session after its streamable-http session expires",
+    { timeout: 15_000 },
+    async () => {
+      const fixture = await startStatefulStreamableHttpServer();
+      const { state } = fixture;
       let runtime: SessionMcpRuntime | undefined;
 
       try {
-        runtime = await getOrCreateSessionMcpRuntime({
-          sessionId: "session-stateful-streamable-http-recovery",
-          sessionKey: "agent:test:session-stateful-streamable-http-recovery",
-          workspaceDir: "/workspace",
-          cfg: {
-            mcp: {
-              servers: {
-                stateful: {
-                  url: `http://127.0.0.1:${address.port}/mcp`,
-                  transport: "streamable-http",
-                  headers: { "x-mcp-recovery": "proof" },
-                },
-              },
-            },
-          },
-        });
+        runtime = await createStatefulRuntime(
+          "session-stateful-streamable-http-recovery",
+          fixture.url,
+        );
 
         expect((await runtime.getCatalog()).tools).toHaveLength(1);
         await expect(
@@ -3205,39 +3244,123 @@ describe("disposeSession timeout", () => {
         });
 
         // Restart invalidates the server-side session without closing the HTTP
-        // transport. A failed mutating request must never be silently replayed.
-        activeServerSessionId = undefined;
-        await expect(runtime.callTool("stateful", "probe", { attempt: "expired" })).rejects.toThrow(
-          "Session not found",
-        );
-        expect(runtime.peekCatalog()?.diagnostics).toEqual([
-          expect.objectContaining({ serverName: "stateful" }),
-        ]);
-
-        await runtime.getCatalog();
-        await waitForRuntimeState(
-          () => initializeCount === 2 && !runtime?.peekCatalog()?.diagnostics?.length,
-          "stateful MCP server to replace its expired HTTP session",
-          signal,
-        );
+        // transport. The server rejects an unknown session before dispatch, so
+        // the call is replayed exactly once on the replacement session.
+        state.expireBeforeCalls = 1;
+        await expect(
+          runtime.callTool("stateful", "probe", { attempt: "expired" }),
+        ).resolves.toMatchObject({
+          content: [{ type: "text", text: "recovered server-session-2" }],
+        });
+        expect(state.initializeCount).toBe(2);
+        expect(runtime.peekCatalog()?.diagnostics).toBeUndefined();
 
         await expect(
           runtime.callTool("stateful", "probe", { attempt: "after" }),
         ).resolves.toMatchObject({
           content: [{ type: "text", text: "recovered server-session-2" }],
         });
-        expect(callAttempts).toEqual([
+        expect(state.callAttempts).toEqual([
           { attempt: "before", sessionId: "server-session-1" },
           { attempt: "expired", sessionId: "server-session-1" },
+          { attempt: "expired", sessionId: "server-session-2" },
           { attempt: "after", sessionId: "server-session-2" },
         ]);
-        expect(staleTerminations).toEqual(["server-session-1"]);
-        expect(invalidAuthHeaders).toEqual([]);
+        expect(state.staleTerminations).toEqual(["server-session-1"]);
+        expect(state.invalidAuthHeaders).toEqual([]);
       } finally {
         await runtime?.dispose();
-        await new Promise<void>((resolve, reject) => {
-          server.close((error) => (error ? reject(error) : resolve()));
+        await fixture.close();
+      }
+    },
+  );
+
+  it(
+    "surfaces a second consecutive streamable-http session expiry without looping",
+    { timeout: 15_000 },
+    async () => {
+      const fixture = await startStatefulStreamableHttpServer();
+      const { state } = fixture;
+      let runtime: SessionMcpRuntime | undefined;
+
+      try {
+        runtime = await createStatefulRuntime(
+          "session-stateful-streamable-http-double-expiry",
+          fixture.url,
+        );
+        expect((await runtime.getCatalog()).tools).toHaveLength(1);
+
+        state.expireBeforeCalls = 2;
+        await expect(runtime.callTool("stateful", "probe", { attempt: "expired" })).rejects.toThrow(
+          "Session not found",
+        );
+        expect(state.callAttempts).toEqual([
+          { attempt: "expired", sessionId: "server-session-1" },
+          { attempt: "expired", sessionId: "server-session-2" },
+        ]);
+        expect(state.initializeCount).toBe(2);
+
+        // The second expiry recycled again; the next call reaches a third session.
+        await expect(
+          runtime.callTool("stateful", "probe", { attempt: "after" }),
+        ).resolves.toMatchObject({
+          content: [{ type: "text", text: "recovered server-session-3" }],
         });
+        expect(state.callAttempts).toHaveLength(3);
+      } finally {
+        await runtime?.dispose();
+        await fixture.close();
+      }
+    },
+  );
+
+  it(
+    "waits for an in-flight streamable-http reconnect instead of reporting not connected",
+    { timeout: 15_000 },
+    async ({ signal }) => {
+      const fixture = await startStatefulStreamableHttpServer();
+      const { state } = fixture;
+      let runtime: SessionMcpRuntime | undefined;
+      const gate = createDeferred<void>();
+
+      try {
+        runtime = await createStatefulRuntime(
+          "session-stateful-streamable-http-concurrent",
+          fixture.url,
+        );
+        expect((await runtime.getCatalog()).tools).toHaveLength(1);
+
+        // Hold the replacement initialize so the second call lands mid-reconnect.
+        state.initializeGate = gate.promise;
+        state.expireBeforeCalls = 1;
+        const expired = runtime.callTool("stateful", "probe", { attempt: "expired" });
+        await waitForRuntimeState(
+          () => state.callAttempts.length === 1 && Boolean(runtime?.peekCatalog()?.diagnostics),
+          "the expired session to start recycling",
+          signal,
+        );
+        const concurrent = runtime.callTool("stateful", "probe", { attempt: "concurrent" });
+        gate.resolve();
+
+        await expect(expired).resolves.toMatchObject({
+          content: [{ type: "text", text: "recovered server-session-2" }],
+        });
+        await expect(concurrent).resolves.toMatchObject({
+          content: [{ type: "text", text: "recovered server-session-2" }],
+        });
+        expect(state.initializeCount).toBe(2);
+        expect(state.callAttempts).toEqual(
+          expect.arrayContaining([
+            { attempt: "expired", sessionId: "server-session-1" },
+            { attempt: "expired", sessionId: "server-session-2" },
+            { attempt: "concurrent", sessionId: "server-session-2" },
+          ]),
+        );
+        expect(state.callAttempts).toHaveLength(3);
+      } finally {
+        gate.resolve();
+        await runtime?.dispose();
+        await fixture.close();
       }
     },
   );
