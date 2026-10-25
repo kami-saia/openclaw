@@ -158,7 +158,23 @@ export function createCompactTool(options: {
             : 0,
         };
 
-        const preparation = prep(pathEntries, settings);
+        const rawPreparation = prep(pathEntries, settings);
+        const preparation =
+          rawPreparation &&
+          typeof rawPreparation === "object" &&
+          "ok" in rawPreparation &&
+          typeof (rawPreparation as { ok?: unknown }).ok === "boolean"
+            ? (rawPreparation as { ok: true; value: typeof rawPreparation }).ok
+              ? (
+                  rawPreparation as {
+                    ok: true;
+                    value: { firstKeptEntryId: string; tokensBefore: number } | undefined;
+                  }
+                ).value
+              : (() => {
+                  throw (rawPreparation as { ok: false; error: unknown }).error;
+                })()
+            : (rawPreparation as { firstKeptEntryId: string; tokensBefore: number } | undefined);
         if (!preparation) {
           return {
             content: [

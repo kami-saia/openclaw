@@ -416,5 +416,22 @@ describe("compact-tool", () => {
       });
       expect(managed.compactions).toHaveLength(0);
     });
+
+    it("unwraps CoreResult<CompactionPreparation> returned by prepareCompaction", async () => {
+      const { tool, managed } = makeTool(
+        {},
+        { ok: true, value: { firstKeptEntryId: "e2", tokensBefore: 54321 } },
+      );
+      const { text } = await run(tool!, { summary: "wrapped-result" });
+      expect(text).toContain("Compaction complete. tokensBefore=54321");
+      expect(managed.compactions).toEqual([
+        {
+          summary: "wrapped-result",
+          firstKeptEntryId: "e2",
+          tokensBefore: 54321,
+          fromHook: true,
+        },
+      ]);
+    });
   });
 });
