@@ -14,6 +14,7 @@ import {
   model,
   reply,
   TEST_USAGE,
+  toolResultMessages,
   user,
 } from "./agent-loop.test-support.js";
 import { Agent } from "./agent.js";
@@ -178,6 +179,52 @@ describe("Agent lifecycle and continuation", () => {
 });
 
 describe("agentLoop streaming updates", () => {
+  it("does not inspect prior content when forwarding unguarded provider snapshots", async () => {
+    const message = makeAssistantMessage([{ type: "thinking", thinking: "synthetic thought" }]);
+    let blockReads = 0;
+    message.content = new Proxy(message.content, {
+      get(target, key, receiver) {
+        if (key === "0") {
+          blockReads++;
+        }
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const readsAtUpdate: number[] = [];
+    await runAgentLoop(
+      [user("hello")],
+      { systemPrompt: "", messages: [] },
+      config,
+      (event) => {
+        if (event.type === "message_start" && event.message.role === "assistant") {
+          blockReads = 0;
+        }
+        if (event.type === "message_update") {
+          readsAtUpdate.push(blockReads);
+          expect(event.message).not.toBe(message);
+          expect(event.assistantMessageEvent).toMatchObject({
+            type: "thinking_delta",
+            contentIndex: 0,
+            delta: "synthetic thought",
+            partial: message,
+          });
+        }
+      },
+      undefined,
+      () =>
+        reply(message, [
+          { type: "start", partial: message },
+          {
+            type: "thinking_delta",
+            contentIndex: 0,
+            delta: "synthetic thought",
+            partial: message,
+          },
+        ]),
+    );
+    expect(readsAtUpdate).toEqual([0]);
+  });
+
   it("rebuilds assistant message snapshots for text deltas without partial snapshots", async () => {
     const firstDeltaConsumed = createDeferred();
     const streamFn: StreamFn = () => {
@@ -434,15 +481,7 @@ describe("agentLoop tool termination", () => {
           { id: "commit-third", started: false },
         ]),
       );
-      const toolResults = events
-        .filter(
-          (
-            event,
-          ): event is Extract<AgentEvent, { type: "message_end" }> & {
-            message: { role: "toolResult" };
-          } => event.type === "message_end" && event.message.role === "toolResult",
-        )
-        .map((event) => event.message);
+      const toolResults = toolResultMessages(events);
       expect(toolResults.map((message) => message.toolCallId)).toEqual([
         "commit-first",
         "commit-second",
@@ -682,15 +721,7 @@ describe("agentLoop tool termination", () => {
     expect(streamCalls).toBe(1);
     expect(resolverCalls).toEqual(["d_first_tool"]);
     expect(executed).toEqual([]);
-    const toolResults = events
-      .filter(
-        (
-          event,
-        ): event is Extract<AgentEvent, { type: "message_end" }> & {
-          message: { role: "toolResult" };
-        } => event.type === "message_end" && event.message.role === "toolResult",
-      )
-      .map((event) => event.message);
+    const toolResults = toolResultMessages(events);
     expect(toolResults).toHaveLength(3);
     for (const toolResult of toolResults) {
       expect(toolResult).toMatchObject({
@@ -1675,11 +1706,7 @@ describe("agentLoop argument-validation admission", () => {
       ],
     ]);
     expect(executed).toEqual([]);
-    expect(
-      events.flatMap((event) =>
-        event.type === "message_end" && event.message.role === "toolResult" ? [event.message] : [],
-      ),
-    ).toMatchObject([
+    expect(toolResultMessages(events)).toMatchObject([
       {
         toolCallId: "invalid-1",
         isError: true,

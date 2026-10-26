@@ -28,6 +28,7 @@ const BUNDLED_TYPED_HOOK_REGISTRATION_GUARDS = {
   "extensions/feishu/subagent-hooks-api.ts": ["subagent_delivery_target", "subagent_ended"],
   // FORK: fork-guard is a fork-only bundled plugin; declare its typed hook here.
   "extensions/fork-guard/index.ts": ["before_tool_call"],
+  "extensions/knowledge/src/memory-index-hook.ts": ["before_prompt_build"],
   "extensions/matrix/subagent-hooks-api.ts": ["subagent_delivery_target", "subagent_ended"],
   "extensions/mcp-events/index.ts": ["cron_changed", "cron_reconciled"],
   "extensions/memory-core/src/dreaming.ts": ["before_agent_reply", "gateway_start"],

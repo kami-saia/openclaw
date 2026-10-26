@@ -741,6 +741,8 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["chat.pendingInputs.dismiss", "chat", "operator.write", "2026.10", OWN_SESSION_WRITE],
   ["update.recovery.cleanup", "update", "operator.admin", "2026.10", CONTROL_PLANE_WRITE],
   ["diagnostics.capabilities", "diagnostics", "operator.read", "2026.10"],
+  ["cron.bind", "cron", "operator.admin", "2026.10", CONTROL_PLANE_WRITE],
+  ["talk.client.say", "talk", "operator.talk", "2026.10"],
   // FORK: tts.stream mints one-off streaming voice URLs for node voice.play.
   // The handler lives in server-methods/tts.ts; without this row the registry
   // skips it and dispatch reports `unknown method: tts.stream`.
