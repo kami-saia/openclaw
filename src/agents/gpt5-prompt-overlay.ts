@@ -112,6 +112,12 @@ export function resolveGpt5SystemPromptContribution(params: {
   const mode = resolveGpt5PromptOverlayMode(params.config, params.legacyPluginConfig, {
     providerId: params.providerId,
   });
+  // FORK: on GitHub Copilot, personality=off drops the whole GPT-5 overlay,
+  // including the shared behavior contract (persona_latch etc.). Our persona
+  // and execution rules come from SOUL.md/AGENTS.md, not provider defaults.
+  if (mode === "off" && normalizeOptionalLowercaseString(params.providerId) === "github-copilot") {
+    return undefined;
+  }
   return {
     stablePrefix: GPT5_BEHAVIOR_CONTRACT,
     sectionOverrides:
