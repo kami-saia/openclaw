@@ -352,8 +352,9 @@ describe("resolveBootstrapFilesForRun", () => {
             expect(
               files.filter((file) => file.path !== nestedPath).map((file) => file.name),
             ).toEqual(
+              // FORK: subagents also get SOUL.md + IDENTITY.md (SUBAGENT_BOOTSTRAP_ALLOWLIST).
               mode === "subagent"
-                ? ["AGENTS.md"]
+                ? ["AGENTS.md", "SOUL.md", "IDENTITY.md"]
                 : ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md"],
             );
           }
