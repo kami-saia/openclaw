@@ -83,6 +83,7 @@ import {
 import { resolveRoutedDeliveryThreadId } from "./routed-delivery-thread.js";
 import { resolveSourceReplyExpectation } from "./source-reply-delivery-mode.js";
 import { readChannelSourceTurnId, resolveReplyAdmissionRunId } from "./source-turn-id.js";
+import { allowsOwnerSystemWakeSteer } from "./system-wake-steer.js";
 import { createTypingSignaler } from "./typing-mode.js";
 export async function runReplyAgent(
   params: RunReplyAgentParams,
@@ -283,7 +284,8 @@ export async function runReplyAgent(
       isActiveSteer &&
       messageInjectionDisposition === "none" &&
       terminalDeliveryBlockReason !== undefined &&
-      terminalDeliveryBlockReason !== "stale-claim";
+      terminalDeliveryBlockReason !== "stale-claim" &&
+      !allowsOwnerSystemWakeSteer(terminalDeliveryBlockReason, followupRun, activeReplyOperation);
 
     // Direct question creators can attest their caller before publishing a reply operation.
     const questionInput: Awaited<ReturnType<typeof runReplyQuestionInput>> =
