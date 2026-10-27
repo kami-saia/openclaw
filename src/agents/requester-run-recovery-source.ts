@@ -1,4 +1,6 @@
 import type { InternalSessionEntry } from "../config/sessions/types.js";
+import { captureQueuedOperatorRecoverySource } from "../gateway/operator-run-recovery-source.js";
+import type { AdmittedRunOperatorAuthority } from "./admitted-run-context.js";
 import {
   captureRequesterOrigin,
   decodeRequesterOrigin,
@@ -14,7 +16,26 @@ export type RestartRecoveryRequesterSource = Readonly<{
   lifecycleRevision?: string;
   sourceRunId: string;
   requesterOrigin: RequesterOrigin;
+  /**
+   * FORK: linked channel operator basis for the same requester. Restoration re-prepares
+   * the exact authorization reference under current config; this is never a grant.
+   */
+  channelOperator?: unknown;
 }>;
+
+function captureChannelOperatorBasis(
+  authority: AdmittedRunOperatorAuthority | undefined,
+  requesterOrigin: RequesterOrigin,
+): { channelOperator?: unknown } {
+  if (!authority || !requesterOrigin.operatorProfileId) {
+    return {};
+  }
+  if (requesterOrigin.operatorProfileId !== authority.profileId) {
+    return {};
+  }
+  const captured = captureQueuedOperatorRecoverySource(authority);
+  return captured?.kind === "channel" ? { channelOperator: captured } : {};
+}
 
 export function createRestartRecoveryRequesterSource(params: {
   requesterOrigin?: RequesterOrigin;
@@ -22,6 +43,8 @@ export function createRestartRecoveryRequesterSource(params: {
   agentId: string;
   sessionKey: string;
   sourceRunId: string;
+  /** FORK: the linked channel authority admitting this exact requester turn. */
+  channelOperatorAuthority?: AdmittedRunOperatorAuthority;
 }): RestartRecoveryRequesterSource | undefined {
   const requesterOrigin = params.requesterOrigin && captureRequesterOrigin(params);
   if (
@@ -38,19 +61,23 @@ export function createRestartRecoveryRequesterSource(params: {
     lifecycleRevision: params.entry.lifecycleRevision,
     sourceRunId: params.sourceRunId,
     requesterOrigin,
+    ...captureChannelOperatorBasis(params.channelOperatorAuthority, requesterOrigin),
   };
   return Buffer.byteLength(JSON.stringify(source), "utf8") <= 65_536
     ? Object.freeze(source)
     : undefined;
 }
 
-/** Only a private current session claim supplies this source; transcript copies cannot. */
-export function readRestartRecoveryRequesterSource(params: {
+type RequesterSourceClaim = {
   entry: InternalSessionEntry;
   agentId: string;
   sessionKey: string;
   sourceRunId: string;
-}): RequesterOrigin | undefined {
+};
+
+function readCurrentRequesterSource(
+  params: RequesterSourceClaim,
+): RestartRecoveryRequesterSource | undefined {
   const source = params.entry.restartRecoveryRequesterSource;
   if (
     !source ||
@@ -62,8 +89,30 @@ export function readRestartRecoveryRequesterSource(params: {
   ) {
     return undefined;
   }
+  return source;
+}
+
+/** Only a private current session claim supplies this source; transcript copies cannot. */
+export function readRestartRecoveryRequesterSource(
+  params: RequesterSourceClaim,
+): RequesterOrigin | undefined {
+  const source = readCurrentRequesterSource(params);
+  if (!source) {
+    return undefined;
+  }
   const requesterOrigin = decodeRequesterOrigin(source.requesterOrigin);
   return requesterOrigin && resolveRequesterPrincipalKey({ requesterOrigin })
     ? requesterOrigin
+    : undefined;
+}
+
+/** FORK: the undecoded channel operator basis bound to the same exact current claim. */
+export function readRestartRecoveryChannelOperatorSource(
+  params: RequesterSourceClaim,
+): { profileId: string; source: unknown } | undefined {
+  const source = readCurrentRequesterSource(params);
+  const profileId = source?.requesterOrigin.operatorProfileId;
+  return source?.channelOperator !== undefined && profileId
+    ? { profileId, source: source.channelOperator }
     : undefined;
 }

@@ -316,11 +316,13 @@ export function createGatewayInstanceRuntime(
       let delegatedToolPolicyHandoffId: string | undefined;
       try {
         const operatorAuthority =
-          restored?.operator?.authority ?? dispatchOptions.operatorRunAuthority;
+          restored?.operator?.authority ??
+          restored?.channelOperator?.authority ??
+          dispatchOptions.operatorRunAuthority;
         if (operatorAuthority) {
           assertAdmittedRunOperatorAuthority(operatorAuthority);
           operatorAuthority.assertCurrent();
-          if (!restored?.operator) {
+          if (!restored?.operator && !restored?.channelOperator) {
             releaseOperatorAuthority = operatorAuthority.retain?.();
           }
         }
@@ -458,6 +460,7 @@ export function createGatewayInstanceRuntime(
         cancelSubagentCompletionToolHandoff(delegatedToolPolicyHandoffId);
         releaseOperatorAuthority?.();
         restored?.operator?.release();
+        restored?.channelOperator?.release();
         restored?.parentSource?.release();
       }
     },
