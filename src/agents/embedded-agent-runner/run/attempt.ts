@@ -383,7 +383,8 @@ async function runEmbeddedAttemptOwned(
     );
     // Close the inclusive checkpoint; the owner spans exclude preparation admission.
     prepStages.mark("tool-preparation");
-    const { effectiveTools, toolSearch, toolSearchRunPlan } = preparedToolCatalog;
+    const { effectiveTools, toolSearch, toolSearchRunPlan, deferredDirectoryToolsCallable } =
+      preparedToolCatalog;
     toolSearchCatalogApplied = toolSearch.catalogRegistered;
     const preparedSystemPrompt = await prepare("attempt.system-prompt", () =>
       prepareEmbeddedAttemptSystemPrompt({
@@ -400,6 +401,7 @@ async function runEmbeddedAttemptOwned(
         webSearchUnconfigured: () => preparedToolBase.webSearchUnconfigured,
         toolSearchCatalogRef,
         toolSearchDirectoryEnabled: toolSearchControlsEnabledForRun && toolSearch.catalogRegistered,
+        deferredToolsDirectlyCallable: deferredDirectoryToolsCallable,
         toolSearchRuntimeConfig,
       }),
     );

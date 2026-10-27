@@ -25,8 +25,8 @@ import {
 } from "../providers/tool-result-text.js";
 import { shortHash } from "../utils/hash.js";
 import {
+  prepareSystemPrompt,
   splitSystemPromptIdentityBoundary,
-  stripSystemPromptCacheBoundary,
 } from "../utils/system-prompt-cache-boundary.js";
 import {
   buildOpenAIResponsesCompactionReplayPlan,
@@ -54,6 +54,7 @@ import {
   providerReplayContextMatches,
   type ProviderReplayContext,
 } from "./provider-replay-context.js";
+import { buildResponsesInputImage } from "./responses-image-payload-sanitizer.js";
 import { sanitizeTransportPayloadText } from "./transport-stream-shared.js";
 
 function resolveResponsesInstructionRole(model: Model): "developer" | "system" {
@@ -352,15 +353,8 @@ function convertResponsesMessagesWithStyle(
   const includeSystemPrompt = options?.includeSystemPrompt ?? true;
   if (includeSystemPrompt && context.systemPrompt) {
     const instructionRole = resolveResponsesInstructionRole(model);
-    const pushSystemPromptMessage = (role: "system" | "developer", text: string) => {
-      messages.push(
-        buildResponsesInputMessage(role, [
-          {
-            type: "input_text",
-            text: sanitizeTransportPayloadText(stripSystemPromptCacheBoundary(text)),
-          },
-        ]),
-      );
+    const pushSystemPromptMessage = (role: "system" | "developer", instructions: string) => {
+      messages.push(buildResponsesInputMessage(role, [{ type: "input_text", text: instructions }]));
     };
     // FORK: when the route exposes a role hierarchy, send the constitutive
     // identity half at `system` and operational guidance at `developer`, so the
@@ -374,10 +368,13 @@ function convertResponsesMessagesWithStyle(
         ? splitSystemPromptIdentityBoundary(context.systemPrompt)
         : undefined;
     if (identitySplit) {
-      pushSystemPromptMessage("system", identitySplit.identity);
-      pushSystemPromptMessage("developer", identitySplit.operational);
+      pushSystemPromptMessage("system", prepareSystemPrompt(identitySplit.identity).instructions);
+      pushSystemPromptMessage("developer", prepareSystemPrompt(identitySplit.operational).instructions);
     } else {
-      pushSystemPromptMessage(instructionRole, context.systemPrompt);
+      pushSystemPromptMessage(
+        instructionRole,
+        prepareSystemPrompt(context.systemPrompt, context.preparedSystemPrompt).instructions,
+      );
     }
   }
   // The compact endpoint's output is already canonical provider input, not
@@ -451,11 +448,7 @@ function convertResponsesMessagesWithStyle(
               msg.content.map((item) =>
                 item.type === "text"
                   ? { type: "input_text", text: sanitizeTransportPayloadText(item.text) }
-                  : {
-                      type: "input_image",
-                      detail: "auto",
-                      image_url: `data:${item.mimeType};base64,${item.data}`,
-                    },
+                  : buildResponsesInputImage(item),
               ) as ResponseInputMessageContentList
             ).filter(
               (item) =>
@@ -629,11 +622,7 @@ function convertResponsesMessagesWithStyle(
         let hasExplicitText = false;
         for (const item of msg.content) {
           if (isImageWithMediaPayload(item)) {
-            parts.push({
-              type: "input_image",
-              detail: "auto",
-              image_url: `data:${item.mimeType};base64,${item.data}`,
-            });
+            parts.push(buildResponsesInputImage(item));
           } else if (hasText && item.type === "text") {
             const text = extractToolResultBlockText(item);
             if (text) {

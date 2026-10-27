@@ -1,11 +1,11 @@
 import { appendFileSync, readFileSync } from "node:fs";
+import type { Context } from "@openclaw/llm-core";
 import type { EasyInputMessage } from "openai/resources/responses/responses.js";
-import { stripSystemPromptCacheBoundary } from "../utils/system-prompt-cache-boundary.js";
+import { prepareSystemPrompt } from "../utils/system-prompt-cache-boundary.js";
 import {
   responsesPromptObserver,
   type ResponsesPromptObservation,
 } from "./openai-responses-contracts.js";
-import { sanitizeTransportPayloadText } from "./transport-stream-shared.js";
 
 type ResponsesPromptRequest = { instructions?: unknown; input?: unknown };
 type ResponsesPromptMetadata = Pick<ResponsesPromptObservation, "egress" | "payloadVariant">;
@@ -138,18 +138,16 @@ function dumpResponsesEgressPayload(
   }
 }
 
-export function createResponsesPromptEgressObserver(
-  options: object | undefined,
-  assembledPrompt: string | undefined,
-) {
+export function createResponsesPromptEgressObserver(options: object | undefined, context: Context) {
   const observer = options ? responsesPromptObserver.get(options) : undefined;
   const dumpEnabled = readEgressDumpPath() !== undefined;
   if (!observer && !dumpEnabled) {
     return undefined;
   }
-  const expectedPrompt = sanitizeTransportPayloadText(
-    stripSystemPromptCacheBoundary(assembledPrompt ?? ""),
-  );
+  const expectedPrompt = prepareSystemPrompt(
+    context.systemPrompt ?? "",
+    context.preparedSystemPrompt,
+  ).instructions;
   return (request: ResponsesPromptRequest, metadata: ResponsesPromptMetadata) => {
     dumpResponsesEgressPayload(request, metadata);
     if (!observer) {
