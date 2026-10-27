@@ -1,4 +1,5 @@
 import type { OpenClawStateDatabase } from "../../state/openclaw-state-db-contract.js";
+import { loadDeliveryQueueEntryInDatabase } from "../delivery-queue-sqlite-bound.js";
 import { getDeliveryQueueEntriesOwnersInDatabase } from "../delivery-queue-sqlite.kernel.js";
 import {
   LEGACY_OUTBOUND_DELIVERY_QUEUE_NAME,
@@ -33,6 +34,34 @@ export function resolveOutboundDeliveryQueueNameInDatabase(
   return owners?.keys().next().value ?? OUTBOUND_DELIVERY_QUEUE_NAME;
 }
 
+/**
+ * FORK: a preparation still in "claimed" state whose lease has expired never
+ * started modifiers or transport, and the next claim reclaims it outright
+ * (see claimPreparation). It is not live custody. Counting it as a pending
+ * owner made restart recovery defer forever on released claims (lease 0),
+ * which wedged the session and failed every inbound turn behind it.
+ */
+function isAbandonedPreparationClaim(
+  database: OpenClawStateDatabase,
+  queueName: string,
+  id: string,
+  status: string,
+): boolean {
+  if (queueName !== OUTBOUND_DELIVERY_PREPARATION_QUEUE_NAME || status !== "pending") {
+    return false;
+  }
+  const entry = loadDeliveryQueueEntryInDatabase(database, queueName, id, "pending") as {
+    preparationState?: unknown;
+    preparationLeaseExpiresAt?: unknown;
+  } | null;
+  if (!entry || entry.preparationState !== "claimed") {
+    return false;
+  }
+  const lease =
+    typeof entry.preparationLeaseExpiresAt === "number" ? entry.preparationLeaseExpiresAt : 0;
+  return lease <= Date.now();
+}
+
 export function findDeliveryIntentOwnersInDatabase(
   database: OpenClawStateDatabase,
   params: { ids: readonly string[] },
@@ -51,6 +80,9 @@ export function findDeliveryIntentOwnersInDatabase(
     }
     for (const [queueName, namespace] of OUTBOUND_DELIVERY_NAMESPACE_DESCRIPTORS) {
       const owner = namespaces?.get(queueName);
+      if (owner && isAbandonedPreparationClaim(database, queueName, id, owner.status)) {
+        continue;
+      }
       if (owner) {
         return { queueName, namespace, retired: namespace !== "prepared", ...owner };
       }

@@ -185,6 +185,29 @@ describe("outbound delivery namespace ownership", () => {
     expect(getDeliveryQueueEntryStatus(LEGACY_QUEUE, ids.expired, stateDir)).toBeUndefined();
   });
 
+  it("ignores abandoned claimed preparations with an expired lease", () => {
+    const base = { enqueuedAt: 1, retryCount: 0, preparationState: "claimed" };
+    seed(PREPARATION_QUEUE, { ...base, id: "released", preparationLeaseExpiresAt: 0 });
+    seed(PREPARATION_QUEUE, {
+      ...base,
+      id: "live",
+      preparationOwnerId: "owner",
+      preparationLeaseExpiresAt: Date.now() + 60_000,
+    });
+    seed(PREPARATION_QUEUE, {
+      ...base,
+      id: "started",
+      preparationState: "modifiers_started",
+      preparationLeaseExpiresAt: 0,
+    });
+    const [released, live, started] = findDeliveryIntentOwnersInDatabase(database(), {
+      ids: ["released", "live", "started"],
+    });
+    expect(released).toBeNull();
+    expect(live).toMatchObject({ namespace: "preparing", status: "pending" });
+    expect(started).toMatchObject({ namespace: "preparing", status: "pending" });
+  });
+
   it.each(["insert-once", "staged", "move"] as const)(
     "expires bounded failed ownership inside %s admission",
     (mode) => {
