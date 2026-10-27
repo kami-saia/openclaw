@@ -62,6 +62,17 @@ describe("GPT-5 prompt overlay runtime contract", () => {
     );
   });
 
+  it("honours the OpenAI personality switch for GitHub Copilot GPT-5 models (fork)", () => {
+    const contribution = resolveGpt5SystemPromptContribution({
+      providerId: "github-copilot",
+      modelId: GPT5_CONTRACT_MODEL_ID,
+      config: openAiPluginPersonalityConfig("off"),
+    });
+
+    expect(contribution?.stablePrefix).toContain("<persona_latch>");
+    expect(contribution?.sectionOverrides).toStrictEqual({});
+  });
+
   it("keeps Codex virtual providers in the OpenAI-family personality fallback scope", () => {
     const contribution = resolveGpt5SystemPromptContribution({
       providerId: CODEX_CONTRACT_PROVIDER_ID,

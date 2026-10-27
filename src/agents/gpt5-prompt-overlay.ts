@@ -14,6 +14,9 @@ const OPENAI_FAMILY_GPT5_PROMPT_OVERLAY_PROVIDERS = new Set([
   "openai",
   "azure-openai",
   "azure-openai-responses",
+  // FORK: Copilot serves the same GPT-5 models; honour the OpenAI plugin
+  // `personality` switch there too so `off` really removes the style layer.
+  "github-copilot",
 ]);
 
 /** @deprecated OpenAI/Codex provider-owned prompt overlay helper; do not use from third-party plugins. */
