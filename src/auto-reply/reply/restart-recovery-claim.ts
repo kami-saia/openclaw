@@ -435,22 +435,24 @@ export function createReplyRestartRecoveryClaimController(
       }
     }
     const claimSourceRunId = deliveryContext && sourceTurnId ? sourceTurnId : recoveryRunId;
-    const sourceClaim = { entry, agentId: params.agentId, sessionKey: params.sessionKey };
     const operatorSource = sourceTurnId
       ? undefined
       : createRestartRecoveryOperatorSource({
-          ...sourceClaim,
           authority: params.operatorAuthority,
+          entry,
+          agentId: params.agentId,
+          sessionKey: params.sessionKey,
           sourceRunId: recoveryRunId,
           inputProvenance: params.inputProvenance,
           requesterOrigin,
         });
     // Internal children retain requester custody even without an outward delivery route.
     const requesterSource = createRestartRecoveryRequesterSource({
-      ...sourceClaim,
       requesterOrigin,
+      entry,
+      agentId: params.agentId,
+      sessionKey: params.sessionKey,
       sourceRunId: claimSourceRunId,
-      channelOperatorAuthority: sourceTurnId ? params.operatorAuthority : undefined, // FORK
     });
     const requesterChannel = requesterSource?.requesterOrigin.messageProvider;
     if (

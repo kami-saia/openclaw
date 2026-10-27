@@ -5,10 +5,7 @@ import {
 } from "../agents/admitted-run-context.js";
 import { restoreOperatorModelPolicySnapshot } from "../agents/operator-model-policy.js";
 import type { RequesterOrigin } from "../agents/requester-origin.js";
-import {
-  readRestartRecoveryChannelOperatorSource,
-  readRestartRecoveryRequesterSource,
-} from "../agents/requester-run-recovery-source.js";
+import { readRestartRecoveryRequesterSource } from "../agents/requester-run-recovery-source.js";
 import { prepareCommandOwnerAuthority } from "../auto-reply/command-auth.js";
 import { readSessionEntryReadOnlyInWorker } from "../config/sessions/session-entry-read-runtime.js";
 import type { SessionSourceAssertion } from "../config/sessions/session-source-authority.js";
@@ -466,8 +463,6 @@ export async function restoreGatewayRunRecovery(params: {
   operator?: RestoredGatewayOperatorAuthority;
   requesterOrigin?: RequesterOrigin;
   parentSource?: { source: SessionSourceAssertion; release: () => void };
-  /** FORK: linked channel requester authority, re-admitted under current policy. */
-  channelOperator?: Pick<RestoredGatewayOperatorAuthority, "authority" | "release">;
 }> {
   const target = { ...params.target };
   let entry: InternalSessionEntry | undefined;
@@ -580,32 +575,6 @@ export async function restoreGatewayRunRecovery(params: {
       requesterOrigin,
       operatorSource: operator ? { ...target, authority: operator.authority } : undefined,
     });
-    // FORK: a channel turn has no gateway operator source; its requester claim
-    // carries the linked channel basis, revalidated exactly like a queued launch.
-    let channelOperator:
-      | Pick<RestoredGatewayOperatorAuthority, "authority" | "release">
-      | undefined;
-    const channelBasis =
-      !operator && requesterOrigin?.operatorProfileId
-        ? readRestartRecoveryChannelOperatorSource({ ...target, entry })
-        : undefined;
-    if (channelBasis && channelBasis.profileId === requesterOrigin?.operatorProfileId) {
-      try {
-        const restoredChannel = await restoreGatewayQueuedOperatorRecovery({
-          source: channelBasis.source,
-          context: params.context,
-          assertCurrent: params.assertCurrent,
-        });
-        if (restoredChannel.authority.profileId !== channelBasis.profileId) {
-          restoredChannel.release();
-        } else {
-          channelOperator = restoredChannel;
-        }
-      } catch (error) {
-        parentSource?.release();
-        throw error;
-      }
-    }
     if (operator) {
       recoverySources.set(operator.authority, {
         target,
@@ -615,7 +584,7 @@ export async function restoreGatewayRunRecovery(params: {
         }),
       });
     }
-    return { operator, requesterOrigin, parentSource, channelOperator };
+    return { operator, requesterOrigin, parentSource };
   } catch (error) {
     operator?.release();
     throw error;
