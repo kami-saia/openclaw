@@ -358,6 +358,11 @@ export function hasReplySteeringRequesterMismatch(
     messageChannel: followupRun.originatingChannel,
     operatorAuthority: followupRun.operatorAuthority,
   });
+  // FORK: a turn with no human requester (exec-completion/system wake) may be
+  // steered by the verified owner; other humans still need collaborative steering.
+  if (!operation?.requesterPrincipalKey && followupRun.run.senderIsOwner === true) {
+    return false;
+  }
   return (
     followupRun.currentInboundEventKind !== "room_event" &&
     (!followupRun.run.inputProvenance ||
