@@ -40,7 +40,8 @@ type BrowserExtractCompletionDeps = {
   extractAssistantText: typeof import("openclaw/plugin-sdk/simple-completion-runtime").extractAssistantText;
   getRuntimeConfig: typeof getRuntimeConfig;
   htmlToMarkdown: typeof import("openclaw/plugin-sdk/web-content-extractor").htmlToMarkdown;
-  normalizeWhitespace: typeof import("openclaw/plugin-sdk/web-content-extractor").normalizeWhitespace;
+  // FORK: upstream dropped this SDK export (beff1f23000); keep the dep shape local.
+  normalizeWhitespace: (value: string) => string;
   prepareSimpleCompletionModelForAgent: typeof import("openclaw/plugin-sdk/simple-completion-runtime").prepareSimpleCompletionModelForAgent;
   sanitizeHtml: typeof import("openclaw/plugin-sdk/web-content-extractor").sanitizeHtml;
   validateJsonSchemaValue: typeof import("openclaw/plugin-sdk/json-schema-runtime").validateJsonSchemaValue;
