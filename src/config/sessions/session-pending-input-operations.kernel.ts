@@ -185,7 +185,11 @@ export function mutatePendingInput(
               current.db,
               getSessionKysely(current.db)
                 .updateTable("session_pending_inputs")
-                .set({ state: "queued", lifecycle_generation: input.lifecycleGeneration })
+                .set({
+                  state: "queued",
+                  run_id: input.runId,
+                  lifecycle_generation: input.lifecycleGeneration,
+                })
                 .where("input_id", "=", row.input_id)
                 .returningAll(),
             );

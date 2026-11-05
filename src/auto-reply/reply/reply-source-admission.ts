@@ -69,7 +69,13 @@ export async function prepareReplySourceAdmission(params: {
         },
       });
     }
-    await recorder.stageApproved?.({ runId: params.runId ?? randomUUID(), assertCurrent });
+    // FORK(pending-input takeover): a retry of an interrupted turn re-adopts its unconsumed
+    // source; stageSessionPendingInput rewrites run_id on interrupted, unowned rows only.
+    await recorder.stageApproved?.({
+      runId: params.runId ?? randomUUID(),
+      retryInterrupted: true,
+      assertCurrent,
+    });
     assertCurrent();
     return release;
   } catch (error) {

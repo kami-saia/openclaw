@@ -307,7 +307,12 @@ export function createSessionActorMemoryPending(
       options.admit("transaction", grant);
       if (input.kind === "stage") {
         const staged: SessionPendingInputRow = row
-          ? { ...row, state: "queued", lifecycle_generation: input.lifecycleGeneration }
+          ? {
+              ...row,
+              state: "queued",
+              run_id: input.runId,
+              lifecycle_generation: input.lifecycleGeneration,
+            }
           : {
               seq:
                 [...state.pendingInputs.values()].reduce(

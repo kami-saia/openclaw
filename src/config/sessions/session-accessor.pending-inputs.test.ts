@@ -918,3 +918,25 @@ it("reads retained inputs off-thread and paginates with stable cursors while ano
     ).toBeUndefined();
   }
 });
+
+it("lets a later run adopt an interrupted unconsumed input instead of refusing it forever", async () => {
+  const input = message("aborted-turn");
+  const receipt = await stage("aborted-turn", { message: input });
+  receipt.finish("interrupted");
+  await receipt.settled?.();
+  await expect(stage("followup-retry", { message: input })).rejects.toThrow(
+    "idempotency key conflicts",
+  );
+  const adopted = await stage("followup-retry", { message: input, retryInterrupted: true });
+  expect(adopted.state).toBe("queued");
+  expect(adopted.inputId).toBe(receipt.inputId);
+  expect(storedInputs()).toEqual([
+    expect.objectContaining({ run_id: "followup-retry", state: "queued" }),
+  ]);
+  // Live custody stays exclusive: only interrupted rows are adoptable.
+  await expect(stage("third-run", { message: input, retryInterrupted: true })).rejects.toThrow(
+    "idempotency key conflicts",
+  );
+  await promote(adopted);
+  expect(await pendingInputs()).toEqual({ total: 0, items: [] });
+});

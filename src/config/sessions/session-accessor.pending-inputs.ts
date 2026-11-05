@@ -378,10 +378,11 @@ async function stagePreparedPendingInput(
         );
       }
     };
+    const adopt = options.retryInterrupted === true && existing?.state === "interrupted";
     if (existing) {
       if (
         !matchesSessionPendingInputRequest(existing, stableMessage, requestHash) ||
-        existing.run_id !== options.runId
+        (existing.run_id !== options.runId && !adopt)
       ) {
         throw custody.pendingInputConflict("idempotency");
       }
@@ -398,11 +399,10 @@ async function stagePreparedPendingInput(
       }
       assertUnowned();
       if (
-        (!options.requestFingerprint && !options.trackCompletion) ||
+        (!options.requestFingerprint && !options.trackCompletion && !adopt) ||
         (existing.state !== "queued" && existing.state !== "interrupted") ||
         (existing.lifecycle_generation === lifecycleGeneration &&
-          !options.trackCompletion &&
-          !(options.retryInterrupted && existing.state === "interrupted"))
+          !(options.trackCompletion || adopt))
       ) {
         throw custody.pendingInputConflict("ownership");
       }
