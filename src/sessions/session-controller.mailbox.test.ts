@@ -480,6 +480,19 @@ describe("early source injection custody", () => {
     await expect(pending).resolves.toBe(true);
   });
 
+  it("does not hold a steer behind an older source already waiting for its own turn", async () => {
+    const active = activeOperation("busy-turn");
+    const older = earlySource();
+    const waiting = claimSessionControllerTask(older, () => {});
+    expect(older.phase).toBe("waiting");
+    const steer = earlySource();
+    const injection = inject(steer);
+    await expect(injection.admit()).resolves.toBe(true);
+    injection.finish(false);
+    active.complete();
+    await releaseClaim(await waiting);
+  });
+
   it("claims an earlier source while a later injection awaits its reservation", async () => {
     const first = earlySource();
     const second = earlySource();

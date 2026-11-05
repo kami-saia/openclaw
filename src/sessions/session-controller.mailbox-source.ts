@@ -74,7 +74,14 @@ export function beginSessionControllerSourceInjection(
   const olderReservations = input.mailbox.entries
     .filter(
       (entry) =>
-        entry.sequence < input.sequence && entry.phase !== "consumed" && entry.claim === undefined,
+        entry.sequence < input.sequence &&
+        entry.phase !== "consumed" &&
+        entry.claim === undefined &&
+        // fork(steering): an entry already waiting for its own turn (exec/system
+        // events, queued producers) can never inject ahead of this one; waiting
+        // on it parks a live steer until the active turn ends.
+        entry.task === undefined &&
+        entry.ready === undefined,
     )
     .map((entry) => entry.injectionOrder.settled);
   const predecessor =
