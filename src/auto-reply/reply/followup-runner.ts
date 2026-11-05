@@ -6,6 +6,7 @@ import { hasCompletedSourceReplyDeliveryEvidence } from "../../agents/embedded-a
 import { withoutRequiredSessionPlacement } from "../../agents/session-placement-admission.js";
 import { runWithAgentWorkspaceReadiness } from "../../agents/workspace-readiness.js";
 import type { ProgressContinuationCapability } from "../../channels/progress-continuation.js";
+import { isSessionPendingInputConflictError } from "../../config/sessions/session-pending-input-custody-error.js";
 import { withoutSessionTranscriptReadFence } from "../../config/sessions/session-transcript-read-fence.js";
 import type { SessionActivitySummaryCompletion } from "../../gateway/session-activity-summary-completion.js";
 import { clearAgentRunContext } from "../../infra/agent-run-registry.js";
@@ -422,6 +423,15 @@ export function createFollowupRunner(
         completion = queued.run.internalEventExecution
           ? { kind: "failed", error: formatErrorMessage(error) }
           : resolveFollowupCompletion({ kind: "aborted", reason: "user" });
+      } else if (!executionEntered && isSessionPendingInputConflictError(error)) {
+        // The durable input row refuses this source permanently; replaying it would
+        // hot-loop the mailbox and wedge every later message behind it.
+        disposition = { kind: "consumed" };
+        completion = { kind: "failed", error: formatErrorMessage(error) };
+        defaultRuntime.error?.(
+          `followup queue: pending input refused before execution; refusing replay: ${formatErrorMessage(error)}`,
+        );
+        operation?.fail("run_failed", error);
       } else if (disposition.kind === "consumed") {
         completion = { kind: "failed", error: formatErrorMessage(error) };
         defaultRuntime.error?.(

@@ -53,7 +53,7 @@ import {
   withCurrentPendingInputAuthority,
   type SessionPendingInputAuthority,
 } from "./session-pending-input-authority.js";
-import { SessionPendingInputCustodyError } from "./session-pending-input-custody-error.js";
+import * as custody from "./session-pending-input-custody-error.js";
 import type { PendingInputCustodyGrant } from "./session-pending-input-operations.types.js";
 import type { SessionPendingInputOwner } from "./session-pending-input-owner.types.js";
 import type { SessionPendingInputReceipt } from "./session-pending-input-receipt.types.js";
@@ -357,7 +357,7 @@ async function stagePreparedPendingInput(
     const { message, stableMessage } = replayRequest;
     let requestHash = replayRequest.requestHash;
     if (previous && (previous.request_hash !== requestHash || previous.run_id !== options.runId)) {
-      throw new Error("Input completion idempotency key conflicts with the accepted input");
+      throw custody.pendingInputConflict("completion");
     }
     if (previous && isFinalInputCompletion(previous.outcome)) {
       return {
@@ -373,7 +373,7 @@ async function stagePreparedPendingInput(
     }
     const assertUnowned = (row = existing) => {
       if (row && hasRegisteredSessionPendingInputOwner(store.workerDatabasePath, row)) {
-        throw new SessionPendingInputCustodyError(
+        throw new custody.SessionPendingInputCustodyError(
           "Pending input is already admitted; wait for its current turn",
         );
       }
@@ -383,7 +383,7 @@ async function stagePreparedPendingInput(
         !matchesSessionPendingInputRequest(existing, stableMessage, requestHash) ||
         existing.run_id !== options.runId
       ) {
-        throw new Error("Pending input idempotency key conflicts with the accepted input");
+        throw custody.pendingInputConflict("idempotency");
       }
       if (existing.consumed_event_id != null) {
         return {
@@ -404,7 +404,7 @@ async function stagePreparedPendingInput(
           !options.trackCompletion &&
           !(options.retryInterrupted && existing.state === "interrupted"))
       ) {
-        throw new Error("Pending input ownership ended; submit a new turn to continue");
+        throw custody.pendingInputConflict("ownership");
       }
     }
     const settlementIdentity = () => ({
@@ -612,7 +612,7 @@ async function stagePreparedPendingInput(
             using _ = observeDiagnosticsTimelinePhases("persist.stage.publication");
             const staged = facts?.receipt.stagedInput;
             if (!staged) {
-              throw new SessionPendingInputCustodyError(
+              throw new custody.SessionPendingInputCustodyError(
                 "Pending input omitted its committed postimage",
               );
             }
@@ -653,7 +653,7 @@ async function stagePreparedPendingInput(
           },
         );
         if (!owner) {
-          throw new SessionPendingInputCustodyError(
+          throw new custody.SessionPendingInputCustodyError(
             "Pending input did not publish its committed owner",
           );
         }

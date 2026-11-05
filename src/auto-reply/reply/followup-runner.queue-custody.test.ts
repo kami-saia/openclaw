@@ -330,3 +330,46 @@ it("keeps a drain-owned claim through the actual preparation failure boundary", 
     typing.cleanup();
   }
 });
+
+it("settles a source whose durable pending input refuses it instead of replaying forever", async () => {
+  const { SessionPendingInputConflictError } =
+    await import("../../config/sessions/session-pending-input-custody-error.js");
+  const key = "agent:main:pending-input-conflict";
+  const source = createQueueTestRun({ prompt: "wedged steer fallback" });
+  source.run.sessionKey = key;
+  source.turnAdoptionLifecycle = { onAdopted: vi.fn(), onSettled: vi.fn() };
+  enqueueFollowupRun(key, source, { mode: "collect", debounceMs: 0 }, "none", undefined, false);
+  let attempts = 0;
+  const operations: ReplyOperation[] = [];
+  state.admit.mockImplementation(async ({ queued }) => {
+    attempts++;
+    const operation = createReplyOperation({
+      sessionKey: key,
+      sessionId: queued.run.sessionId,
+      resetTriggered: false,
+      mailboxClaim: queued.controllerClaim ?? queued.controllerInput!.claim!,
+    });
+    operations.push(operation);
+    operation.complete();
+    throw new SessionPendingInputConflictError(
+      "Pending input idempotency key conflicts with the accepted input",
+    );
+  });
+  const typing = createTypingController({});
+  const runner = createFollowupRunner({ typing, typingMode: "never", defaultModel: "gpt-test" });
+  try {
+    scheduleFollowupDrain(key, runner);
+    await source.controllerInput!.settlement.promise;
+    await new Promise((resolve) => {
+      setTimeout(resolve, 50);
+    });
+    expect(attempts).toBe(1);
+    expect(state.execute).not.toHaveBeenCalled();
+  } finally {
+    for (const operation of operations) {
+      operation.complete();
+    }
+    clearFollowupQueue(key);
+    typing.cleanup();
+  }
+});
