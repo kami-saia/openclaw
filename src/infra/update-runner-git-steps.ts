@@ -11,6 +11,7 @@ import {
   buildDevTargetRefResolutionCandidates,
   createGitStepFactory,
   gitCleanCheckArgs,
+  resolveGitNoLazyFetchArgs,
   resolveTagFetchRef,
   type StepFactory,
 } from "./update-runner-git-commands.js";
@@ -65,6 +66,11 @@ export async function prepareGitUpdateCheckout(
   if (!activateBranch) {
     return detached;
   }
+  const noLazyFetchArgs = await resolveGitNoLazyFetchArgs(options.runCommand, {
+    cwd: options.cwd,
+    timeoutMs: options.timeoutMs,
+    env: options.env,
+  });
   const moved = [...git, "checkout", "-B", DEV_BRANCH, candidateSha];
   let preservedRef: string | undefined;
   const ordinaryExit = (result: Awaited<ReturnType<CommandRunner>>, code: number) =>
@@ -78,7 +84,7 @@ export async function prepareGitUpdateCheckout(
       ...options,
       argv: [
         ...git,
-        "--no-lazy-fetch",
+        ...noLazyFetchArgs,
         "rev-parse",
         "--verify",
         "--quiet",
@@ -95,7 +101,7 @@ export async function prepareGitUpdateCheckout(
         }
         const sha = local.stdout.trim();
         const ancestry = await options.runCommand(
-          [...git, "--no-lazy-fetch", "merge-base", "--is-ancestor", sha, candidateSha],
+          [...git, ...noLazyFetchArgs, "merge-base", "--is-ancestor", sha, candidateSha],
           commandOptions,
         );
         if (!ordinaryExit(ancestry, 1)) {

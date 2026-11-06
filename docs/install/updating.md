@@ -53,6 +53,11 @@ backup.
 
 ## Update implementation contract
 
+Git-source and immutable updates probe support before passing `--no-lazy-fetch`.
+Older Git runs the same inspection commands without that option; partial clones
+may fetch promised objects. This fix must be present in the installed updater;
+a downloaded candidate cannot repair an older updater's preflight.
+
 Candidate Gateway rehearsal can prepare strictly valid config in its complete
 private update namespace even when a newer release wrote the config. It preserves
 the source writer stamp for installed-updater capture checks; the target's normal
