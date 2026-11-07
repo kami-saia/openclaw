@@ -1,12 +1,12 @@
 import * as crypto from "node:crypto";
+import { setImmediate } from "node:timers/promises";
+import { queryObjects } from "node:v8";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { convertToLlm } from "../../../packages/agent-core/src/harness/messages.js";
 import { convertProviderResponsesMessages } from "../../../packages/ai/src/transports/openai-responses-replay-messages-internal.js";
 import { makeTextToolResult } from "../../../test/helpers/text-tool-result.js";
-import {
-  normalizeTranscriptJsonValue,
-  isOwnedTranscriptPayload,
-} from "../../config/sessions/transcript-json.js";
+import { normalizeTranscriptJsonValue } from "../../config/sessions/transcript-json-normalize.js";
+import { isOwnedTranscriptPayload } from "../../config/sessions/transcript-json.js";
 import { cloneTranscriptView } from "../../config/sessions/transcript-snapshot.js";
 import type { WorkerTaskPool } from "../../infra/worker-task-pool.js";
 import type { Message, TextContent } from "../../llm/types.js";
@@ -21,6 +21,7 @@ import { transformTransportMessages } from "../transport-message-transform.js";
 import { log } from "./logger.js";
 import { fingerprintMessage, messageFingerprints } from "./prompt-cache-history.js";
 import {
+  clearPromptCacheObservations,
   completePromptCacheObservation,
   declarePromptHistoryRewrite,
   declarePromptToolPin,
@@ -70,16 +71,47 @@ function history(key: string, messages: Message[]) {
     },
   };
 }
-function historyChange(detail: string) {
-  return [{ code: "historyRewrite", detail }];
-}
-
 describe("prompt cache history fingerprints", () => {
   beforeEach(() => {
     testScope += 1;
     vi.mocked(crypto.hash).mockClear();
   });
   afterEach(() => vi.restoreAllMocks());
+
+  it("bounds retained history bytes across long sessions without losing active rewrite checks", async () => {
+    const references: WeakRef<ReturnType<typeof fingerprintMessage>>[] = [];
+    for (let session = 0; session < 24; session++) {
+      const messages: Message[] = Array.from({ length: 512 }, (_, timestamp) => ({
+        role: "user",
+        content: Array.from({ length: 8 }, (_block, block) => ({
+          type: "text" as const,
+          text: `Synthetic ${session}:${timestamp}:${block}`,
+        })),
+        timestamp,
+      }));
+      for (const message of messages) {
+        normalizeTranscriptJsonValue({ message }, "");
+      }
+      const baseline = history(`retention-${session}`, messages);
+      references.push(...messages.map((message) => new WeakRef(fingerprintMessage(message))));
+      messages.push({ role: "user", content: "append", timestamp: 512 });
+      expect(baseline.read()).toMatchObject(unchangedPrefix);
+      messages[500] = { role: "user", content: "rewrite", timestamp: 500 };
+      baseline.assertRewrite("historyRewrite");
+    }
+    const control = new WeakRef({ unowned: true });
+    await setImmediate();
+    queryObjects(WeakRef);
+    expect(control.deref()).toBeUndefined();
+    const retainedStringBytes = references.reduce((bytes, reference) => {
+      const fingerprint = reference.deref();
+      return (
+        bytes + (fingerprint ? 2 * (fingerprint.packed.length + fingerprint.layout.length) : 0)
+      );
+    }, 0);
+    expect(retainedStringBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
+    clearPromptCacheObservations();
+  });
 
   it.each(["string", "blocks"] as const)(
     "keeps %s content stable across append and sealed ownership",
@@ -329,9 +361,12 @@ describe("prompt cache history fingerprints", () => {
       return entry.message;
     });
     const tracker = history("cached-history", messages);
+    const layouts = new Set(messages.map((message) => fingerprintMessage(message).layout));
     const writes = vi.spyOn(messageFingerprints, "set");
+    const lookups = vi.spyOn(Map.prototype, "get");
     expect(tracker.read()).toMatchObject(unchangedPrefix);
     expect(writes).not.toHaveBeenCalled();
+    expect(lookups.mock.calls.filter(([key]) => layouts.has(key))).toHaveLength(0);
   });
 
   it("reuses owned content under mutable append envelopes across observers", async () => {
@@ -533,9 +568,9 @@ describe("prompt cache history fingerprints", () => {
       }
       const detail = `message 1 (${message.role}) differs from the previous request; history must be append-only; changed fields: ${kind === "string" ? "content" : "content[0].text"}`;
       tracker.assertRewrite(detail, [first, rebuildWrapper ? { ...message } : message]);
-      expect(tracker.complete({ input: 8_000, cacheRead: 0 })?.changes).toEqual(
-        historyChange(detail),
-      );
+      expect(tracker.complete({ input: 8_000, cacheRead: 0 })?.changes).toEqual([
+        { code: "historyRewrite", detail },
+      ]);
     },
   );
 
@@ -677,7 +712,7 @@ describe("prompt cache history fingerprints", () => {
         expect(
           completePromptCacheObservation({ sessionId, usage: { input: 8_000, cacheRead: 0 } })
             ?.changes,
-        ).toEqual(historyChange(detail));
+        ).toEqual([{ code: "historyRewrite", detail }]);
         observe(sessionId, messages);
         expect(warn).toHaveBeenCalledTimes(1);
       });
