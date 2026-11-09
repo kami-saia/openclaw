@@ -1,5 +1,7 @@
 /** Text glyph for each semantic tool icon in TOOL_DISPLAY_CONFIG, for channels that opt in. */
 export const PROGRESS_TOOL_GLYPHS: Readonly<Record<string, string>> = {
+  // FORK: icon for the fork compact tool.
+  archive: "🗜️",
   arrowLeftRight: "↔️",
   audioLines: "🔊",
   barChart: "📊",
