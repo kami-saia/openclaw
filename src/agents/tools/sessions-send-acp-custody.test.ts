@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { upsertAcpSessionMeta } from "../../acp/runtime/session-meta.js";
 import { clearRuntimeConfigSnapshot, setRuntimeConfigSnapshot } from "../../config/config.js";
 import { replaceSessionEntry } from "../../config/sessions/session-accessor.js";
@@ -28,7 +28,7 @@ import { captureRequesterOrigin } from "../requester-origin.js";
 import { readFollowupRequest } from "../subagents/completion/session-followup-completion.js";
 import type { FollowupCompletionOwner } from "../subagents/completion/session-followup-completion.types.js";
 import { withGatewayToolCallerIdentity } from "./gateway-caller-context.js";
-import { createSessionsSendTool } from "./sessions-send-tool.js";
+import { createSessionsSendTool, forkFireAndForgetTesting } from "./sessions-send-tool.js";
 
 const inference = vi.hoisted(() =>
   vi.fn<typeof import("../../commands/agent.js").agentCommandFromGatewayIngress>(),
@@ -39,7 +39,13 @@ vi.mock("../../commands/agent.js", async (importOriginal) => ({
   agentCommandFromGatewayIngress: inference,
 }));
 
+beforeEach(() => {
+  // FORK(fire-and-forget): these cases cover upstream's delivery/A2A contract.
+  forkFireAndForgetTesting.setForTest(false);
+});
+
 afterEach(() => {
+  forkFireAndForgetTesting.reset();
   vi.clearAllMocks();
   clearRuntimeConfigSnapshot();
 });
