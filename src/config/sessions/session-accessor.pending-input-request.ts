@@ -77,6 +77,8 @@ function matchAcceptedPendingInputMessage(
 export type PendingInputRequest = {
   message: PersistedUserTurnMessage;
   runId: string;
+  /** FORK: an idempotent pre-commit operation may reclaim interrupted custody in this process. */
+  retryInterrupted?: boolean;
   /** Authenticated ingress binds raw input before randomized media preparation. */
   requestFingerprint?: string;
   /** Trusted frozen-cohort sources, checked against a receipt or whole committed input. */

@@ -5,7 +5,7 @@
 import { matchesContextOverflowMessage } from "@openclaw/ai/internal/shared";
 import { type Mock, vi } from "vitest";
 import type { ThinkLevel } from "../../auto-reply/thinking.js";
-import type { ContextEngine, ContextEngineSessionTarget } from "../../context-engine/types.js";
+import type { ContextEngineSessionTarget } from "../../context-engine/types.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import type { ClaimingHookAdmission } from "../../plugins/hook-claim-admission.js";
 import type {
@@ -32,6 +32,7 @@ import {
   makeAttemptResult,
   makeMockRuntimePlan,
 } from "./run.overflow-compaction.fixture.js";
+import { createOverflowCompactionRegistryMock } from "./run.overflow-compaction.registry-mock.js";
 import { createRunWorkspaceMock } from "./run.workspace-ownership.test-support.js";
 import type { RunEmbeddedAgentInternalParams } from "./run/internal-params.js";
 import type { buildEmbeddedRunPayloads } from "./run/payloads.js";
@@ -687,13 +688,12 @@ export async function loadRunOverflowCompactionHarness(): Promise<{
   vi.doMock("../../infra/backoff.js", () => ({
     sleepWithAbort: mockedSleepWithAbort,
   }));
-  vi.doMock("../../context-engine/registry.js", () => ({
-    hasSameContextEngineInstance: vi.fn(
-      (left: ContextEngine, right: ContextEngine) => left === right,
-    ),
-    resolveContextEngine: mockedResolveContextEngine,
-    resolveContextEngineOwnerPluginId: mockedResolveContextEngineOwnerPluginId,
-  }));
+  vi.doMock("../../context-engine/registry.js", () =>
+    createOverflowCompactionRegistryMock({
+      resolveContextEngine: mockedResolveContextEngine,
+      resolveContextEngineOwnerPluginId: mockedResolveContextEngineOwnerPluginId,
+    }),
+  );
 
   vi.doMock("../harness/runtime-plugin.js", () => ({
     ensureSelectedAgentHarnessPlugin: vi.fn(async () => {}),

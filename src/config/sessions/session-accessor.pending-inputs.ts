@@ -217,8 +217,6 @@ type PendingInputStageOptions = PendingInputRequest & {
   trackCompletion?: boolean;
   /** A current explicit operation may retry its cancelled, unconsumed input. */
   retryCancelled?: boolean;
-  /** An idempotent pre-commit operation may reclaim interrupted custody in this process. */
-  retryInterrupted?: boolean;
   /**
    * Durable channel redelivery mints a new run for the same source turn. It may
    * reopen only its own byte-identical attempt that was cancelled before consumption.
@@ -399,15 +397,12 @@ async function stagePreparedPendingInput(
         };
       }
       assertUnowned();
+      // FORK: interrupted adoption counts as completion tracking for ownership.
+      const owns = options.trackCompletion || adopt;
       if (
-        (!options.requestFingerprint &&
-          !options.trackCompletion &&
-          !adopt &&
-          !reclaimsCancelledSourceTurn) ||
-        (existing.state !== "queued" && existing.state !== "interrupted" && !reopensCancelled) ||
-        (existing.lifecycle_generation === lifecycleGeneration &&
-          !(options.trackCompletion || adopt) &&
-          !reopensCancelled)
+        (!options.requestFingerprint && !owns && !reclaimsCancelledSourceTurn) ||
+        (existing.state !== "queued" && !adopt && !reopensCancelled) ||
+        (existing.lifecycle_generation === lifecycleGeneration && !owns && !reopensCancelled)
       ) {
         throw custody.pendingInputConflict("ownership");
       }
