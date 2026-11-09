@@ -62,6 +62,7 @@ import { readPendingInputSource } from "./session-pending-input-source.js";
 import { preparePendingInputStore, type PendingInputScope } from "./session-pending-input-store.js";
 import {
   isFinalInputCompletion,
+  isSessionPendingInputRetiredByUser,
   parseSessionPendingInputMessage,
 } from "./session-pending-input-value.js";
 import {
@@ -218,6 +219,11 @@ type PendingInputStageOptions = PendingInputRequest & {
   retryCancelled?: boolean;
   /** An idempotent pre-commit operation may reclaim interrupted custody in this process. */
   retryInterrupted?: boolean;
+  /**
+   * Durable channel redelivery mints a new run for the same source turn. It may
+   * reopen only its own byte-identical attempt that was cancelled before consumption.
+   */
+  reclaimCancelledSourceTurn?: boolean;
   assertCurrent: () => void;
   /** Fresh source acceptance only; recorded pending and transcript inputs keep their prior consent. */
   assertFreshInputCurrent?: SessionSourceAssertion;
@@ -362,10 +368,22 @@ async function stagePreparedPendingInput(
       }
     };
     const adopt = options.retryInterrupted === true && existing?.state === "interrupted";
+    // A channel retry after a pre-consumption failure carries a fresh run ID. Without
+    // reopening that dead attempt, every redelivery conflicts until ingress gives up.
+    const reclaimsCancelledSourceTurn =
+      options.reclaimCancelledSourceTurn === true &&
+      !previous &&
+      existing?.state === "cancelled" &&
+      existing.consumed_event_id == null &&
+      existing.request_hash === requestHash &&
+      !isSessionPendingInputRetiredByUser(existing.message_json);
+    const reopensCancelled =
+      existing?.state === "cancelled" &&
+      (options.retryCancelled === true || reclaimsCancelledSourceTurn);
     if (existing) {
       if (
         !matchesSessionPendingInputRequest(existing, stableMessage, requestHash) ||
-        (existing.run_id !== options.runId && !adopt)
+        (existing.run_id !== options.runId && !adopt && !reclaimsCancelledSourceTurn)
       ) {
         throw custody.pendingInputConflict("idempotency");
       }
@@ -382,13 +400,14 @@ async function stagePreparedPendingInput(
       }
       assertUnowned();
       if (
-        (!options.requestFingerprint && !options.trackCompletion && !adopt) ||
-        (existing.state !== "queued" &&
-          existing.state !== "interrupted" &&
-          !(options.retryCancelled && existing.state === "cancelled")) ||
+        (!options.requestFingerprint &&
+          !options.trackCompletion &&
+          !adopt &&
+          !reclaimsCancelledSourceTurn) ||
+        (existing.state !== "queued" && existing.state !== "interrupted" && !reopensCancelled) ||
         (existing.lifecycle_generation === lifecycleGeneration &&
           !(options.trackCompletion || adopt) &&
-          !(options.retryCancelled && existing.state === "cancelled"))
+          !reopensCancelled)
       ) {
         throw custody.pendingInputConflict("ownership");
       }

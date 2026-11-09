@@ -218,7 +218,12 @@ export function createSessionActorMemoryPending(
       }
       const row = pending(input);
       if (input.kind === "stage") {
-        if (row?.input_id !== input.expected.existing?.input_id) {
+        // Compare-and-set: a restage may rebind run_id, so a concurrent reopen must lose.
+        if (
+          row?.input_id !== input.expected.existing?.input_id ||
+          row?.run_id !== input.expected.existing?.run_id ||
+          row?.state !== input.expected.existing?.state
+        ) {
           throw new SessionPendingInputCustodyError(
             "Pending input changed before staging committed",
           );

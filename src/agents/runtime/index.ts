@@ -36,5 +36,4 @@ export type {
   SessionTreeEntry,
   StreamFn,
   ThinkingLevel,
-  ToolExecutionMode,
 } from "../../plugin-sdk/agent-core.js";
