@@ -94,7 +94,7 @@ import {
 import { holdLiveRequesterTurns } from "./subagents/registry/subagent-requester-turn-liveness.test-support.js";
 import { withGatewayToolCallerIdentity } from "./tools/gateway-caller-context.js";
 import * as sendDelivery from "./tools/sessions-send-tool.delivery.js";
-import { createSessionsSendTool } from "./tools/sessions-send-tool.js";
+import { createSessionsSendTool, forkFireAndForgetTesting } from "./tools/sessions-send-tool.js";
 import { createSessionsYieldTool } from "./tools/sessions-yield-tool.js";
 
 let settleRootWork: ReturnType<typeof observeRootWork>;
@@ -267,6 +267,8 @@ async function writeFinal(sessionKey: string, runId: string, text: string) {
 
 let state: OpenClawTestState;
 beforeEach(async () => {
+  // FORK(fire-and-forget): these cases cover upstream's coordination delivery contract.
+  forkFireAndForgetTesting.setForTest(false);
   settleRootWork = observeRootWork();
   state = await createOpenClawTestState({ scenario: "minimal" });
   config.session = {
@@ -284,6 +286,7 @@ beforeEach(async () => {
   setActivePluginRegistry(createSessionConversationTestRegistry());
 });
 afterEach(async () => {
+  forkFireAndForgetTesting.reset();
   await settleSessionWork();
   resetGatewayWorkAdmission();
   await state.cleanup();

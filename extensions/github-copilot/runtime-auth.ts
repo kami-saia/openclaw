@@ -155,6 +155,13 @@ export async function resolveCopilotRuntimeAuth(params: {
       domain,
       fetchImpl,
       signal,
+    }).catch((error: unknown) => {
+      // FORK: optional exchange failures must not discard a valid source credential.
+      // Preserve the shared auth deadline rather than treating an abort as fallback.
+      if (signal.aborted) {
+        throw error;
+      }
+      return undefined;
     });
     // FORK(53f821e5e40): enterprise CAPI flaps 403 on raw ghu_ bearers; prefer the exchanged token.
     if (exchanged) {
