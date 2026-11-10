@@ -59,7 +59,6 @@ import { createSelfHeldSendRetainer } from "./sessions-send-self-hold.js";
 import * as delivery from "./sessions-send-tool.delivery.js";
 import * as input from "./sessions-send-tool.input.js";
 import { createSessionsSendTool } from "./sessions-send-tool.js";
-
 async function refuseSelfHeldAdmission(cause: unknown) {
   const error = errorShapeFromError(ErrorCodes.UNAVAILABLE, cause);
   expect(Object.getOwnPropertyDescriptor(error, "cause")).toMatchObject({
@@ -287,6 +286,7 @@ it.each([
           expect(timeout.mock.calls.at(-1)).toEqual([
             expect.objectContaining({ mode: "resume", timeoutSeconds: 0, watch: undefined }),
             "resume",
+            0, // FORK: executor supplies the default timeout.
           ]);
           expect(effect).toHaveBeenCalledOnce();
           expect(dispatch).toHaveBeenCalledTimes(2);

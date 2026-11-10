@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { expectDefined } from "@openclaw/normalization-core/expect";
-import { expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   awaitGateBeforeSettlement,
   createDeferred,
@@ -11,7 +11,10 @@ import type { AgentCommandGatewayIngressOpts as IngressCommand } from "../agents
 import * as preparedRuntime from "../agents/prepared-model-runtime.js";
 import { createAgentRunDirectAbortError } from "../agents/run-termination.js";
 import * as replyDelivery from "../agents/tools/sessions-send-tool.a2a.js";
-import { createSessionsSendTool } from "../agents/tools/sessions-send-tool.js";
+import {
+  createSessionsSendTool,
+  forkFireAndForgetTesting,
+} from "../agents/tools/sessions-send-tool.js";
 import { withPersonalToolTurn } from "../auto-reply/reply/personal-tool-turn.test-support.js";
 import { writeConfigFile } from "../config/io.js";
 import {
@@ -34,6 +37,10 @@ import {
   installGatewayTestHooks,
   prepareGatewayReplyRuntimeForTest,
 } from "./test-helpers.js";
+
+// FORK(fire-and-forget): exercise upstream's completion/delivery contract, not one-way sends.
+beforeEach(() => forkFireAndForgetTesting.setForTest(false));
+afterEach(() => forkFireAndForgetTesting.reset());
 
 const MESSAGE = "Continue the retained review.";
 

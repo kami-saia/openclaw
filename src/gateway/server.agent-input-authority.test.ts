@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { expectDefined } from "@openclaw/normalization-core/expect";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   awaitGateBeforeSettlement,
   createDeferred,
@@ -19,7 +19,10 @@ import {
   withGatewayToolCallerIdentity,
 } from "../agents/tools/gateway-caller-context.js";
 import * as followupCustody from "../agents/tools/sessions-send-followup-custody.js";
-import { createSessionsSendTool } from "../agents/tools/sessions-send-tool.js";
+import {
+  createSessionsSendTool,
+  forkFireAndForgetTesting,
+} from "../agents/tools/sessions-send-tool.js";
 import { setRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
 import * as sessionAccessor from "../config/sessions/session-accessor.js";
 import * as pendingInputs from "../config/sessions/session-accessor.pending-inputs.js";
@@ -47,8 +50,10 @@ import { loadSessionEntryAsync } from "./session-entry-load.test-support.js";
 import { getSessionRowProjection } from "./session-row-projection-access.js";
 import { withPreparedSessionResolve } from "./sessions-resolve.js";
 import { agentCommandMock, prepareGatewayReplyRuntimeForTest } from "./test-helpers.js";
-
 describe("spawn input ownership transfer", () => {
+  // FORK(fire-and-forget): these tests assert upstream's announce-back contract.
+  beforeEach(() => forkFireAndForgetTesting.setForTest(false));
+  afterEach(() => forkFireAndForgetTesting.reset());
   const getContext = installAuthorityProofGateway();
   const prepareAdmission = (
     cfg: OpenClawConfig,
@@ -142,7 +147,6 @@ describe("spawn input ownership transfer", () => {
       },
     };
   };
-
   it.for([
     "slow acceptance",
     "slow kickoff failure",
@@ -157,7 +161,6 @@ describe("spawn input ownership transfer", () => {
   ] as const)("transfers independently created input at %s", async (boundary, { signal }) => {
     await runIndependentCreationInputCase(getContext(), boundary, signal);
   });
-
   it.for([
     { kind: "native", boundary: "dispatch" },
     { kind: "peer", boundary: "dispatch" },
@@ -344,7 +347,6 @@ describe("spawn input ownership transfer", () => {
       }
     },
   );
-
   it.each(["requester", "child"] as const)(
     "revokes prepared watched followup %s access before real Gateway child admission",
     async (revoked) => {
@@ -457,7 +459,6 @@ describe("spawn input ownership transfer", () => {
       }
     },
   );
-
   it.for(["before staging", "after acceptance", "before acknowledgement"] as const)(
     "rechecks directed send policy at Gateway input admission (%s)",
     async (boundary, { signal }) => {
@@ -584,7 +585,6 @@ describe("spawn input ownership transfer", () => {
       }
     },
   );
-
   it.for([
     "before staging",
     "after acceptance",
