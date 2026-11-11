@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
-import { expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { readRequestText } from "../../test/helpers/gateway-integration-fixtures.js";
 import {
   assertManagedHandoffTestConsumer,
@@ -27,6 +27,7 @@ import {
 import { subscribeSubagentRunChanges } from "../agents/subagents/registry/subagent-registry-publication.js";
 import { resetSubagentRegistryForTests } from "../agents/subagents/registry/subagent-registry.test-helpers.js";
 import type { SubagentRunRecord } from "../agents/subagents/registry/subagent-registry.types.js";
+import { forkFireAndForgetTesting } from "../agents/tools/sessions-send-fork-fire-and-forget.js";
 import {
   loadTranscriptEvents,
   listSessionPendingInputs,
@@ -57,6 +58,10 @@ import {
 import { createSubagentModelConfig } from "./server.subagent-stop-settlement.product.test-support.js";
 import { disconnectGatewayClient, startGatewayWithClient } from "./test-helpers.e2e.js";
 import { kernelGatewayTestStateOptions } from "./test-helpers.env.js";
+
+// FORK(fire-and-forget): these product cases require upstream's announce-back flow.
+beforeEach(() => forkFireAndForgetTesting.setForTest(false));
+afterEach(() => forkFireAndForgetTesting.reset());
 
 const ROOT = "Create a child, then deliver the original continuation exactly once.";
 const CHILD = "Pause for the requester, then finish when the original continuation arrives.";
