@@ -40,7 +40,9 @@ const env = {
   OPENCLAW_LIVE_GATEWAY: "0",
   PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: "false",
   pnpm_config_verify_deps_before_run: "false",
-  NODE_OPTIONS: `--import=${JSON.stringify(pathToFileURL(preload).href)}`,
+  // Native binding selection reads Node's diagnostic report. Network enumeration can
+  // stall that report on WSL; these shutdown fixtures do not inspect network facts.
+  NODE_OPTIONS: `--report-exclude-network --import=${JSON.stringify(pathToFileURL(preload).href)}`,
 };
 
 fs.writeFileSync(
