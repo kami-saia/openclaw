@@ -36,8 +36,13 @@ vi.mock("../plugins/session-discussion-registry.js", () => ({
   },
 }));
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
-const { createSessionStoreDir } = setupGatewaySessionsHandlerTestHarness();
+const { createSessionStoreDir } = setupGatewaySessionsHandlerTestHarness(async () => {
+  // Keep cold skill-discovery module preparation outside naming's assertion deadline.
+  await import("../skills/discovery/chat-commands.js");
+});
 afterEach(async () => {
+  // Optional naming owns a detached root, not the turn controller drained by settleWorkspaceRuns.
+  await vi.waitFor(() => expect(getActiveGatewayRootWorkCount()).toBe(0));
   await disposeSessionReadContexts();
   titleMocks.generate.mockReset();
   titleMocks.open.mockReset();
