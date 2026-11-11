@@ -18,6 +18,7 @@ import { assertGatewayServiceUpdateCurrent } from "../../daemon/service-update-a
 import { mockSystemAccountHome } from "../../daemon/service.test-helpers.js";
 import * as systemdExec from "../../daemon/systemd-exec.js";
 import * as systemdScope from "../../daemon/systemd-scope.js";
+import * as systemdFiles from "../../daemon/systemd-service-files.js";
 import { resolveRuntimeWorkerUrl } from "../../infra/runtime-worker-url.js";
 import * as tempRoot from "../../infra/tmp-openclaw-dir.js";
 import { createManagedHandoffLeaseStore } from "../../infra/update-managed-service-handoff-lease.js";
@@ -41,6 +42,10 @@ vi.mock("../../daemon/schtasks-control.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../daemon/schtasks-control.js")>()),
   restartScheduledTask: async (args: GatewayServiceControlArgs) =>
     (await import("../../daemon/systemd-lifecycle.js")).restartSystemdService(args),
+}));
+vi.mock("../../daemon/systemd-service-files.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../daemon/systemd-service-files.js")>()),
+  readSystemdServiceExecStart: vi.fn(),
 }));
 const dirs = useAutoCleanupTempDirTracker(afterEach);
 let a: string;
@@ -79,6 +84,12 @@ beforeEach(() => {
   });
   vi.spyOn(systemdScope, "assertNoSystemGatewayOwnershipForActivation").mockResolvedValue();
   vi.spyOn(systemdExec, "assertSystemdAvailable").mockResolvedValue();
+  // Foreground recovery now reads the effective command before native restart.
+  // Keep that manager read synthetic too; never inspect the developer's user bus.
+  vi.mocked(systemdFiles.readSystemdServiceExecStart).mockResolvedValue({
+    programArguments: [process.execPath, path.join(a, "gateway.mjs")],
+    workingDirectory: a,
+  });
 });
 afterEach(() => {
   vi.restoreAllMocks();
