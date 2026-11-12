@@ -13353,7 +13353,7 @@ describe("ci workflow guards", () => {
         ]);
       }
       const run = (failBuild = false) =>
-        runWorkflowCommand("/bin/bash", ["-e", "-o", "pipefail", "-c", step.run], {
+        runWorkflowCommand("/bin/bash", ["--norc", "-e", "-o", "pipefail", "-c", step.run], {
           cwd: root,
           env: {
             PATH: `${bin}:/usr/bin:/bin`,
