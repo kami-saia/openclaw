@@ -24,7 +24,6 @@ type Catalog = {
 type Fixture = {
   catalog: Catalog;
   catalogRequests: string[];
-
   cfg: OpenClawConfig;
   home: string;
   requests: Request[];
@@ -204,7 +203,6 @@ async function withFixture(
     },
   );
 }
-
 function speech(cfg: OpenClawConfig) {
   return getSpeechProvider("clawrouter", cfg)!;
 }
@@ -438,6 +436,8 @@ describe("ClawRouter native speech", () => {
         });
         const provider = speech(cfg);
         const storedCfg = withoutKey(cfg);
+        // Match native TTS readiness before starting the per-request deadline.
+        await provider.isConfiguredAsync!({ cfg: storedCfg, providerConfig: {} });
         await expect(provider.synthesize({ ...request(), cfg: storedCfg })).resolves.toMatchObject({
           audioBuffer: AUDIO,
         });
