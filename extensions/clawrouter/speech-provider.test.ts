@@ -137,6 +137,7 @@ async function withFixture(
               );
               return;
             }
+            req.setEncoding("utf8");
             let text = "";
             for await (const chunk of req) {
               text += chunk;
