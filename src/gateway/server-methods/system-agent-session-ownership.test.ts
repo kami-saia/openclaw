@@ -130,7 +130,10 @@ function makeClient(params: {
 const defaultClient = makeClient({ connId: "conn-test", deviceId: "device-test" });
 
 function makeContext(sessions: Map<string, SystemAgentChatSession>): GatewayRequestContext {
-  return { systemAgentSessions: sessions } as unknown as GatewayRequestContext;
+  return {
+    systemAgentSessions: sessions,
+    getRuntimeConfig: () => ({}),
+  } as unknown as GatewayRequestContext;
 }
 
 function seededSession(params?: {

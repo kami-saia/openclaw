@@ -107,7 +107,10 @@ function chatRequest(current?: () => boolean) {
     )({
       params,
       client,
-      context: { systemAgentSessions: sessions },
+      context: {
+        systemAgentSessions: sessions,
+        getRuntimeConfig: () => ({}),
+      },
       respond,
       ...(current ? { hasCurrentClientAuthority: current } : {}),
     } as never);

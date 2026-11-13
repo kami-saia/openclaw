@@ -96,7 +96,10 @@ const quickActions = {
 
 beforeEach(() => {
   sessions = new Map();
-  context = { systemAgentSessions: sessions } as unknown as GatewayRequestContext;
+  context = {
+    systemAgentSessions: sessions,
+    getRuntimeConfig: () => ({}),
+  } as unknown as GatewayRequestContext;
   createdEngines.length = 0;
   transcriptStoreMocks.appendTurn.mockReset();
   transcriptStoreMocks.readTranscriptTailAsync.mockReset().mockResolvedValue([]);
