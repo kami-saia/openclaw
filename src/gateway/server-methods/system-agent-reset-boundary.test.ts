@@ -101,6 +101,7 @@ async function resetSession(params: {
     client,
     respond,
     context: {
+      getRuntimeConfig: () => ({}),
       systemAgentSessions: params.sessions,
       ...(params.approvalManager ? { systemAgentApprovalManager: params.approvalManager } : {}),
     } as unknown as GatewayRequestContext,

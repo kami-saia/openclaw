@@ -96,7 +96,7 @@ describe.skipIf(process.platform === "win32")("Crabbox dependency hydration", ()
       (step) => step.name === "Prepare Control UI E2E environment",
     );
     expect(prepare?.run).toBeDefined();
-    const result = spawnSync("bash", ["-c", `umask 0002\n${prepare!.run}`], {
+    const result = spawnSync("bash", ["--norc", "-c", `umask 0002\n${prepare!.run}`], {
       cwd: workspace,
       env: {
         PATH: `${bin}:/usr/bin:/bin`,
@@ -241,17 +241,21 @@ fi
       expect(setup).toBeDefined();
       const start = setup!.indexOf("install_args=(");
       expect(start).toBeGreaterThan(0);
-      const result = spawnSync("bash", ["-c", "set -euo pipefail\n" + setup!.slice(start)], {
-        cwd: root,
-        env: {
-          PATH: bin + ":/usr/bin:/bin",
-          PNPM_CALLS: calls,
-          PNPM_CONFIG_STORE_DIR: path.join(root, "store"),
-          RUNNER_TEMP: root,
+      const result = spawnSync(
+        "bash",
+        ["--norc", "-c", "set -euo pipefail\n" + setup!.slice(start)],
+        {
+          cwd: root,
+          env: {
+            PATH: bin + ":/usr/bin:/bin",
+            PNPM_CALLS: calls,
+            PNPM_CONFIG_STORE_DIR: path.join(root, "store"),
+            RUNNER_TEMP: root,
+          },
+          encoding: "utf8",
+          timeout: 30_000,
         },
-        encoding: "utf8",
-        timeout: 30_000,
-      });
+      );
       expect(result.error).toBeUndefined();
       expect(result.status, result.stdout + result.stderr).toBe(
         outcome === "complete" ? 0 : outcome === "failed" ? 42 : 1,
