@@ -78,6 +78,9 @@ export function readState(_service, options = {}) {
 export function readBinding(binding) {
   return readState(undefined, { env: binding.env });
 }
+export function readCommand(env) {
+  return readState(undefined, { env }).command;
+}
 export async function inspect() {
   if (["disjoint", "sibling", "unavailable"].includes(mode)) {
     return null;
@@ -225,6 +228,12 @@ if (
   modules.set(
     "src/daemon/future-config-guard",
     exportsFromSelf("admitNativeRestart as assertFutureConfigActionAllowed"),
+  );
+  // The effective command belongs to this synthetic service, not the host user manager.
+  modules.set(
+    "src/daemon/systemd-service-files",
+    `export * from ${original("src/daemon/systemd-service-files")};` +
+      exportsFromSelf("readCommand as readSystemdServiceExecStart"),
   );
   // Keep the real service guard and operation lock; stop only at native effects.
   for (const [name, restart] of [
