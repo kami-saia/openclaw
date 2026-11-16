@@ -602,9 +602,13 @@ it("keeps an admitted write socket available for compensation after caller abort
 });
 
 it("rejects and rethrows when the WebSocket fails to open", async () => {
+  // A listener that drops every upgrade is deterministic; a closed loopback port
+  // hangs instead of refusing under WSL mirrored networking.
+  const server = await startHttpServer();
+  server.on("upgrade", (_request, socket: Socket) => socket.destroy());
   await expect(
-    withCdpSocket("ws://127.0.0.1:1/devtools/browser/NO", async () => "unreachable"),
-  ).rejects.toThrow(/ECONNREFUSED|CDP socket closed/);
+    withCdpSocket(wsUrl(server), async () => "unreachable", { handshakeRetries: 0 }),
+  ).rejects.toThrow(/ECONNRESET|socket hang up|CDP socket closed/);
 });
 
 it("keeps WebSocket credentials out of the URL and managed-proxy bypass", async () => {
