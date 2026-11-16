@@ -490,10 +490,7 @@ async function runEmbeddedAttemptOwned(
           runAbortSignal: runAbortController.signal,
           externalAbortController,
           // FORK: enables the Runtime line's `served_model=` divergence token.
-          servedModelRerender: {
-            renderAttemptSystemPrompt: preparedSystemPrompt.renderAttemptSystemPrompt,
-            runtimeInfo: preparedSystemPrompt.runtimeInfo,
-          },
+          servedModelRerender: true,
           resources: sessionResources.resources,
           onSessionYieldReady: ({ abortActiveSession, activeSession }) => {
             abortTerminalYield = (reason) => {

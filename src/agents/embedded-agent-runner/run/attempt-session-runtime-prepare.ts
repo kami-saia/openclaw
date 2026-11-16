@@ -99,10 +99,9 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
   // FORK: lets the Runtime line surface `served_model=` once the restored
   // transcript reveals a provider model swap. Optional so non-attempt callers
   // (tests, raw-model probes) can omit it.
-  servedModelRerender?: {
-    renderAttemptSystemPrompt: () => Promise<{ systemPrompt: string }>;
-    runtimeInfo: { model?: string; servedModel?: string };
-  };
+  // The re-render hook and runtime info come from this module's own system
+  // prompt preparation (upstream moved it here), so callers only opt in.
+  servedModelRerender?: boolean;
   onSessionYieldReady: (input: {
     abortActiveSession: SessionSettleTracker["abortActiveSession"];
     activeSession: AgentSession;
@@ -436,7 +435,8 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
   // to `model=`. Matching models skip the re-render entirely so the prompt digest
   // stays stable and the provider prompt cache keeps hitting.
   if (input.servedModelRerender && !input.isRawModelRun) {
-    const { renderAttemptSystemPrompt, runtimeInfo } = input.servedModelRerender;
+    const { renderAttemptSystemPrompt } = systemPrompt;
+    const runtimeInfo: { model?: string; servedModel?: string } = systemPrompt.runtimeInfo;
     const servedModel = resolveDivergentServedModel({
       messages: activeSession.agent.state.messages,
       requestedModel: runtimeInfo.model,
