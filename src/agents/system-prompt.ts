@@ -23,10 +23,6 @@ import type { ReasoningLevel } from "../auto-reply/thinking.js";
 import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import { normalizeChatType } from "../channels/chat-type.js";
 import { CHANNEL_IDS } from "../channels/ids.js";
-import {
-  hasNativeApprovalPromptRuntimeCapability,
-  isKnownNativeApprovalPromptChannel,
-} from "../channels/plugins/native-approval-prompt.js";
 import type { SubagentDelegationMode } from "../config/types.agent-defaults.js";
 import type { MemoryCitationsMode } from "../config/types.memory.js";
 import { pruneMapToMaxSize } from "../infra/map-size.js";
@@ -39,10 +35,7 @@ import type { AgentPromptSurfaceKind } from "../plugins/types.js";
 import { listDeliverableMessageChannels } from "../utils/message-channel.js";
 import { truncateUtf8Prefix } from "../utils/utf8-truncate.js";
 import type { BootstrapMode } from "./bootstrap-mode.js";
-import {
-  buildFullBootstrapPromptLines,
-  buildLimitedBootstrapPromptLines,
-} from "./bootstrap-prompt.js";
+import { buildBootstrapSystemPromptSection } from "./bootstrap-prompt.js";
 import { buildSubagentPromptGuidance } from "./delegation-guidance.js";
 import type { EmbeddedContextFile } from "./embedded-agent-helpers/context-file.js";
 import type {
@@ -63,7 +56,10 @@ import type {
   ProviderSystemPromptContribution,
   ProviderSystemPromptSectionId,
 } from "./system-prompt-contribution.js";
-import { buildOpenClawControlSection } from "./system-prompt-control.js";
+import {
+  buildExecApprovalPromptGuidance,
+  buildOpenClawControlSection,
+} from "./system-prompt-control.js";
 import { buildDocumentationSection } from "./system-prompt-documentation.js";
 import {
   buildAssistantOutputDirectivesSection,
@@ -153,24 +149,6 @@ function buildSoulSection(files: ReturnType<typeof prepareContextFilesForPrompt>
     lines.push(`## ${file.path}`, "", sanitizeContextFileContentForPrompt(file.content), "");
   }
   return lines;
-}
-
-function buildExecApprovalPromptGuidance(params: {
-  runtimeChannel?: string;
-  inlineButtonsEnabled?: boolean;
-  runtimeCapabilities?: readonly string[];
-}) {
-  const runtimeChannel = normalizeOptionalLowercaseString(params.runtimeChannel);
-  const usesNativeApprovalUi =
-    params.inlineButtonsEnabled ||
-    hasNativeApprovalPromptRuntimeCapability(params.runtimeCapabilities) ||
-    isKnownNativeApprovalPromptChannel(runtimeChannel);
-  const policyGuidance =
-    "For task-authorized commands, make the execution request through the available tool and let its current policy decide whether approval is needed. Request exec approval only from an actual approval-pending result; never invent approval IDs or ask for a bare /approve.";
-  if (usesNativeApprovalUi) {
-    return `${policyGuidance} exec approval-pending: native card/buttons first. Plain /approve only when tool requires chat/manual approval; copy exact "Reply with:" command.`;
-  }
-  return `${policyGuidance} exec approval-pending: send exact /approve from "Reply with:"; never ask for another code.`;
 }
 
 function formatOwnerDisplayId(ownerId: string, ownerDisplaySecret?: string) {
@@ -317,6 +295,8 @@ export function buildAgentSystemPrompt(params: {
   reasoningLevel?: ReasoningLevel;
   /** Config-derived availability of the owner /restart and /update commands. */
   restartCommandsEnabled?: boolean;
+  /** Stable configured-agent collision with the managed setup identity. */
+  openClawSetupIssue?: string;
   /** Session/config-derived availability of /reasoning and /status guidance. */
   reasoningCommandsEnabled?: boolean;
   extraSystemPrompt?: string;
@@ -332,6 +312,7 @@ export function buildAgentSystemPrompt(params: {
   modelAliasLines?: string[];
   contextFiles?: EmbeddedContextFile[];
   bootstrapMode?: BootstrapMode;
+  bootstrapCompleted?: boolean;
   bootstrapTruncationNotice?: string;
   skillsPrompt?: string;
   /** Records the catalog selected by the renderer without changing prompt bytes. */
@@ -447,8 +428,8 @@ export function buildAgentSystemPrompt(params: {
   const messageToolAvailable = availableTools.has("message");
   const hasAutomations = availableTools.has(AUTOMATIONS_TOOL_NAME);
   const readToolName = resolveToolName("read");
-  const waitToolHints = [
-    hasExec ? `${resolveToolName("exec")} yieldMs` : "",
+  const waitHints = [
+    hasExec ? `${resolveToolName("exec")} awaitResults=true` : "",
     hasProcess ? `${resolveToolName("process")}(poll, timeout=<ms>)` : "",
   ].filter(Boolean);
   const extraSystemPrompt = params.extraSystemPrompt?.trim();
@@ -524,7 +505,7 @@ export function buildAgentSystemPrompt(params: {
       : "Single global file workspace unless explicitly told otherwise.";
   const workspaceOnlyGuidance =
     params.fsWorkspaceOnly === true
-      ? `tools.fs.workspaceOnly ON: file-tool scratch/temp/meta stays in ${hasSeparateRuntimeCwd ? "working directory" : "workspace"}, preferably \`.openclaw/tmp/\`. If file tools need it later, never exec-write \`/tmp\`; use ${hasSeparateRuntimeCwd ? "working directory" : "workspace"} path.`
+      ? `tools.fs.workspaceOnly ON: outputs that file tools need to read or write later stay in ${hasSeparateRuntimeCwd ? "working directory" : "workspace"}, preferably \`.openclaw/tmp/\`. Keep TMPDIR, TMP, and TEMP at their inherited system paths; native tools need short temporary paths for Unix sockets.`
       : "";
   const directorySection = hasSeparateRuntimeCwd
     ? [
@@ -584,27 +565,11 @@ export function buildAgentSystemPrompt(params: {
   );
   // Cache keys and bootstrap checks retain the original ordered file objects.
   const contextFiles = preparedContextFiles.map(({ file }) => file);
-  const bootstrapSystemPromptSections: string[] = [];
-  if (params.bootstrapMode && params.bootstrapMode !== "none") {
-    bootstrapSystemPromptSections.push(
-      "## Bootstrap Pending",
-      ...(params.bootstrapMode === "limited"
-        ? buildLimitedBootstrapPromptLines({
-            introLine: "Bootstrap pending; this run cannot safely finish full BOOTSTRAP.md.",
-            nextStepLine:
-              "Next: primary interactive run with normal workspace access, or user deletes workspace BOOTSTRAP.md after completion.",
-          })
-        : buildFullBootstrapPromptLines({
-            readLine:
-              params.bootstrapMode === "full" &&
-              contextFiles.some((file) => isBootstrapContextFile(file.path))
-                ? "BOOTSTRAP.md below; follow before normal reply."
-                : "Read workspace BOOTSTRAP.md; follow before normal reply.",
-            firstReplyLine: "First visible reply must follow BOOTSTRAP.md; no generic greeting.",
-          })),
-      "",
-    );
-  }
+  const bootstrapSystemPromptSections = buildBootstrapSystemPromptSection({
+    bootstrapMode: params.bootstrapMode,
+    bootstrapCompleted: params.bootstrapCompleted,
+    bootstrapContextInjected: contextFiles.some((file) => isBootstrapContextFile(file.path)),
+  });
   const bootstrapTruncationNotice = params.bootstrapTruncationNotice?.trim();
   if (bootstrapTruncationNotice) {
     bootstrapSystemPromptSections.push(
@@ -679,7 +644,7 @@ export function buildAgentSystemPrompt(params: {
     }),
     !hasSeparateRuntimeCwd && workspaceGuidance,
     renderOpenClawToolWorkflowHints && [
-      waitToolHints.length > 0 && `Long wait: no rapid poll. Use ${waitToolHints.join(" or ")}.`,
+      waitHints.length > 0 && `Wait: end turn if exit wakes you, else ${waitHints.join(" or ")}.`,
       hasSessionsSpawn && [
         "Execute work directly by default. Delegate a bounded, independent task only when parallel execution or an independent review provides a concrete benefit. Keep dependent steps with the same owner.",
         '`sessions_spawn`: clean context => `context:"isolated"`; transcript needed => `context:"fork"`. Follow the accepted completion mode.',
@@ -726,7 +691,13 @@ export function buildAgentSystemPrompt(params: {
     includeToolGuidance &&
       (providerSectionOverrides.tool_call_style || buildToolCallStyleSection()),
     ...careSection,
-    ...buildOpenClawControlSection({ hasOpenClaw, hasGateway, hasExec, restartCommandsEnabled }),
+    ...buildOpenClawControlSection({
+      hasOpenClaw,
+      hasGateway,
+      hasExec,
+      restartCommandsEnabled,
+      setupIssue: params.openClawSetupIssue,
+    }),
     ...skillsSection,
     ...toolGuidanceSection,
     ...memorySection,

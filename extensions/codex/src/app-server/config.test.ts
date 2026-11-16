@@ -333,7 +333,6 @@ describe("Codex app-server config", () => {
         approvalsReviewer: "guardian_subagent",
         serviceTier: "flex",
         codeModeOnly: true,
-        loopDetectionPreToolUseRelay: false,
         clearEnv: ["OPENAI_API_KEY"],
       },
       {
@@ -351,7 +350,6 @@ describe("Codex app-server config", () => {
       approvalsReviewer: "guardian_subagent",
       serviceTier: "flex",
       codeModeOnly: true,
-      loopDetectionPreToolUseRelay: false,
     });
     expectFields(runtime.start, "runtime start", {
       transport: "websocket",
