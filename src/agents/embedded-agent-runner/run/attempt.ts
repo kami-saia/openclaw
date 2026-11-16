@@ -27,7 +27,6 @@ import {
 import { resolveAgentDir } from "../../agent-scope.js";
 import { captureAgentPluginRuntimeRefresh } from "../../plugin-runtime-refresh.js";
 import { recordAgentCleanupFailure, runOwnedAgentCleanup } from "../../run-cleanup-timeout.js";
-import { estimateContextTokens } from "../../runtime/index.js";
 import { withRuntimeToolSchemaQuarantine } from "../../tool-schema-quarantine.js";
 import {
   clearToolSearchCatalog,
@@ -45,6 +44,11 @@ import { prepareEmbeddedSkills } from "../skill-runtime.js";
 import { unregisterAgentOverflowSessionManager } from "./agent-overflow-fallback.js";
 import { prepareEmbeddedAttemptBootstrap } from "./attempt-bootstrap-prepare.js";
 import { prepareEmbeddedAttemptBundleTools } from "./attempt-bundle-tools.js";
+// FORK: agent-driven compact tool runtime handles.
+import {
+  buildCompactToolRuntime,
+  type CompactLiveHandles,
+} from "./attempt-compact-tool-runtime.js";
 import { runEmbeddedAttemptExecutionPhase } from "./attempt-execution-phase.js";
 import { createEmbeddedAttemptExternalAbortController } from "./attempt-finalize.js";
 import { createEmbeddedAttemptPreparation } from "./attempt-preparation.js";
@@ -163,10 +167,7 @@ async function runEmbeddedAttemptOwned(
   // FORK: late-bound live handles for the agent-driven `compact` tool. The tool
   // set is constructed before the session/session-manager/lock exist, so the
   // tool closes over this ref instead of the values.
-  const compactLive: {
-    withLock?: <T>(run: () => Promise<T> | T) => Promise<T>;
-    sessionRuntimeState?: { prePromptMessageCount: number };
-  } = {};
+  const compactLive: CompactLiveHandles = {};
   let releasePreparedTools: ((reason: string) => Promise<void>) | undefined;
   let toolSearchCatalogExecutor: ToolSearchCatalogToolExecutor | undefined;
   let unsubscribeYieldTurnEnd: (() => void) | undefined;
@@ -288,60 +289,12 @@ async function runEmbeddedAttemptOwned(
       prepareEmbeddedAttemptToolBase({
         agentDir,
         attempt: params,
-        compactToolRuntime: {
-          getSessionManager: () => sessionResources.resources.sessionManager,
-          withSessionWriteLock: (run) =>
-            compactLive.withLock ? compactLive.withLock(run) : Promise.resolve(run()),
-          updateAgentMessagesAfterCompaction: (toolCallId, resultText) => {
-            // SAFETY: only buildSessionContext is called; the cast narrows to that one method.
-            const manager = sessionResources.resources.sessionManager as
-              | { buildSessionContext: () => { messages: unknown[] } }
-              | undefined;
-            const state = sessionResources.resources.session?.agent?.state;
-            if (!manager || !state) {
-              return;
-            }
-            try {
-              const ctx = manager.buildSessionContext();
-              // SAFETY: session context messages are plain records; only keys are read/written.
-              const messages = [...(ctx.messages as Array<Record<string, unknown>>)];
-              const last = messages.at(-1);
-              const lastContent =
-                last && Array.isArray(last.content)
-                  ? (last.content as Array<Record<string, unknown>>) // SAFETY: Array.isArray checked.
-                  : [];
-              // The SDK appends the assistant toolCall before execute() and the
-              // real toolResult after it returns; swapping state mid-execute
-              // would orphan the toolCall and transcript-repair would replace
-              // it with a synthetic error, killing the turn.
-              const hasOrphan =
-                Boolean(last) &&
-                last?.role === "assistant" &&
-                lastContent.some((b) => b?.type === "toolCall" && b?.id === toolCallId);
-              if (hasOrphan) {
-                messages.push({
-                  role: "toolResult",
-                  toolCallId,
-                  toolName: "compact",
-                  content: [{ type: "text", text: resultText }],
-                  isError: false,
-                  timestamp: Date.now(),
-                });
-              }
-              // SAFETY: messages came from state.messages via buildSessionContext, same shape back.
-              state.messages = messages as never;
-              if (compactLive.sessionRuntimeState) {
-                compactLive.sessionRuntimeState.prePromptMessageCount = messages.length;
-              }
-              params.onContextAccountingEvent?.({
-                kind: "compaction",
-                tokensAfter: estimateContextTokens(messages as never).tokens,
-              });
-            } catch {
-              /* best-effort: compaction already landed on disk */
-            }
-          },
-        },
+        // FORK: agent-driven `compact` tool live handles.
+        compactToolRuntime: buildCompactToolRuntime({
+          live: compactLive,
+          getResources: () => sessionResources.resources,
+          onContextAccountingEvent: params.onContextAccountingEvent,
+        }),
         setup,
         markCoreToolStage: (name) => corePluginToolStages.mark(name),
         onYield: (message, acknowledgment, messageWaitRegistered, options) => {
