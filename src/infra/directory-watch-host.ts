@@ -2,7 +2,7 @@ import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { EventEmitter } from "node:events";
 import type { Readable, Writable } from "node:stream";
 import { resolveRuntimeProcessEntrypointUrl } from "./runtime-process-url.js";
-import { resolveRuntimeWorkerArgv } from "./runtime-worker-url.js";
+import { resolveRuntimeChildArgv } from "./runtime-worker-url.js";
 
 type Listener = (event: string, filename?: string) => void;
 export type DirectoryWatch = {
@@ -36,7 +36,7 @@ function startHost(): Host {
   const child = spawn(
     process.execPath,
     [
-      ...resolveRuntimeWorkerArgv(resolveRuntimeProcessEntrypointUrl("directoryWatchHost")),
+      ...resolveRuntimeChildArgv(resolveRuntimeProcessEntrypointUrl("directoryWatchHost")),
       String(process.pid),
     ],
     {

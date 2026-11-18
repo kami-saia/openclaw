@@ -71,6 +71,18 @@ export function resolveRuntimeWorkerArgv(url: URL, execPath = process.execPath):
     : [...resolveRuntimeArgs(execPath), entry];
 }
 
+/**
+ * FORK: like resolveRuntimeWorkerArgv, but the source preload is the file-URL loader module
+ * so tsx resolves inside the child. import.meta.resolve("tsx") is a sync realpath walk on the
+ * calling thread; upstream #200565 fixed only the worker-thread path.
+ */
+export function resolveRuntimeChildArgv(url: URL, execPath = process.execPath): string[] {
+  const entry = fileURLToPath(url);
+  return runtimeNeedsTypeScriptLoader(entry, execPath)
+    ? ["--import", resolveRuntimeWorkerUrl(runtimeProcessEntrypoints.workerThreadLoader).href, entry]
+    : [...resolveRuntimeArgs(execPath), entry];
+}
+
 /** Self-hosted embedded entries use the image dispatcher; transferred scripts use Bun's runner. */
 export function resolveRuntimeWorkerEnv(url: URL, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (isEmbeddedStandaloneModule(url.href)) {
