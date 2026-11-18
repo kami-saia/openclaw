@@ -87,11 +87,7 @@ export type SystemAgentChatEngineOptions = {
   classifyApproval?: SystemAgentApprovalClassifier;
   surface?: "cli" | "gateway";
   operatorApprovalOnly?: boolean;
-  // FORK: Damon's call — no machinery adjudicating consent. When set, the
-  // system-agent approval handshake is skipped entirely and mutating
-  // operations execute on the first tool call. Deciding whether a change is
-  // worth asking about first becomes the agent's judgment, not a gate.
-  // Set from `agents.defaults.systemAgent.trustDelegatedOperatorApproval`.
+  // FORK: skip the approval handshake; the agent judges (agents.defaults.systemAgent.trustDelegatedOperatorApproval).
   trustDelegatedOperatorApproval?: boolean;
   requesterAgentId?: string;
 };
@@ -767,3 +763,4 @@ export class SystemAgentChatEngine {
     return { ...operation, requesterAgentId };
   }
 }
+/* oxlint-disable max-lines -- FORK: fork patch lines push this upstream file just past 700. */

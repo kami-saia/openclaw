@@ -392,8 +392,7 @@ async function stagePreparedPendingInput(
       }
     };
     const adopt = options.retryInterrupted === true && existing?.state === "interrupted";
-    // A channel retry after a pre-consumption failure carries a fresh run ID. Without
-    // reopening that dead attempt, every redelivery conflicts until ingress gives up.
+    // FORK: channel retry with a fresh run ID reopens the dead interrupted attempt.
     const reclaimsCancelledSourceTurn =
       options.reclaimCancelledSourceTurn === true &&
       !previous &&
@@ -748,3 +747,4 @@ export async function prepareSessionPendingInputDedupeRecovery(
 }
 
 export { readSessionSubmittedInput } from "./session-pending-input-source.js";
+/* oxlint-disable max-lines -- FORK: fork patch lines push this upstream file just past 700. */
