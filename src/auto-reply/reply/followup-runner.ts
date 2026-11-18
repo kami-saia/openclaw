@@ -126,6 +126,8 @@ export function createFollowupRunner(
     const admissionNotices: ReplyPayload[] = [];
     let completion: QueuedFollowupReplyBatch["completion"] = { kind: "completed" };
     let executionEntered = false;
+    // A revoked input settles visibly through its source, also before turn admission.
+    let withheld = false;
     const hasSurvivingSources = () => {
       const claim = queued.controllerClaim ?? queued.controllerInput?.claim;
       return Boolean(
@@ -404,23 +406,14 @@ export function createFollowupRunner(
         );
       }
     } catch (error) {
-      let operatorAuthorityLost = false;
-      try {
-        queued.operatorAuthority?.assertCurrent();
-      } catch {
-        operatorAuthorityLost = true;
-      }
-      if (operatorAuthorityLost) {
-        // Revoked input is terminal; retrying it would hold the queue indefinitely.
-        disposition = { kind: "consumed" };
-        completion = { kind: "aborted" };
-        defaultRuntime.error?.("followup queue: canceled input after loss of operator authority");
-      } else if (
-        (queued.run.internalEventExecution &&
+      const authorityLost = queued.operatorAuthority?.signal?.aborted === true;
+      if (
+        !authorityLost &&
+        ((queued.run.internalEventExecution &&
           (executionEntered ||
             (queued.controllerClaim ?? queued.controllerInput?.claim)?.retryBeforeExecution !==
               true)) ||
-        (operation?.result?.kind === "aborted" && operation.result.code === "aborted_by_user")
+          (operation?.result?.kind === "aborted" && operation.result.code === "aborted_by_user"))
       ) {
         disposition =
           !queued.run.internalEventExecution && hasSurvivingSources()
@@ -430,7 +423,11 @@ export function createFollowupRunner(
         completion = queued.run.internalEventExecution
           ? { kind: "failed", error: formatErrorMessage(error) }
           : resolveFollowupCompletion({ kind: "aborted", reason: "user" });
-      } else if (!executionEntered && isSessionPendingInputConflictError(error)) {
+      } else if (
+        !authorityLost &&
+        !executionEntered &&
+        isSessionPendingInputConflictError(error)
+      ) {
         // The durable input row refuses this source permanently; replaying it would
         // hot-loop the mailbox and wedge every later message behind it.
         disposition = { kind: "consumed" };
@@ -439,10 +436,17 @@ export function createFollowupRunner(
           `followup queue: pending input refused before execution; refusing replay: ${formatErrorMessage(error)}`,
         );
         operation?.fail("run_failed", error);
-      } else if (disposition.kind === "consumed") {
-        completion = { kind: "failed", error: formatErrorMessage(error) };
+      } else if (authorityLost || disposition.kind === "consumed") {
+        // Revoked input is terminal and visible; retrying it would hold the queue indefinitely.
+        disposition = { kind: "consumed" };
+        withheld = authorityLost;
+        completion = {
+          kind: "failed",
+          error: formatErrorMessage(error),
+          ...(authorityLost ? { notice: `withheld: ${formatErrorMessage(error)}` } : {}),
+        };
         defaultRuntime.error?.(
-          `followup queue: terminal handling failed after execution; refusing replay: ${formatErrorMessage(error)}`,
+          `followup queue: input withheld; refusing replay: ${formatErrorMessage(error)}`,
         );
         operation?.fail("run_failed", error);
       } else {
@@ -463,14 +467,14 @@ export function createFollowupRunner(
       const sourceDisposition = (admittedTurn?.queued ?? queued).queuedFollowupReplyDisposition;
       if (
         disposition.kind === "consumed" &&
-        admittedTurn &&
+        (admittedTurn || withheld) &&
         sourceDisposition?.kind === "deliver"
       ) {
         try {
           await sourceDisposition.deliver({
             kind: "queued-followup",
-            runId: admittedTurn.runId,
-            originatingChannel: admittedTurn.queued.originatingChannel,
+            runId: admittedTurn?.runId ?? queued.sourceTurnId ?? queued.messageId ?? "",
+            originatingChannel: (admittedTurn?.queued ?? queued).originatingChannel,
             payloads: terminalPayloads,
             completion,
           });
