@@ -137,10 +137,12 @@ async function withFixture(
               );
               return;
             }
-            let text = "";
+            const chunks: Buffer[] = [];
             for await (const chunk of req) {
-              text += chunk;
+              chunks.push(chunk as Buffer);
             }
+            // Decode once: per-chunk string concat splits multibyte UTF-8 across chunk boundaries.
+            const text = Buffer.concat(chunks).toString("utf8");
             const request = {
               url: req.url ?? "",
               auth: req.headers.authorization,
