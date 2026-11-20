@@ -4,10 +4,6 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_COMPACTION_SETTINGS } from "../../../packages/agent-core/src/harness/compaction/compaction.js";
 import type { OpenClawConfig } from "../../config/config.js";
-import {
-  clearAgentOverflowStash,
-  prepareAgentOverflowFallback,
-} from "../embedded-agent-runner/run/agent-overflow-fallback.js";
 import type { AgentMessage } from "../runtime/index.js";
 import type { SessionEntry, SessionManager } from "../sessions/index.js";
 import { createCompactTool } from "./compact-tool.js";
@@ -102,7 +98,6 @@ describe("compact-tool", () => {
   let workspaceDir: string;
 
   beforeEach(() => {
-    clearAgentOverflowStash(KEY);
     workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), "compact-tool-test-"));
   });
 
@@ -198,14 +193,6 @@ describe("compact-tool", () => {
       });
     });
 
-    it("keeps nothing when keepRecent is false (overflow fallback path)", async () => {
-      const { tool, prepareCalls } = makeTool();
-      const { text } = await run(tool!, { summary: "s", keepRecent: false });
-      const settings = (prepareCalls[0] as { settings: { keepRecentTokens: number } }).settings;
-      expect(settings.keepRecentTokens).toBe(0);
-      expect(text).toContain("keepRecent=false");
-    });
-
     it("runs session writes inside the provided write lock", async () => {
       const order: string[] = [];
       const { tool } = makeTool({
@@ -295,97 +282,6 @@ describe("compact-tool", () => {
       expect(spy).toHaveBeenCalled();
       expect(managed.compactions).toHaveLength(1);
       expect(text).toContain("Compaction complete");
-    });
-  });
-
-  describe("overflow stash restore", () => {
-    function stashedSetup() {
-      const managed = createManager([
-        entry("e1", "user"),
-        entry("e2", "assistant"),
-        entry("e3", "toolResult"),
-        entry("e4", "user", "cut-1"),
-        entry("e5", "assistant", "cut-2"),
-      ]);
-      const prompt = prepareAgentOverflowFallback({
-        sessionManager: managed.manager,
-        sessionKey: KEY,
-        sessionId: "sess-1",
-        cutMessages: 2,
-      });
-      expect(prompt).not.toBeNull();
-      return managed;
-    }
-
-    it("restores the stashed tail when keepRecent is false", async () => {
-      const managed = stashedSetup();
-      const tool = createCompactTool({
-        sessionKey: KEY,
-        sessionId: "sess-1",
-        config: agentConfig(),
-        getSessionManager: () => managed.manager,
-        prepareCompactionOverride: () => ({
-          ok: true,
-          value: { firstKeptEntryId: "e1", tokensBefore: 9 },
-        }),
-      });
-      const { text } = await run(tool!, { summary: "s", keepRecent: false });
-      // cut tail + the "fallback completed" notice
-      expect(managed.appended.length).toBeGreaterThanOrEqual(3);
-      expect(text).toContain("Restored");
-      expect(text).toContain("context-overflow fallback");
-    });
-
-    it("leaves the stash alone when keepRecent is true", async () => {
-      const managed = stashedSetup();
-      const tool = createCompactTool({
-        sessionKey: KEY,
-        sessionId: "sess-1",
-        config: agentConfig(),
-        getSessionManager: () => managed.manager,
-        prepareCompactionOverride: () => ({
-          ok: true,
-          value: { firstKeptEntryId: "e1", tokensBefore: 9 },
-        }),
-      });
-      const { text } = await run(tool!, { summary: "s" });
-      expect(managed.appended).toHaveLength(0);
-      expect(text).not.toContain("Restored");
-    });
-
-    it("compacts normally when keepRecent is false but nothing was stashed", async () => {
-      const { tool, managed } = makeTool({ sessionId: "sess-none" });
-      const { text } = await run(tool!, { summary: "s", keepRecent: false });
-      expect(managed.compactions).toHaveLength(1);
-      expect(text).not.toContain("Restored");
-    });
-
-    it("restores after the compaction entry, not before it", async () => {
-      const managed = stashedSetup();
-      const order: string[] = [];
-      (managed.manager as unknown as { appendCompaction: () => void }).appendCompaction = () => {
-        order.push("compaction");
-      };
-      const originalAppend = managed.manager.appendMessage.bind(managed.manager);
-      (managed.manager as unknown as { appendMessage: (m: AgentMessage) => void }).appendMessage = (
-        message: AgentMessage,
-      ) => {
-        order.push("message");
-        originalAppend(message as Parameters<typeof originalAppend>[0]);
-      };
-      const tool = createCompactTool({
-        sessionKey: KEY,
-        sessionId: "sess-1",
-        config: agentConfig(),
-        getSessionManager: () => managed.manager,
-        prepareCompactionOverride: () => ({
-          ok: true,
-          value: { firstKeptEntryId: "e1", tokensBefore: 9 },
-        }),
-      });
-      await run(tool!, { summary: "s", keepRecent: false });
-      expect(order[0]).toBe("compaction");
-      expect(order.slice(1).every((step) => step === "message")).toBe(true);
     });
   });
 

@@ -40,8 +40,6 @@ import {
 import { log } from "../logger.js";
 import { remapSkillReferencePaths } from "../sandbox-skills.js";
 import { prepareEmbeddedSkills } from "../skill-runtime.js";
-// FORK: overflow fallback session-manager registry.
-import { unregisterAgentOverflowSessionManager } from "./agent-overflow-fallback.js";
 import { prepareEmbeddedAttemptBootstrap } from "./attempt-bootstrap-prepare.js";
 import { prepareEmbeddedAttemptBundleTools } from "./attempt-bundle-tools.js";
 // FORK: agent-driven compact tool runtime handles.
@@ -699,8 +697,6 @@ async function runEmbeddedAttemptOwned(
       await releaseTools();
     }
     clearToolActivityRun(params.runId);
-    // FORK: drop the overflow-fallback session manager handle for this run.
-    unregisterAgentOverflowSessionManager(params.runId);
     try {
       await cleanupStep("embedded-preparation", cleanupEmbeddedPrepResourcesAfterEarlyExit);
     } catch (cleanupErr) {

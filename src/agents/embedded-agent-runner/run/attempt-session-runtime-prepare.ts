@@ -43,12 +43,10 @@ import {
   retireSessionSystemPrompt,
 } from "../session-prompt-state.js";
 import { restoreCacheTtlToolResultProjections } from "../tool-result-truncation.js";
-// FORK: overflow fallback session-manager registry.
-import { registerAgentOverflowSessionManager } from "./agent-overflow-fallback.js";
 import type { prepareEmbeddedAttemptBundleTools } from "./attempt-bundle-tools.js";
+import type { SystemPromptUpdatePreparation } from "./attempt-permission-prompt.js";
 // FORK: served_model= divergence token.
 import { resolveDivergentServedModel } from "./attempt-served-model.js";
-import type { SystemPromptUpdatePreparation } from "./attempt-permission-prompt.js";
 import {
   prepareEmbeddedAttemptAgentSession,
   prepareEmbeddedAttemptSessionBoundary,
@@ -154,9 +152,6 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
         runAbortSignal,
         onSessionManagerCreated: (manager) => {
           resources.sessionManager = manager;
-          // FORK: publish for the overflow fallback, which runs outside this
-          // closure in the recovery path.
-          registerAgentOverflowSessionManager(attempt.runId, manager);
           resources.ownsSessionManager = manager !== attempt.sessionManager;
         },
         resolveActiveContextEnginePluginId: input.resolveActiveContextEnginePluginId,

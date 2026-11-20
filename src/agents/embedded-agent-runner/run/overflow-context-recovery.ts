@@ -32,12 +32,6 @@ import {
   sessionLikelyHasOversizedToolResults,
   truncateOversizedToolResultsInSessionManager,
 } from "../tool-result-truncation.js";
-// FORK: agent-compaction overflow fallback (turn-boundary cut + resend).
-import {
-  getAgentOverflowSessionManager,
-  hasAgentOverflowStash,
-  prepareAgentOverflowFallback,
-} from "./agent-overflow-fallback.js";
 import { isCurrentAttemptReplaySafe } from "./attempt-terminal-evidence.js";
 import {
   compactEmbeddedRunForRecovery,
@@ -86,8 +80,6 @@ type EmbeddedRunOverflowRecoveryInput = EmbeddedRunCompactionRecoveryInput & {
   };
   attemptCompactionCount: number;
   prepareCurrentTranscriptRetry: () => void;
-  /** FORK: activate a synthetic internal user prompt for the retry. */
-  prepareAgentOverflowRetry?: (prompt: string) => void;
   markOwnedTranscriptRetry: () => void;
   /** Waits out a transient provider failure; false when the retry policy declines. */
   retryTransientCompactionFailure: (failure: {
@@ -297,40 +289,6 @@ async function recoverContextPressure(
   );
 
   const isCompactionFailure = isCompactionFailureError(errorText);
-
-  // FORK: agent-compaction overflow fallback. Before handing the transcript to
-  // a detached summarizer, cut the recent tail at a turn boundary and resend
-  // with an overflow prompt so the model compacts itself. The cut tail is
-  // restored by the `compact` tool once it runs.
-  if (
-    !isCompactionFailure &&
-    runParams.config?.agents?.defaults?.compaction?.mode === "agent" &&
-    input.prepareAgentOverflowRetry &&
-    !hasAgentOverflowStash(runParams.sessionKey, activeSession.id)
-  ) {
-    const overflowSessionManager = getAgentOverflowSessionManager(runParams.runId);
-    if (overflowSessionManager) {
-      const fallback = prepareAgentOverflowFallback({
-        sessionManager: overflowSessionManager,
-        ...(runParams.sessionKey ? { sessionKey: runParams.sessionKey } : {}),
-        sessionId: activeSession.id,
-      });
-      if (fallback) {
-        input.state.overflowCompactionAttempts += 1;
-        log.warn(
-          `[agent-overflow-fallback] engaged for ${input.modelSelection.provider}/${input.modelSelection.model}; ` +
-            `cutEntries=${fallback.cutEntryCount} diagId=${overflowDiagId}; ` +
-            "retrying with agent-driven compaction prompt",
-        );
-        input.prepareAgentOverflowRetry(fallback.prompt);
-        return { action: "retry" };
-      }
-      log.warn(
-        `[agent-overflow-fallback] no safe turn-boundary cut for ${input.modelSelection.provider}/${input.modelSelection.model}; ` +
-          "falling through to default overflow recovery",
-      );
-    }
-  }
 
   // Compaction here budgets against the model's context window, so it cannot make the request fit
   // under the provider's own ceiling, and every retry re-sends a payload already rejected. Stop

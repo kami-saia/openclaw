@@ -30,7 +30,6 @@ import { incrementCompactionCount } from "../../auto-reply/reply/session-updates
 import type { OpenClawConfig } from "../../config/config.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { resolveUserTimezone } from "../date-time.js";
-import { restoreAgentOverflowStash } from "../embedded-agent-runner/run/agent-overflow-fallback.js";
 // FORK: upstream dropped the runtime-index re-export of prepareCompaction; import it from agent-core directly.
 import type {
   CompactionPreparation,
@@ -51,18 +50,6 @@ const CompactToolSchema = Type.Object({
       "(paths, ids, commands, numbers). Preserve decisions, corrections, retractions, and any " +
       "user statement that changed direction as written.",
   }),
-  /**
-   * Fallback (context-overflow) compaction preserves nothing: the recent tail
-   * was already programmatically cut out of the request and is re-appended by
-   * the runner after this call returns.
-   */
-  keepRecent: Type.Optional(
-    Type.Boolean({
-      description:
-        "Keep the recent tail of the conversation after the summary (default true). " +
-        "Set false only when instructed by a context-overflow fallback prompt.",
-    }),
-  ),
 });
 
 function formatDateStamp(nowMs: number, timezone: string): string {
@@ -128,14 +115,14 @@ export function createCompactTool(options: {
     name: "compact",
     description:
       "Compact conversation history by replacing older messages with your own structured summary, " +
-      "and record that summary in today's memory file. Call this when a context pressure or " +
-      "context-overflow prompt tells you to compact.",
+      "and record that summary in today's memory file. Call this when a context pressure " +
+      "prompt tells you to compact.",
     label: "Compact conversation history",
     parameters: CompactToolSchema,
     async execute(toolCallId, params) {
       const prep = options.prepareCompactionOverride ?? prepareCompaction;
       // SAFETY: params is validated against CompactToolSchema before execute runs.
-      const typed = params as { summary?: string; keepRecent?: boolean };
+      const typed = params as { summary?: string };
       const summary = typed.summary?.trim();
       if (!summary) {
         return {
@@ -160,15 +147,10 @@ export function createCompactTool(options: {
 
       try {
         const pathEntries = sessionManager.getBranch();
-        const keepRecent = typed.keepRecent !== false;
         const settings = {
           enabled: true,
           reserveTokens: DEFAULT_COMPACTION_SETTINGS.reserveTokens,
-          // keepRecent=false is the overflow-fallback path: the recent tail was
-          // already cut from the request and is re-appended by the runner.
-          keepRecentTokens: keepRecent
-            ? (cfg?.agents?.defaults?.compaction?.keepRecentTokens ?? 4096)
-            : 0,
+          keepRecentTokens: cfg?.agents?.defaults?.compaction?.keepRecentTokens ?? 4096,
         };
 
         const prepared = prep(pathEntries, settings);
@@ -213,22 +195,8 @@ export function createCompactTool(options: {
         });
 
         log.info(
-          `Agent compaction: sessionKey=${sessionKey} tokensBefore=${tokensBefore} keepRecent=${keepRecent} summaryLength=${summary.length}`,
+          `Agent compaction: sessionKey=${sessionKey} tokensBefore=${tokensBefore} summaryLength=${summary.length}`,
         );
-
-        // Overflow fallback: the runner cut the recent tail at a turn boundary
-        // before this request was resent. Restore it now so ordering is
-        // summary -> re-appended tail -> "fallback completed" notice.
-        let restoredTailCount = 0;
-        if (!keepRecent) {
-          await wrap(async () => {
-            restoredTailCount = await restoreAgentOverflowStash({
-              sessionManager,
-              sessionKey,
-              ...(options.sessionId ? { sessionId: options.sessionId } : {}),
-            });
-          });
-        }
 
         const storeCtx = options.getSessionStoreContext?.();
         if (storeCtx?.sessionStore && storeCtx.storePath) {
@@ -266,10 +234,7 @@ export function createCompactTool(options: {
         }
 
         const resultText =
-          `Compaction complete. tokensBefore=${tokensBefore}, summaryLength=${summary.length}, keepRecent=${keepRecent}. ` +
-          (restoredTailCount > 0
-            ? `Restored ${restoredTailCount} message(s) cut by the context-overflow fallback. `
-            : "") +
+          `Compaction complete. tokensBefore=${tokensBefore}, summaryLength=${summary.length}. ` +
           (memoryTarget
             ? `Summary saved to session and ${memoryTarget}. `
             : "Summary saved to session. ") +

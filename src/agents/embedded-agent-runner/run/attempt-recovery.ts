@@ -591,11 +591,6 @@ export async function recoverEmbeddedRunAttempt(input: {
     attemptCompactionCount,
     prepareCurrentTranscriptRetry: sessionPromptState.continueFromCurrentTranscript,
     prepareCompactedTranscriptRetry: sessionPromptState.prepareCompactedTranscriptRetry,
-    // FORK: agent-compaction overflow fallback resend prompt. Upstream's
-    // activateInternalPrompt now hardcodes persisted=true, which is what the
-    // fork passed explicitly, so the second argument is gone.
-    prepareAgentOverflowRetry: (prompt: string) =>
-      sessionPromptState.activateInternalPrompt(prompt),
     markOwnedTranscriptRetry: sessionPromptState.markOwnedTranscriptRetry,
     // A provider outage during recovery compaction gets the same bounded backoff as a
     // failed model request; the retried attempt rechecks the budget and compacts again.
