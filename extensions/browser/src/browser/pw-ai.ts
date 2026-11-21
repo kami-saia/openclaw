@@ -2,8 +2,6 @@
 import * as session from "./pw-session.js";
 import * as activity from "./pw-tools-core.activity.js";
 import * as downloads from "./pw-tools-core.downloads.js";
-// FORK: fork-only `browser action=extract` page capture.
-import * as extract from "./pw-tools-core.extract.js";
 import * as interactionActions from "./pw-tools-core.interactions.actions.js";
 import * as interactionContent from "./pw-tools-core.interactions.content.js";
 import * as interactionExecution from "./pw-tools-core.interactions.execution.js";
@@ -42,8 +40,6 @@ export const pwAi = {
   getPageTextViaPlaywright: activity.getPageTextViaPlaywright,
   highlightViaPlaywright: interactionActions.highlightViaPlaywright,
   navigateViaPlaywright: snapshot.navigateViaPlaywright,
-  // FORK: fork-only `browser action=extract`.
-  pageContentViaPlaywright: extract.pageContentViaPlaywright,
   pdfViaPlaywright: snapshot.pdfViaPlaywright,
   responseBodyViaPlaywright: responses.responseBodyViaPlaywright,
   setDeviceViaPlaywright: state.setDeviceViaPlaywright,

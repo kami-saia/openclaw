@@ -16,8 +16,6 @@ import type {
   BrowserBatchActionResult,
 } from "./client-actions-types.js";
 import type { BrowserActRequest } from "./client-actions.types.js";
-// FORK: extract result type.
-import type { BrowserPageContentResult } from "./client.types.js";
 import {
   browserClientTimeout,
   postBrowserJson,
@@ -272,34 +270,6 @@ export async function browserPdfSave(
     "/pdf",
     { targetId: opts.targetId },
     browserClientTimeout(baseUrl, undefined, 20000),
-    opts,
-  );
-}
-
-/**
- * FORK: structured page extraction used by the `browser action=extract` tool.
- * Upstream only ships `browserPageText` (plain text via GET /text); the fork's
- * extract flow needs raw HTML plus selector/ignoreSelectors scoping, which the
- * control server exposes at POST /extract.
- */
-export async function browserPageContent(
-  baseUrl: BrowserClientTarget,
-  opts: BrowserActionOptions & {
-    timeoutMs: number;
-    selector?: string;
-    ignoreSelectors?: string[];
-  },
-): Promise<BrowserPageContentResult> {
-  return await postBrowserJson(
-    baseUrl,
-    "/extract",
-    {
-      targetId: opts.targetId,
-      timeoutMs: opts.timeoutMs,
-      selector: opts.selector,
-      ignoreSelectors: opts.ignoreSelectors,
-    },
-    opts.timeoutMs,
     opts,
   );
 }

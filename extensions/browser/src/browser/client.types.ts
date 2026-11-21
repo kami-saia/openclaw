@@ -153,20 +153,3 @@ export type BrowserOpenResult = BrowserTab & {
 };
 
 export type { AriaSnapshotNode as SnapshotAriaNode } from "./cdp-ax.js";
-// FORK: private page capture returned to fork-only `browser action=extract` callers.
-export type BrowserPageContentResult =
-  | {
-      ok: true;
-      targetId: string;
-      url: string;
-      html: string;
-    }
-  | {
-      ok: false;
-      error: "invalid_selector" | "selector_not_found";
-      message: string;
-      targetId: string;
-      url: string;
-    };
-
-

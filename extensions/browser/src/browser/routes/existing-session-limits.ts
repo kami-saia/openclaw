@@ -47,8 +47,6 @@ export const EXISTING_SESSION_LIMITS = {
     snapshotSelector:
       "selector/frame snapshots are not supported for existing-session profiles; snapshot the whole page and use refs.",
   },
-  // FORK: fork-only `browser action=extract`.
-  extract: "extract is not supported for existing-session profiles; use snapshot instead.",
   responseBody: "response body is not supported for existing-session profiles yet.",
   errors:
     "errors is not supported for existing-session profiles; use a managed browser profile to collect page errors, or snapshot to inspect the current page.",
