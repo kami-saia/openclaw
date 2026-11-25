@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { normalizeAgentId } from "@openclaw/normalization-core/agent-id";
 import { err, ok } from "@openclaw/normalization-core/result";
 import {
@@ -232,11 +233,22 @@ export async function pruneRegisteredAgentToolUsage(input: {
     ) {
       continue;
     }
-    await write(
-      { agentId: entry.agentId, path: entry.path, env },
-      input.assertCurrent,
-      "toolUsage.prune",
-      { now: input.now },
-    );
+    // Retention must not materialize a registered database whose file is gone,
+    // and one vanished database must not abort pruning for the remaining rows.
+    if (!existsSync(entry.path)) {
+      continue;
+    }
+    try {
+      await write(
+        { agentId: entry.agentId, path: entry.path, env },
+        input.assertCurrent,
+        "toolUsage.prune",
+        { now: input.now },
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
+        throw error;
+      }
+    }
   }
 }
