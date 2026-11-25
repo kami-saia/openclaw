@@ -146,7 +146,9 @@ async function planConfigRepair(
   // reference again would make successful repairs look like unexpected config drift.
   // Core-only selection must not resolve plugin migration contracts before state admission.
   const writeConfig = pluginContracts
-    ? restoreDoctorConfigEnvRefs(config, prepareDoctorConfigReferenceSource(snapshot))
+    ? withPluginContracts(() =>
+        restoreDoctorConfigEnvRefs(config, prepareDoctorConfigReferenceSource(snapshot)),
+      )
     : config;
   const validation = await withPluginContracts(async () => {
     const validationConfig = omitDeferredPluginMigrationConfig(config, deferredPluginMigrations);

@@ -118,7 +118,7 @@ function readTables(db: DatabaseSync): Map<string, TableInfo> {
       continue;
     }
     const columns =
-      row.type === "shadow"
+      row.type === "shadow" || row.type === "virtual"
         ? []
         : readSqliteRows<{
             name: string;
