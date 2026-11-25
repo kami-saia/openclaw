@@ -39,6 +39,7 @@ import {
   type AcceptedCompactionSuccessor,
 } from "../embedded-agent-runner/compaction-successor.js";
 import { runContextEngineMaintenance } from "../embedded-agent-runner/context-engine-maintenance.js";
+import { attachCompactionAccountingRecorder } from "../embedded-agent-runner/run/compaction-accounting-bridge.js";
 import { shouldPreemptivelyCompactBeforePrompt } from "../embedded-agent-runner/run/preemptive-compaction.js";
 import { resolveLiveToolResultMaxChars } from "../embedded-agent-runner/tool-result-truncation.js";
 import type { EmbeddedAgentCompactResult } from "../embedded-agent-runner/types.js";
@@ -185,7 +186,7 @@ export async function runCliTurnCompactionLifecycle(
         : (input.abortSignal ?? sourceSignal);
     const params = { ...input, abortSignal };
     const assertActive = composeSessionSourceAssertion(
-      [assertSourceActive, operatorAuthority?.assertCurrent, host.assertActive],
+      [assertSourceActive, host.assertActive],
       (assertSources) => {
         params.abortSignal?.throwIfAborted();
         assertSources();
@@ -462,6 +463,7 @@ export async function runCliTurnCompactionLifecycle(
               currentTokenCount,
               trigger: "cli_budget",
             });
+            attachCompactionAccountingRecorder(runtimeContext, { operatorAuthority });
             const runtimeSettings = buildContextEngineRuntimeSettings({
               contextEngineHost: buildGenericCliContextEngineHostSupport({
                 backendId: params.provider,

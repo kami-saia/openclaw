@@ -33,7 +33,10 @@ import {
 } from "../../local-model-lean.js";
 import { supportsModelTools } from "../../model-tool-support.js";
 import { resolveNativeWebSearchRoute } from "../../native-web-search.js";
+import { participationAllowsTool } from "../../participation-ceiling.js";
+import { getPreparedModelRuntimePolicyConfigReader } from "../../prepared-model-runtime-auth.js";
 import { recordAgentCleanupFailure, runOwnedAgentCleanup } from "../../run-cleanup-timeout.js";
+import { prepareRunSessionPermissionPolicy } from "../../session-permission-policy.js";
 import { resolveSessionPlacementComputer } from "../../session-placement-computer.js";
 import {
   resolveSessionPermissionExecMode,
@@ -90,6 +93,7 @@ export async function prepareEmbeddedAttemptToolBase(params: {
   const { attempt } = params;
   let getRunAbortDeadlineAtMs: (() => number | undefined) | undefined;
   const pluginExecutionAuthority = readAdmittedRunOperatorAuthority(attempt.admittedRunContext);
+  const participationCeiling = pluginExecutionAuthority?.participationCeiling;
   const pluginExecutionSkillsSnapshot = attempt.skillsSnapshot;
   const workspaceReadiness = captureAgentWorkspaceReadiness(attempt.sessionKey);
   const captureBaseline = attempt.awaitSessionDiffBaseline;
@@ -125,27 +129,39 @@ export async function prepareEmbeddedAttemptToolBase(params: {
   const toolsAllowWithForcedRuntimeTools = toolRunContext.runtimeToolAllowlist;
   const toolsEnabled = supportsModelTools(attempt.model);
   const isRawModelRun = attempt.modelRun === true || attempt.promptMode === "none";
-  const toolSurfaceRuntime = createAgentHarnessToolSurfaceRuntimeCore({
-    config: attempt.config,
-    trigger: attempt.trigger,
-    agentId: params.setup.sessionAgentId,
-    sessionKey: params.setup.sandboxSessionKey,
-    forceMessageTool: forceDirectMessageTool,
-    model: attempt.model,
-    modelProvider: attempt.provider,
-    modelId: attempt.modelId,
-    codeModeOverride: attempt.codeModeOverride,
-    disableToolSearch: attempt.disableToolSearch,
-    modelToolsEnabled: toolsEnabled,
-    disableTools: attempt.disableTools,
-    isRawModelRun,
-    toolsAllow: attempt.toolsAllow,
-    runtimeToolAllowlist: toolsAllowWithForcedRuntimeTools,
-    sessionId: attempt.sessionId,
-    runId: attempt.runId,
-    contextTokenBudget: attempt.contextTokenBudget,
-    executeTool: params.toolSearchCatalogExecutor,
-  });
+  const toolSurfaceRuntime = createAgentHarnessToolSurfaceRuntimeCore(
+    {
+      config: attempt.config,
+      trigger: attempt.trigger,
+      agentId: params.setup.sessionAgentId,
+      sessionKey: params.setup.sandboxSessionKey,
+      forceMessageTool: forceDirectMessageTool,
+      model: attempt.model,
+      modelProvider: attempt.provider,
+      modelId: attempt.modelId,
+      codeModeOverride: participationCeiling ? false : attempt.codeModeOverride,
+      // Without its controls, discovery would hide allowed tools or re-add forbidden ones.
+      disableToolSearch:
+        attempt.disableToolSearch ||
+        (participationCeiling && attempt.swarmCollector) ||
+        (participationCeiling &&
+          [...TOOL_SEARCH_CONTROL_TOOL_NAMES].some(
+            (name) => !participationAllowsTool(participationCeiling!, name),
+          ))
+          ? true
+          : undefined,
+      modelToolsEnabled: toolsEnabled,
+      disableTools: attempt.disableTools,
+      isRawModelRun,
+      toolsAllow: attempt.toolsAllow,
+      runtimeToolAllowlist: toolsAllowWithForcedRuntimeTools,
+      sessionId: attempt.sessionId,
+      runId: attempt.runId,
+      contextTokenBudget: attempt.contextTokenBudget,
+      executeTool: params.toolSearchCatalogExecutor,
+    },
+    pluginExecutionAuthority,
+  );
   const {
     codeModeControlsEnabled: codeModeControlsEnabledForRun,
     toolSearchConfig,
@@ -347,9 +363,9 @@ export async function prepareEmbeddedAttemptToolBase(params: {
         ...(params.compactToolRuntime ? { compactToolRuntime: params.compactToolRuntime } : {}),
         awaitSessionDiffBaseline,
         getRunAbortDeadlineAtMs: () => getRunAbortDeadlineAtMs?.(),
-        pluginExecutionAuthority,
         pluginExecutionSkillsSnapshot,
         assertInvocationCurrent: assertActive,
+        prepareHostFileMutation: assertActive?.prepareSessionSourceStorageEffect,
         agentId: params.setup.sessionAgentId,
         ...buildConversationContext(),
         exec: {
@@ -376,6 +392,9 @@ export async function prepareEmbeddedAttemptToolBase(params: {
         codeModeSkills,
         installedSkills: params.installedSkills,
         preparedModelRuntime: attempt.preparedModelRuntime,
+        readDelegationConfig: getPreparedModelRuntimePolicyConfigReader(
+          attempt.preparedModelRuntime,
+        ),
         requireWorkspaceOnly: attempt.requireWorkspaceOnly,
         sessionReadScopeKey: attempt.sessionReadScopeKey,
         sessionConfigSource: attempt.oneShotCliRun ? "pinned" : "runtime",
@@ -387,6 +406,7 @@ export async function prepareEmbeddedAttemptToolBase(params: {
             resolveWebSearchRoute().kind === "managed";
         },
         githubPublicationAvailable: attempt.githubPublicationAvailable,
+        sessionProjectMoveEligible: attempt.sessionProjectMoveEligible,
         githubPublicationConfigurationAware:
           !isRawModelRun && attempt.operation !== "settled-tool-finalization" ? true : undefined,
         abortSignal,
@@ -499,7 +519,9 @@ export async function prepareEmbeddedAttemptToolBase(params: {
         sessionKey: params.setup.sandboxSessionKey,
         sessionId: attempt.sessionId,
         runId: attempt.runId,
-        approvalReviewerDeviceId: attempt.approvalReviewerDeviceId,
+        approvalReviewerDeviceId: participationCeiling
+          ? undefined
+          : attempt.approvalReviewerDeviceId,
         channelId: attempt.currentChannelId,
         trace: params.runTrace,
         onToolOutcome: attempt.onToolOutcome,
@@ -526,7 +548,15 @@ export async function prepareEmbeddedAttemptToolBase(params: {
         ]);
         attempt.permissionMode = mode ?? undefined;
         attempt.execOverrides = { ...baseExecOverrides };
-        const permission = mode ? { root: params.setup.sessionPermissionRoot, mode } : undefined;
+        const permission = await prepareRunSessionPermissionPolicy({
+          root: params.setup.sessionPermissionRoot,
+          mode: attempt.permissionMode,
+          pluginExecutionAuthority,
+          config: attempt.config,
+          agentId: params.setup.sessionAgentId,
+          sandboxAvailable: params.setup.sandbox?.enabled === true,
+          execOverrides: attempt.execOverrides,
+        });
         const nextTools = await constructTools(permission, toolAbortSignal);
         toolsRaw.splice(0, toolsRaw.length, ...nextTools);
       },

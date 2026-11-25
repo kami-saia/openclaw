@@ -3,9 +3,10 @@ import {
   isRuntimeContextMessage,
   runtimeContextContentToText,
   type Api,
-  type AssistantMessage,
+  type AssistantHistoryMessage,
   type Context,
   type Model,
+  type PreparedSystemPrompt,
 } from "@openclaw/llm-core";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type {
@@ -14,7 +15,7 @@ import type {
   ResponseInputItem,
   ResponseInputMessageContentList,
 } from "openai/resources/responses/responses.js";
-import { getAiTransportHost } from "../host.js";
+import { getAiTransportHost, type AiTransportHost } from "../host.js";
 import { isImageWithMediaPayload } from "../media-payload.js";
 import { preparedRequestSuffix } from "../provider-options.js";
 import { transformProviderMessages } from "../provider-transcript-transform.js";
@@ -29,6 +30,7 @@ import {
   splitSystemPromptIdentityBoundary,
 } from "../utils/system-prompt-cache-boundary.js";
 import { parseOpenAIResponsesTextSignature } from "../utils/text-signature.js";
+import { anchorRuntimeContextCarriers } from "./openai-responses-carrier-anchoring.js";
 import {
   buildOpenAIResponsesCompactionReplayPlan,
   readOpenAIResponsesItemRecoveryAnchor,
@@ -147,7 +149,7 @@ function prepareOpenAIResponsesReasoningItemForReplay(
 
 export { encodeTextSignatureV1 } from "../utils/text-signature.js";
 
-function responsesAssistantTurnKey(message: AssistantMessage) {
+function responsesAssistantTurnKey(message: AssistantHistoryMessage) {
   // Early fragments keep this identity when the provider ID arrives at completion.
   const id = message.turnId || message.responseId;
   return id ? `${message.provider}:${message.api}:${message.model}:${id}` : undefined;
@@ -237,10 +239,23 @@ export type ConvertResponsesMessagesOptions = {
 
 // Weak source keys release projections with history. Keep a bounded set of route/position
 // variants so interleaved requests reuse their own result without retaining every route.
-const responsesMessageProjections = new WeakMap<
-  Context["messages"][number],
-  Map<string, ResponseInput>
->();
+type ResponsesMessageSource = Context["messages"][number] | PreparedSystemPrompt;
+const messageProjections = new WeakMap<ResponsesMessageSource, Map<string, ResponseInput>>();
+
+function publishResponsesProjection(
+  source: ResponsesMessageSource,
+  key: string,
+  output: ResponseInput,
+  immutable: NonNullable<AiTransportHost["immutableData"]>,
+): void {
+  const projections = messageProjections.get(source) ?? new Map<string, ResponseInput>();
+  const oldest = projections.size >= 8 ? projections.keys().next().value : undefined;
+  if (oldest !== undefined) {
+    projections.delete(oldest);
+  }
+  projections.set(key, immutable.freezeJsonSnapshot(output));
+  messageProjections.set(source, projections);
+}
 
 /** Detach hook-editable JSON containers while retaining scalar strings. */
 export function cloneResponsesInputForPayloadHook<T>(value: T): T {
@@ -334,40 +349,8 @@ function convertResponsesMessagesWithStyle(
     transformMessages(replayPlan.messages),
   );
   const nativeOpenAI = supportsNativeOpenAIResponsesEndpoint(model);
-  const tagSystemPrompt = (role: "system" | "developer", instructions: string) =>
-    Object.assign(buildResponsesInputMessage(role, [{ type: "input_text", text: instructions }]), {
-      [RESPONSES_SYSTEM_PROMPT]: true,
-    });
-  let systemPrompt: ReturnType<typeof tagSystemPrompt>[] | undefined;
-  if ((options?.includeSystemPrompt ?? true) && context.systemPrompt) {
-    const instructionRole = resolveResponsesInstructionRole(model);
-    // FORK: when the route exposes a role hierarchy, send the constitutive
-    // identity half at `system` and operational guidance at `developer`, so the
-    // model reads precedence structurally instead of inferring it from prose.
-    // Heavily instruction-tuned reasoners resolve priority by role first; a
-    // single flattened blob gives identity and Discord formatting rules equal
-    // standing. Routes without the hierarchy fall back to upstream's single
-    // message at the resolved instruction role.
-    const identitySplit =
-      instructionRole === "developer"
-        ? splitSystemPromptIdentityBoundary(context.systemPrompt)
-        : undefined;
-    systemPrompt = identitySplit
-      ? [
-          tagSystemPrompt("system", prepareSystemPrompt(identitySplit.identity).instructions),
-          tagSystemPrompt("developer", prepareSystemPrompt(identitySplit.operational).instructions),
-        ]
-      : [
-          tagSystemPrompt(
-            instructionRole,
-            prepareSystemPrompt(context.systemPrompt, context.preparedSystemPrompt).instructions,
-          ),
-        ];
-  }
-  // Compatible endpoints (including xAI /responses/compact) expect the prompt first.
-  if (systemPrompt && !nativeOpenAI) {
-    messages.push(...systemPrompt);
-  }
+  const immutable = getAiTransportHost().immutableData;
+  const instructionRole = resolveResponsesInstructionRole(model);
   // The compact endpoint's output is already canonical provider input, not
   // internal user content to normalize or reinterpret as text/image blocks.
   if (replayPlan.compactedWindow) {
@@ -387,33 +370,56 @@ function convertResponsesMessagesWithStyle(
         : replayPlan.compaction,
     );
   }
-  // OpenAI drops input placed before a compaction item, so the system prompt follows
-  // the checkpoint. It stays in the stored prefix: continuation deltas never repeat it,
-  // and a changed prompt changes that prefix, which forces a full replay.
-  if (systemPrompt && nativeOpenAI) {
-    messages.push(...systemPrompt);
-  }
-  let replayMessages = transformedMessages;
-  // Responses continuation requires the complete prior input before tool output.
-  // Each carrier stays with its preceding user/checkpoint; moving it past an
-  // appended steering user would rewrite the already admitted request prefix.
-  const isCarrier = (message: (typeof replayMessages)[number]) => hasRuntimeContextMarker(message);
-  if (replayMessages.some(isCarrier)) {
-    const anchored: typeof replayMessages = [];
-    // A checkpoint is already emitted above; it anchors an otherwise userless tail.
-    let insertionIndex = replayPlan.compactedWindow || replayPlan.compaction ? 0 : undefined;
-    for (const message of replayMessages) {
-      if (isCarrier(message) && insertionIndex !== undefined) {
-        anchored.splice(insertionIndex++, 0, message);
-        continue;
-      }
-      anchored.push(message);
-      if (!isCarrier(message) && message.role === "user") {
-        insertionIndex = anchored.length;
+  // FORK: when the route exposes a role hierarchy, send the constitutive identity
+  // half at `system` and operational guidance at `developer`, so the model reads
+  // precedence structurally instead of inferring it from prose. Routes without the
+  // hierarchy fall through to upstream's single (cached) instruction message.
+  const identitySplit =
+    (options?.includeSystemPrompt ?? true) &&
+    context.systemPrompt &&
+    instructionRole === "developer"
+      ? splitSystemPromptIdentityBoundary(context.systemPrompt)
+      : undefined;
+  if (identitySplit) {
+    const input = (["system", "developer"] as const).map((role) => ({
+      type: "message" as const,
+      role,
+      content: [
+        {
+          type: "input_text" as const,
+          text: prepareSystemPrompt(
+            role === "system" ? identitySplit.identity : identitySplit.operational,
+          ).instructions,
+        },
+      ],
+      [RESPONSES_SYSTEM_PROMPT]: true,
+    }));
+    // OpenAI drops input before its checkpoint. Compatible endpoints expect the prompt first.
+    messages.splice(nativeOpenAI ? messages.length : 0, 0, ...input);
+  } else if ((options?.includeSystemPrompt ?? true) && context.systemPrompt) {
+    const prompt = prepareSystemPrompt(context.systemPrompt, context.preparedSystemPrompt);
+    const owner = options?.mutableInput ? undefined : immutable;
+    let input = owner && messageProjections.get(prompt)?.get(instructionRole);
+    if (!input) {
+      const item = {
+        type: "message" as const,
+        role: instructionRole,
+        content: [{ type: "input_text" as const, text: prompt.instructions }],
+        [RESPONSES_SYSTEM_PROMPT]: true,
+      };
+      input = [item];
+      if (owner) {
+        publishResponsesProjection(prompt, instructionRole, input, owner);
       }
     }
-    replayMessages = anchored;
+    // OpenAI drops input before its checkpoint. Compatible endpoints expect the prompt first.
+    messages.splice(nativeOpenAI ? messages.length : 0, 0, ...input);
   }
+  // A checkpoint is already emitted above; it anchors an otherwise userless tail.
+  const replayMessages = anchorRuntimeContextCarriers(
+    transformedMessages,
+    Boolean(replayPlan.compactedWindow || replayPlan.compaction),
+  );
   let msgIndex = 0;
   let recoveryAnchor = replayPlan.itemRecovery?.anchor;
   let pastRecoveryBoundary = false;
@@ -665,13 +671,12 @@ function convertResponsesMessagesWithStyle(
     }
     return converted;
   };
-  const immutable = getAiTransportHost().immutableData;
   const projectionKey = JSON.stringify([
     conversionStyle,
     replayContext,
     shouldReplayResponsesItemIds,
     nativeOpenAI,
-    resolveResponsesInstructionRole(model),
+    instructionRole,
     model.input.includes("image"),
     options?.retainUserProvenance === true,
   ]);
@@ -698,7 +703,7 @@ function convertResponsesMessagesWithStyle(
     }
     // Prepared suffix results resolve IDs against the current request's call map.
     // Retained projections already prove source immutability. Images retain their own scalar facts.
-    let projections = responsesMessageProjections.get(msg);
+    const projections = messageProjections.get(msg);
     const reusable =
       immutable &&
       !preparedRequestSuffix.has(context) &&
@@ -713,18 +718,7 @@ function convertResponsesMessagesWithStyle(
     if (!output) {
       output = convertMessage(msg, msgIndex);
       if (reusable) {
-        immutable.freezeJsonSnapshot(output);
-        if (!projections) {
-          projections = new Map();
-          responsesMessageProjections.set(msg, projections);
-        }
-        if (projections.size >= 8) {
-          const oldest = projections.keys().next().value;
-          if (oldest !== undefined) {
-            projections.delete(oldest);
-          }
-        }
-        projections.set(key, output);
+        publishResponsesProjection(msg, key, output, immutable);
       }
     }
     if (reusable && options?.mutableInput) {
@@ -771,3 +765,4 @@ export function convertProviderResponsesMessages<TApi extends Api>(
     "provider",
   );
 }
+/* oxlint-disable max-lines -- FORK: identity/developer split pushes this upstream file just past 700. */
