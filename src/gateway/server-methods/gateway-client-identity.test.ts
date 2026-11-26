@@ -234,6 +234,7 @@ describe("chat send command authority", () => {
     const context = resolveChatSendCallerContext(client);
     expectAuthority(context, true, "cli");
     expect(context).toMatchObject({ SenderId: "cli", SenderName: "CLI", SenderUsername: "CLI" });
+    expect(context.GatewayClientLabel).toBe("CLI");
     expectAuthority(resolveChatSendCallerContext(createClient()), false, "cli");
   });
 

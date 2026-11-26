@@ -404,6 +404,8 @@ export function buildInboundUserContextPrefix(
     message_id: shouldIncludeConversationInfo ? resolvedMessageId : undefined,
     reply_to_id: shouldIncludeConversationInfo ? replyToId : undefined,
     conversation_label: isDirect ? undefined : normalizePromptMetadataString(ctx.ConversationLabel),
+    // Which gateway client (app) sent this turn; webchat alone does not say.
+    client: normalizePromptMetadataString(ctx.GatewayClientLabel),
     sender:
       shouldIncludeConversationInfo &&
       Object.values(senderIdentity).some((value) => value !== undefined)

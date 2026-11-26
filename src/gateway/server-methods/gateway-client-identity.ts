@@ -163,6 +163,10 @@ export function resolveChatSendCallerContext(
         : {}),
       GatewayClientScopes: client?.connect?.scopes ?? [],
       GatewayClientCaps: synthetic ? undefined : (client?.connect?.caps ?? []),
+      GatewayClientLabel: synthetic
+        ? undefined
+        : (normalizeOptionalString(clientInfo?.displayName) ??
+          normalizeOptionalString(clientInfo?.id)),
     },
     commandSenderAuthority,
   );

@@ -386,6 +386,11 @@ export type MsgContext = Partial<CanonicalInboundText> & {
   TurnGrant?: TurnGrant;
   /** Gateway client capabilities when the message originates from the gateway. */
   GatewayClientCaps?: string[];
+  /**
+   * Connect-declared label (display name, else client id) of the gateway client that sent the
+   * message. Tells apart Control UI, mobile apps and CLI turns that all share the internal channel.
+   */
+  GatewayClientLabel?: string;
   /** Server-bound requesting browser; never sourced from message text or rendered into prompts. */
   GatewayUiCommandTarget?: GatewayUiCommandTarget;
   /** Run-scoped plugin tool bindings; never rendered into prompt text. */

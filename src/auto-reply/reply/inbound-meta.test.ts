@@ -307,6 +307,11 @@ describe("buildInboundUserContextPrefix", () => {
       expected: { timestamp: "Sun 2026-02-15T13:35:42Z" },
     },
     {
+      name: "includes the sending gateway client label in direct chats",
+      context: { ChatType: "direct", GatewayClientLabel: "Eyrie" },
+      expected: { client: "Eyrie" },
+    },
+    {
       name: "omits invalid timestamps instead of throwing",
       context: { ChatType: "group", MessageSid: "msg-with-bad-ts", Timestamp: 1e20 },
       expected: { timestamp: undefined },
