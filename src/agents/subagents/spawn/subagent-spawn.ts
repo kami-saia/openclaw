@@ -363,6 +363,7 @@ export async function spawnSubagentDirect(
       spawnMode,
       message: envelope.message,
       spawnedByKey: requesterInternalKey,
+      blind,
       toolSpawnMetadata,
       spawnedWorkspaceDir: params.worktree ? undefined : spawnedWorkspaceDir,
       childSessionKey,

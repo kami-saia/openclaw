@@ -501,3 +501,32 @@ it("projects recorded subagent completions without exposing the private continua
   expect(JSON.stringify(direct)).not.toContain(collected.result);
   expect(projectChatDisplayMessages([direct])[0]?.subagentCompletions).toEqual([completion]);
 });
+
+it("attributes a subagent's spawn task to its parent session", () => {
+  const parent = "agent:main:discord:channel:123";
+  const spawnProvenance = {
+    kind: "inter_session" as const,
+    sourceSessionKey: parent,
+    sourceChannel: "internal",
+    sourceTool: "sessions_spawn",
+    sourceRelation: "parent" as const,
+  };
+  const task = {
+    role: "user",
+    content: annotateInterSessionPromptText("Summarize the logs.", spawnProvenance),
+    provenance: spawnProvenance,
+  };
+  const answer = assistantTextMessage("Done.", 2);
+  expectProjection(
+    [task, answer],
+    [
+      expect.objectContaining({
+        role: "assistant",
+        content: "Summarize the logs.",
+        senderSession: { sessionKey: parent, agentId: "main" },
+        senderLabel: "Forwarded from main",
+      }),
+      answer,
+    ],
+  );
+});

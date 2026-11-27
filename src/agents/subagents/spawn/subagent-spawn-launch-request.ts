@@ -1,6 +1,10 @@
 import type { SessionEntry } from "../../../config/sessions/types.js";
 import type { FreshChildSession } from "../../../gateway/in-process-session-run.js";
 import { stringifyRouteThreadId } from "../../../plugin-sdk/channel-route.js";
+import {
+  INTERNAL_PROVENANCE_SOURCE_CHANNEL,
+  type InputProvenance,
+} from "../../../sessions/input-provenance.js";
 import type { DeliveryContext } from "../../../utils/delivery-context.types.js";
 import type { AdmittedRunOperatorAuthority } from "../../admitted-run-context.js";
 import type { BootstrapContextMode } from "../../bootstrap-files.js";
@@ -17,6 +21,8 @@ export function buildSubagentLaunchRequest(params: {
   spawnMode: SpawnSubagentMode;
   message: string;
   spawnedByKey: string;
+  /** Blind children must not see the requester route, so the task stays unattributed. */
+  blind?: boolean;
   toolSpawnMetadata: Parameters<typeof normalizeSpawnedRunMetadata>[0];
   spawnedWorkspaceDir?: string;
   childSessionKey: string;
@@ -69,6 +75,19 @@ export function buildSubagentLaunchRequest(params: {
               : undefined,
         }),
     idempotencyKey: params.childIdem,
+    // The task is the parent agent's assignment, not owner-authored input; preflight
+    // keeps sourceRelation only when the child's stored spawnedBy matches.
+    ...(params.blind
+      ? {}
+      : {
+          inputProvenance: {
+            kind: "inter_session",
+            sourceSessionKey: params.spawnedByKey,
+            sourceChannel: INTERNAL_PROVENANCE_SOURCE_CHANNEL,
+            sourceTool: "sessions_spawn",
+            sourceRelation: "parent",
+          } satisfies InputProvenance,
+        }),
     deliver: params.completionMode === "thread-direct",
     lane: AGENT_LANE_SUBAGENT,
     disableMessageTool: true,

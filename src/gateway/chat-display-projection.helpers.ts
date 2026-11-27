@@ -322,7 +322,8 @@ export function isProjectedForwardedMessage(message: Record<string, unknown>): b
 function hasForwardedMessageProvenance(message: Record<string, unknown>): boolean {
   const provenance = normalizeInputProvenance(message.provenance);
   return (
-    (provenance?.kind === "inter_session" && provenance.sourceTool === "sessions_send") ||
+    (provenance?.kind === "inter_session" &&
+      (provenance.sourceTool === "sessions_send" || provenance.sourceTool === "sessions_spawn")) ||
     isCronRunMessage(message)
   );
 }

@@ -20,7 +20,6 @@ import {
   isUnscopedSessionKeySentinel,
   normalizeAgentId,
 } from "../../routing/session-key.js";
-import { annotateInterSessionPromptText } from "../../sessions/input-provenance.js";
 import { isCronRunSessionKey, parseAgentSessionKey } from "../../sessions/session-key-utils.js";
 import { formatSystemTurnPrompt } from "../../sessions/system-turn-prompt.js";
 import { normalizeDeliveryContext } from "../../utils/delivery-context.shared.js";
@@ -46,7 +45,9 @@ import {
 } from "./sessions-helpers.js";
 import { prepareSessionsSendCommunication } from "./sessions-send-communication.js";
 import { dispatchSessionsSendFollowup } from "./sessions-send-followup.js";
+import { isForkFireAndForget } from "./sessions-send-fork-fire-and-forget.js";
 import { sendFailure } from "./sessions-send-helpers.js";
+import { buildSessionsSendInput } from "./sessions-send-input-provenance.js";
 import {
   finishSessionsSendReply,
   prepareSessionsSendReplyContext,
@@ -69,7 +70,6 @@ import {
   readSessionsSendTarget,
 } from "./sessions-send-tool.input.js";
 import type { SessionsSendToolOptions } from "./sessions-send-tool.types.js";
-import { isForkFireAndForget } from "./sessions-send-fork-fire-and-forget.js";
 
 export async function executeSessionsSend(
   opts: SessionsSendToolOptions,
@@ -446,14 +446,13 @@ export async function executeSessionsSend(
         /^cron:[^:]+:trigger$/.test(parseAgentSessionKey(requesterSessionKey)?.rest ?? "");
       let targetSession = await readSession(resolvedKey, targetAgentId);
       let targetSessionEntry = targetSession.store[targetSession.canonicalKey];
-      const inputProvenance = {
-        kind: "inter_session" as const,
-        sourceSessionKey: requesterSessionKey,
+      const sendInput = buildSessionsSendInput(message, requesterSessionKey, resolvedKey, {
+        targetEntry: targetSessionEntry,
         sourceChannel: opts?.agentChannel,
-        sourceTool: "sessions_send",
-        ...(requesterIsSubagent ? { sourceRole: "subagent" as const } : {}),
-      };
-      let dispatchMessage = annotateInterSessionPromptText(message, inputProvenance);
+        requesterIsSubagent,
+      });
+      const inputProvenance = sendInput.inputProvenance;
+      let dispatchMessage = sendInput.dispatchMessage;
       let targetAcpMeta = await readAcpSessionMetaForEntryAsync({
         sessionKey: targetSession.canonicalKey,
         agentId: targetSession.agentId,
